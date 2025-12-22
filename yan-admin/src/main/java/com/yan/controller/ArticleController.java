@@ -2,7 +2,6 @@ package com.yan.controller;
 
 import com.yan.domain.ResponseResult;
 import com.yan.domain.dto.ArticleDto;
-import com.yan.domain.entity.Article;
 import com.yan.service.ArticleService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.PostMapping;
