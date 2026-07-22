@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yan.mapper.ArticleSearchOutboxMapper">
+
+  <select id="selectPending" resultType="com.yan.domain.entity.ArticleSearchOutboxEvent">
+    SELECT *
+    FROM yan_article_search_outbox
+    WHERE status = 'PENDING'
+      AND next_retry_at &lt;= NOW(3)
+    ORDER BY id
+    LIMIT #{limit}
+  </select>
+
+  <update id="claim">
+    UPDATE yan_article_search_outbox
+    SET status = 'PROCESSING',
+        locked_until = DATE_ADD(NOW(3), INTERVAL #{leaseSeconds} SECOND),
+        update_time = NOW(3)
+    WHERE id = #{id}
+      AND status = 'PENDING'
+      AND next_retry_at &lt;= NOW(3)
+  </update>
+
+  <update id="markSucceeded">
+    UPDATE yan_article_search_outbox
+    SET status = 'SUCCEEDED',
+        locked_until = NULL,
+        last_error = NULL,
+        update_time = NOW(3)
+    WHERE id = #{id}
+      AND status = 'PROCESSING'
+  </update>
+
+  <update id="markForRetry">
+    UPDATE yan_article_search_outbox
+    SET status = 'PENDING',
+        retry_count = retry_count + 1,
+        next_retry_at = DATE_ADD(NOW(3), INTERVAL #{delaySeconds} SECOND),
+        locked_until = NULL,
+        last_error = #{lastError},
+        update_time = NOW(3)
+    WHERE id = #{id}
+      AND status = 'PROCESSING'
+  </update>
+
+  <update id="recoverExpiredClaims">
+    UPDATE yan_article_search_outbox
+    SET status = 'PENDING',
+        locked_until = NULL,
+        update_time = NOW(3)
+    WHERE status = 'PROCESSING'
+      AND locked_until &lt; NOW(3)
+  </update>
+
+  <update id="requeuePending">
+    UPDATE yan_article_search_outbox
+    SET next_retry_at = NOW(3),
+        last_error = NULL,
+        update_time = NOW(3)
+    WHERE status = 'PENDING'
+  </update>
+
+</mapper>

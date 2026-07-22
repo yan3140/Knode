@@ -1,5 +1,6 @@
 package com.yan.handler.security;
 
+import com.alibaba.fastjson2.JSON;
 import com.yan.domain.ResponseResult;
 import com.yan.enums.AppHttpCodeEnum;
 import com.yan.utils.WebUtils;
@@ -16,8 +17,7 @@ import java.io.IOException;
 public class AccessDeniedHandlerImpl implements AccessDeniedHandler {
     @Override
     public void handle(HttpServletRequest request, HttpServletResponse response, AccessDeniedException accessDeniedException) throws IOException, ServletException {
-        accessDeniedException.printStackTrace();
         ResponseResult responseResult = ResponseResult.errorResult(AppHttpCodeEnum.NO_OPERATOR_AUTH);
-        WebUtils.renderString(response, responseResult.toString());
+        WebUtils.renderString(response, HttpServletResponse.SC_FORBIDDEN, JSON.toJSONString(responseResult));
     }
 }

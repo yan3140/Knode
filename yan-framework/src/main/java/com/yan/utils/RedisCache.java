@@ -39,6 +39,11 @@ public class RedisCache {
         redisTemplate.opsForValue().set(key, value, timeout, timeUnit);
     }
 
+    public <T> boolean setCacheObjectIfAbsent(final String key, final T value,
+                                               final Integer timeout, final TimeUnit timeUnit) {
+        return Boolean.TRUE.equals(redisTemplate.opsForValue().setIfAbsent(key, value, timeout, timeUnit));
+    }
+
     /**
      * 设置有效时间
      *

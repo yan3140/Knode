@@ -1,5 +1,6 @@
 package com.yan.service.impl;
 
+import com.yan.constants.AuthConstants;
 import com.yan.domain.ResponseResult;
 import com.yan.domain.entity.LoginUser;
 import com.yan.domain.entity.User;
@@ -18,6 +19,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class BlogLoginServiceImpl implements BlogLoginService {
@@ -38,9 +40,14 @@ public class BlogLoginServiceImpl implements BlogLoginService {
         //获取userid生成token
         LoginUser loginUser = (LoginUser) authenticate.getPrincipal();
         String userId = loginUser.getUser().getId().toString();
-        String jwt = JwtUtil.createJWT(userId);
+        String jwt = JwtUtil.createJWT(userId, AuthConstants.BLOG_SCOPE);
         //把用户信息存入redis
-        redisCache.setCacheObject("bloglogin:" + userId, loginUser);
+        redisCache.setCacheObject(
+                AuthConstants.loginCacheKey(AuthConstants.BLOG_SCOPE, userId),
+                loginUser,
+                Math.toIntExact(JwtUtil.JWT_TTL / 1000),
+                TimeUnit.SECONDS
+        );
         //把token和userinfo封装返回
         //User转化成UserInfoVo
         UserInfoVo userInfoVo = BeanCopyUtils.copyBean(loginUser.getUser(), UserInfoVo.class);
@@ -56,7 +63,7 @@ public class BlogLoginServiceImpl implements BlogLoginService {
         //获取userId
         Long id = loginUser.getUser().getId();
         //删除redis中的用户信息
-        redisCache.deleteObject("bloglogin:" + id);
+        redisCache.deleteObject(AuthConstants.loginCacheKey(AuthConstants.BLOG_SCOPE, id.toString()));
         return ResponseResult.okResult();
     }
 }

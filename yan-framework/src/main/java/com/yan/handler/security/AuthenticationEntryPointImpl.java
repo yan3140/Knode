@@ -19,7 +19,6 @@ import java.io.IOException;
 public class AuthenticationEntryPointImpl implements AuthenticationEntryPoint {
     @Override
     public void commence(HttpServletRequest request, HttpServletResponse response, AuthenticationException authException) throws IOException, ServletException {
-        authException.printStackTrace();
         ResponseResult result = null;
         if (authException instanceof BadCredentialsException) {
             result = ResponseResult.errorResult(AppHttpCodeEnum.LOGIN_ERROR.getCode(), authException.getMessage());
@@ -29,6 +28,6 @@ public class AuthenticationEntryPointImpl implements AuthenticationEntryPoint {
             result = ResponseResult.errorResult(AppHttpCodeEnum.SYSTEM_ERROR.getCode(), "认证或授权失败");
         }
         //响应给前端
-        WebUtils.renderString(response, JSON.toJSONString(result));
+        WebUtils.renderString(response, HttpServletResponse.SC_UNAUTHORIZED, JSON.toJSONString(result));
     }
 }

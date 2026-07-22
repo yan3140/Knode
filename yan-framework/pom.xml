@@ -11,13 +11,15 @@
 
     <artifactId>yan-framework</artifactId>
 
-    <properties>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
-
     <dependencies>
+        <dependency>
+            <groupId>com.lx</groupId>
+            <artifactId>yan-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lx</groupId>
+            <artifactId>yan-system</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
@@ -32,6 +34,7 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
         <!--SpringSecurity启动器-->
         <dependency>
@@ -77,6 +80,7 @@
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
         </dependency>
         <!--阿里云OSS-->
         <dependency>
@@ -86,6 +90,10 @@
                 <exclusion>
                     <artifactId>httpclient</artifactId>
                     <groupId>org.apache.httpcomponents</groupId>
+                </exclusion>
+                <exclusion>
+                    <groupId>commons-logging</groupId>
+                    <artifactId>commons-logging</artifactId>
                 </exclusion>
             </exclusions>
         </dependency>
@@ -118,10 +126,6 @@
         <dependency>
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework</groupId>
-            <artifactId>spring-webmvc</artifactId>
         </dependency>
 
     </dependencies>

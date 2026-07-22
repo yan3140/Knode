@@ -1,7 +1,6 @@
 package com.yan.utils;
 
 import jakarta.servlet.ServletContext;
-import org.springframework.web.context.request.RequestContextHolder;
 
 import jakarta.servlet.http.HttpServletResponse;
 
@@ -18,8 +17,12 @@ public class WebUtils {
      * @return null
      */
     public static void renderString(HttpServletResponse response, String string) {
+        renderString(response, HttpServletResponse.SC_OK, string);
+    }
+
+    public static void renderString(HttpServletResponse response, int status, String string) {
         try {
-            response.setStatus(200);
+            response.setStatus(status);
             response.setContentType("application/json");
             response.setCharacterEncoding("utf-8");
             response.getWriter().print(string);

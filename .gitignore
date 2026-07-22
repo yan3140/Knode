@@ -36,3 +36,9 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### Frontend build/runtime ###
+**/node_modules/
+**/dist/
+logs/
+*.log

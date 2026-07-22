@@ -10,6 +10,8 @@ import javax.crypto.SecretKey;
 import java.util.Date;
 import java.util.UUID;
 
+import com.yan.constants.AuthConstants;
+
 /**
  * JWT工具类 (已适配 JJWT 0.12.x 版本)
  */
@@ -44,6 +46,12 @@ public class JwtUtil {
     public static String createJWT(String subject, Long ttlMillis) {
         JwtBuilder builder = getJwtBuilder(subject, ttlMillis, getUUID());// 设置过期时间
         return builder.compact();
+    }
+
+    public static String createJWT(String subject, String scope) {
+        return getJwtBuilder(subject, null, getUUID())
+                .claim(AuthConstants.SCOPE_CLAIM, scope)
+                .compact();
     }
 
     private static JwtBuilder getJwtBuilder(String subject, Long ttlMillis, String uuid) {
