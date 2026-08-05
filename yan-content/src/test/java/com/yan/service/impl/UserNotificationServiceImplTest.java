@@ -6,6 +6,7 @@ import com.yan.domain.entity.LoginUser;
 import com.yan.domain.entity.User;
 import com.yan.domain.vo.PageVo;
 import com.yan.mapper.UserNotificationMapper;
+import com.yan.notification.NotificationDeliveryOutboxService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -73,5 +74,15 @@ class UserNotificationServiceImplTest {
 
         assertThat((Map<String, Long>) result.getData()).containsEntry("unreadCount", 3L);
         verify(mapper).countUnread(10L);
+    }
+
+    @Test
+    void notifyShouldUseReliableDeliveryOutboxWhenAvailable() {
+        NotificationDeliveryOutboxService deliveryOutboxService = mock(NotificationDeliveryOutboxService.class);
+        service = new UserNotificationServiceImpl(mapper, deliveryOutboxService);
+
+        service.notify(20L, 10L, 100L, 200L, -1L, "COMMENT", "hello");
+
+        verify(deliveryOutboxService).enqueue(20L, 10L, 100L, 200L, -1L, "COMMENT", "hello");
     }
 }

@@ -2,15 +2,22 @@ CREATE TABLE IF NOT EXISTS yan_notification_outbox (
     id BIGINT NOT NULL AUTO_INCREMENT,
     article_id BIGINT NOT NULL,
     author_id BIGINT NOT NULL,
+    task_key VARCHAR(128) NULL,
     cursor_follower_id BIGINT NOT NULL DEFAULT 0,
     status VARCHAR(20) NOT NULL,
     retry_count INT NOT NULL DEFAULT 0,
+    max_retry INT NOT NULL DEFAULT 8,
     next_retry_at DATETIME(3) NOT NULL,
     locked_until DATETIME(3) NULL,
     last_error VARCHAR(1000) NULL,
+    dead_letter_at DATETIME(3) NULL,
+    process_count INT NOT NULL DEFAULT 0,
+    last_process_at DATETIME(3) NULL,
+    rerun_requested TINYINT NOT NULL DEFAULT 0,
     create_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     update_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     PRIMARY KEY (id),
+    UNIQUE KEY uk_notification_outbox_task_key (task_key),
     KEY idx_notification_outbox_pending (status, next_retry_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文章发布通知 Outbox';
 

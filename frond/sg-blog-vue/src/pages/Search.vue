@@ -41,15 +41,18 @@
               <el-empty v-if="searched && !loading && articles.length === 0" description="没有找到相关文章" />
             </div>
 
-            <el-pagination
-              v-if="total > pageSize"
-              background
-              layout="prev, pager, next"
-              :current-page="pageNum"
-              :page-size="pageSize"
-              :total="total"
-              @current-change="changePage"
-            />
+            <div v-if="searched && articles.length" class="search-load-more">
+              <el-button
+                v-if="hasMore"
+                :loading="loadingMore"
+                round
+                size="small"
+                @click="loadMore"
+              >
+                {{ loadingMore ? '加载中...' : '加载更多' }}
+              </el-button>
+              <span v-else>已经到底啦</span>
+            </div>
           </section>
         </el-col>
         <el-col :sm="24" :md="8">
@@ -77,8 +80,10 @@ export default {
       articles: [],
       total: 0,
       pageNum: 1,
-      pageSize: 10,
+      pageSize: 5,
       loading: false,
+      loadingMore: false,
+      hasMore: false,
       searched: false
     }
   },
@@ -88,15 +93,22 @@ export default {
   created() {
     this.loadFromRoute()
   },
+  mounted() {
+    window.addEventListener('scroll', this.handleScroll)
+  },
+  beforeDestroy() {
+    window.removeEventListener('scroll', this.handleScroll)
+  },
   methods: {
     loadFromRoute() {
       this.keyword = (this.$route.query.keyword || '').trim()
-      this.pageNum = Number(this.$route.query.page) || 1
+      this.pageNum = 1
       if (this.keyword) {
-        this.fetchResults()
+        this.fetchResults(false)
       } else {
         this.articles = []
         this.total = 0
+        this.hasMore = false
         this.searched = false
       }
     },
@@ -105,16 +117,34 @@ export default {
         this.$message.info('请输入要搜索的关键词')
         return
       }
-      this.$router.push({ path: '/Search', query: { keyword: this.keyword, page: 1 } })
+      this.$router.push({ path: '/Search', query: { keyword: this.keyword } })
     },
     clearSearch() {
       this.$router.push({ path: '/Search' })
     },
-    changePage(page) {
-      this.$router.push({ path: '/Search', query: { keyword: this.keyword, page } })
+    loadMore() {
+      if (!this.hasMore || this.loading || this.loadingMore) {
+        return
+      }
+      this.pageNum += 1
+      this.fetchResults(true)
     },
-    fetchResults() {
-      this.loading = true
+    handleScroll() {
+      if (!this.searched || !this.hasMore || this.loading || this.loadingMore) {
+        return
+      }
+      const nearBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 240
+      if (nearBottom) {
+        this.loadMore()
+      }
+    },
+    fetchResults(append) {
+      if (append) {
+        this.loadingMore = true
+      } else {
+        this.loading = true
+        this.articles = []
+      }
       this.searched = true
       searchArticles({
         keyword: this.keyword,
@@ -122,10 +152,13 @@ export default {
         pageSize: this.pageSize,
         sort: 'relevance'
       }).then(response => {
-        this.articles = response.rows || []
+        const rows = response.rows || []
+        this.articles = append ? this.articles.concat(rows) : rows
         this.total = response.total || 0
+        this.hasMore = this.articles.length < this.total
       }).finally(() => {
         this.loading = false
+        this.loadingMore = false
       })
     }
   }
@@ -147,5 +180,6 @@ export default {
 .search-summary-text { margin: 0; color: #5f6572; line-height: 1.75; }
 .search-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .search-tags span { padding: 3px 8px; color: #64609e; font-size: 12px; background: #f1f0f8; border-radius: 12px; }
+.search-load-more { margin: 22px 0 4px; text-align: center; color: #9aa1ae; }
 @media screen and (max-width: 700px) { .search-panel { padding: 20px; } .search-summary { display: block; } .search-summary span { display: block; margin-bottom: 5px; } }
 </style>

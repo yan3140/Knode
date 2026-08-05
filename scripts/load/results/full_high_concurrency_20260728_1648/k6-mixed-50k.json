@@ -1,0 +1,199 @@
+{
+    "metrics": {
+        "http_reqs": {
+            "count": 50000,
+            "rate": 10048.745257394188
+        },
+        "vus": {
+            "value": 148,
+            "min": 148,
+            "max": 500
+        },
+        "http_req_duration": {
+            "min": 0,
+            "med": 42.5762,
+            "max": 118.1125,
+            "p(90)": 81.02822999999998,
+            "p(95)": 87.585,
+            "avg": 48.78203141400003,
+            "thresholds": {
+                "p(95)<1500": false
+            }
+        },
+        "checks": {
+            "passes": 99656,
+            "fails": 344,
+            "thresholds": {
+                "rate>0.99": false
+            },
+            "value": 0.99656
+        },
+        "http_req_connecting": {
+            "avg": 0.06785868599999993,
+            "min": 0,
+            "med": 0,
+            "max": 17.3068,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "http_req_failed": {
+            "passes": 172,
+            "fails": 49828,
+            "thresholds": {
+                "rate<0.01": false
+            },
+            "value": 0.00344
+        },
+        "http_req_duration{expected_response:true}": {
+            "med": 42.611850000000004,
+            "max": 118.1125,
+            "p(90)": 81.07421000000001,
+            "p(95)": 87.63684499999995,
+            "avg": 48.9504208617645,
+            "min": 4.4975
+        },
+        "http_req_tls_handshaking": {
+            "p(95)": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0
+        },
+        "http_req_sending": {
+            "min": 0,
+            "med": 0,
+            "max": 5.8808,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0.016492017999999997
+        },
+        "iterations": {
+            "count": 50000,
+            "rate": 10048.745257394188
+        },
+        "iteration_duration": {
+            "p(90)": 81.4144,
+            "p(95)": 88.0483,
+            "avg": 49.440278934000006,
+            "min": 4.4975,
+            "med": 42.9409,
+            "max": 118.1125
+        },
+        "vus_max": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        },
+        "data_sent": {
+            "count": 9984446,
+            "rate": 2006623.0878041675
+        },
+        "http_req_waiting": {
+            "p(95)": 87.16659499999997,
+            "avg": 48.39246053799924,
+            "min": 0,
+            "med": 42.1477,
+            "max": 117.0804,
+            "p(90)": 80.5885
+        },
+        "http_req_blocked": {
+            "min": 0,
+            "med": 0,
+            "max": 64.7198,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0.2929970640000002
+        },
+        "http_req_receiving": {
+            "avg": 0.3730788580000042,
+            "min": 0,
+            "med": 0.32245,
+            "max": 7.9911,
+            "p(90)": 0.954,
+            "p(95)": 1.1216
+        },
+        "data_received": {
+            "count": 66594762,
+            "rate": 13383875.976295894
+        }
+    },
+    "root_group": {
+        "groups": {},
+        "checks": {
+                "article-detail HTTP 200": {
+                    "name": "article-detail HTTP 200",
+                    "path": "::article-detail HTTP 200",
+                    "id": "17fb9b77b26b9efd548ce1eac11bdea1",
+                    "passes": 9914,
+                    "fails": 172
+                },
+                "article-detail business code 200": {
+                    "name": "article-detail business code 200",
+                    "path": "::article-detail business code 200",
+                    "id": "ad3eb1bba0aebd074fc29b5c5c1fa8f0",
+                    "passes": 9914,
+                    "fails": 172
+                },
+                "view-count HTTP 200": {
+                    "name": "view-count HTTP 200",
+                    "path": "::view-count HTTP 200",
+                    "id": "ea018cd3cd82434436e02a0ca23afa96",
+                    "passes": 10066,
+                    "fails": 0
+                },
+                "view-count business code 200": {
+                    "name": "view-count business code 200",
+                    "path": "::view-count business code 200",
+                    "id": "c5d2bdc62ec8bed45728a9f92c100753",
+                    "passes": 10066,
+                    "fails": 0
+                },
+                "comment-list HTTP 200": {
+                    "name": "comment-list HTTP 200",
+                    "path": "::comment-list HTTP 200",
+                    "id": "3ba1a514bd16d57ba3078101f8fb7541",
+                    "passes": 10023,
+                    "fails": 0
+                },
+                "comment-list business code 200": {
+                    "name": "comment-list business code 200",
+                    "path": "::comment-list business code 200",
+                    "id": "6f82f25d720f3fd3d436dfe014b20477",
+                    "passes": 10023,
+                    "fails": 0
+                },
+                "search HTTP 200": {
+                    "name": "search HTTP 200",
+                    "path": "::search HTTP 200",
+                    "id": "b45797f1a50e221fde485e38396c2a85",
+                    "passes": 9971,
+                    "fails": 0
+                },
+                "search business code 200": {
+                    "passes": 9971,
+                    "fails": 0,
+                    "name": "search business code 200",
+                    "path": "::search business code 200",
+                    "id": "426067b2f84823633cefac3199903b5f"
+                },
+                "hot-article-list HTTP 200": {
+                    "name": "hot-article-list HTTP 200",
+                    "path": "::hot-article-list HTTP 200",
+                    "id": "0f0c2fbddf9d1bd51d89375b74ae38d4",
+                    "passes": 9854,
+                    "fails": 0
+                },
+                "hot-article-list business code 200": {
+                    "name": "hot-article-list business code 200",
+                    "path": "::hot-article-list business code 200",
+                    "id": "29a74c6ec4c6bc6f3ab02b0d73ed4b5c",
+                    "passes": 9854,
+                    "fails": 0
+                }
+            },
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e"
+    }
+}

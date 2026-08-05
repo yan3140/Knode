@@ -2,6 +2,8 @@ package com.yan.blog.controller;
 
 import com.yan.domain.entity.Article;
 import com.yan.domain.ResponseResult;
+import com.yan.ratelimit.RateLimit;
+import com.yan.ratelimit.RateLimitTarget;
 import com.yan.service.ArticleService;
 import com.yan.domain.dto.ArticleDto;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,6 +43,9 @@ public class ArticleController {
     }
 
     @PutMapping("/updateViewCount/{id}")
+    @RateLimit(name = "article:view:ip", target = RateLimitTarget.IP, limit = 300, windowSeconds = 60)
+    @RateLimit(name = "article:view:article", target = RateLimitTarget.IP_AND_PARAM, paramName = "id",
+            limit = 20, windowSeconds = 60)
     public ResponseResult updateViewCount(@PathVariable Long id, HttpServletRequest request) {
         return articleService.updateViewCount(id, visitorFingerprint(request));
     }

@@ -2,6 +2,7 @@ package com.yan.search.repository;
 
 import com.yan.search.model.ArticleSearchDocument;
 import com.yan.search.model.ArticleSearchPage;
+import com.yan.search.model.SearchQuery;
 import com.yan.search.model.SearchSort;
 
 import java.io.IOException;
@@ -17,5 +18,5 @@ public interface ArticleSearchRepository {
 
     void rebuild(List<ArticleSearchDocument> documents) throws IOException;
 
-    ArticleSearchPage search(String keyword, int pageNum, int pageSize, SearchSort sort) throws IOException;
+    ArticleSearchPage search(SearchQuery query) throws IOException;
 }

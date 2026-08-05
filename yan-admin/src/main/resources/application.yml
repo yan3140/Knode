@@ -1,5 +1,11 @@
 server:
   port: 8989
+  tomcat:
+    accept-count: 1000
+    max-connections: 10000
+    threads:
+      max: 400
+      min-spare: 50
 management:
   info:
     env:
@@ -27,6 +33,11 @@ logging:
   pattern:
     level: "%5p requestId=%X{requestId:-}"
 spring:
+  task:
+    scheduling:
+      pool:
+        size: 4
+      thread-name-prefix: yanblog-scheduler-
   datasource:
     url: jdbc:mysql://localhost:3306/yan_blog?characterEncoding=utf8&serverTimezone=Asia/Shanghai
     username: root
@@ -44,7 +55,7 @@ spring:
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
   configuration:
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
   global-config:
     db-config:
       logic-delete-field: delFlag
@@ -52,28 +63,96 @@ mybatis-plus:
       logic-not-delete-value: 0
       id-type: auto
 blog:
+  cache:
+    invalidation:
+      poll-delay-ms: 1000
+      poll-batch-size: 50
+      lease-seconds: 30
+      retry-delay-seconds: 10
+      max-retry-delay-seconds: 300
+      max-retry: 8
+  reliable-task:
+    redis-stream:
+      enabled: true
+      max-len: 100000
+      streams:
+        article-search: yanblog:stream:article-search
+        notification-fanout: yanblog:stream:notification-fanout
+        notification-delivery: yanblog:stream:notification-delivery
+        cache-invalidate: yanblog:stream:cache-invalidate
+      groups:
+        article-search: yanblog-article-search-sync
+        notification-fanout: yanblog-notification-fanout
+        notification-delivery: yanblog-notification-delivery
+        cache-invalidate: yanblog-cache-invalidate
+      consumers:
+        article-search: yanblog-admin
+        notification-fanout: yanblog-admin
+        notification-delivery: yanblog-admin
+        cache-invalidate: yanblog-admin
   observability:
     slow-request-threshold-ms: 500
   search:
     elasticsearch:
       url: http://192.168.25.129:9200
       index-name: yan_blog_articles
+    query:
+      default-page-size: 5
+      max-page-size: 20
+      max-page-num: 50
+      max-keyword-length: 40
+      total-hit-threshold: 10000
+      highlight-content: false
+      cache:
+        enabled: true
+        max-page-size: 20
+        admission-threshold: 2
+        admission-ttl-seconds: 60
+        result-ttl-seconds: 60
+        empty-ttl-seconds: 30
+        jitter-seconds: 30
     sync:
       core-pool-size: 4
       max-pool-size: 8
       queue-capacity: 20
       keep-alive-seconds: 60
     outbox:
+      stream:
+        enabled: true
+        poll-delay-ms: 100
+        consumer-batch-size: 200
+        consumer-count: 4
       poll-delay-ms: 1000
-      lease-seconds: 30
-      batch-size: 100
+      lease-seconds: 60
+      batch-size: 200
       retry-delay-seconds: 10
       max-retry-delay-seconds: 300
+      max-retry: 8
   notification:
     large-author-threshold: 10000
     fanout:
       batch-size: 500
     outbox:
+      stream:
+        enabled: true
+        poll-delay-ms: 200
+        consumer-batch-size: 20
+        consumer-count: 2
       poll-delay-ms: 500
       poll-batch-size: 20
       lease-seconds: 30
+      retry-delay-seconds: 10
+      max-retry-delay-seconds: 300
+      max-retry: 8
+    delivery-outbox:
+      stream:
+        enabled: true
+        poll-delay-ms: 200
+        consumer-batch-size: 50
+        consumer-count: 2
+      poll-delay-ms: 500
+      poll-batch-size: 50
+      lease-seconds: 30
+      retry-delay-seconds: 10
+      max-retry-delay-seconds: 300
+      max-retry: 8

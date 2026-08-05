@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS yan_cache_invalidation_outbox (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  task_key VARCHAR(220) NOT NULL,
+  cache_key VARCHAR(200) NOT NULL,
+  pattern_flag TINYINT NOT NULL DEFAULT 0,
+  status VARCHAR(20) NOT NULL,
+  retry_count INT NOT NULL DEFAULT 0,
+  max_retry INT NOT NULL DEFAULT 8,
+  next_retry_at DATETIME(3) NOT NULL,
+  locked_until DATETIME(3) NULL,
+  last_error VARCHAR(1000) NULL,
+  dead_letter_at DATETIME(3) NULL,
+  process_count INT NOT NULL DEFAULT 0,
+  last_process_at DATETIME(3) NULL,
+  create_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  update_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_cache_invalidation_task_key (task_key),
+  KEY idx_cache_invalidation_pending (status, next_retry_at, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='缓存失效补偿 Outbox';

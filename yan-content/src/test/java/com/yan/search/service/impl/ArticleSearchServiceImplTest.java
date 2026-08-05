@@ -12,6 +12,8 @@ import com.yan.mapper.TagMapper;
 import com.yan.search.model.ArticleSearchDocument;
 import com.yan.search.metrics.ArticleSearchMetrics;
 import com.yan.search.repository.ArticleSearchRepository;
+import com.yan.search.service.ArticleSearchCache;
+import com.yan.search.service.SearchQueryPlanner;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -49,13 +51,17 @@ class ArticleSearchServiceImplTest {
     private ArticleSearchRepository searchRepository;
     @Mock
     private ArticleSearchMetrics searchMetrics;
+    @Mock
+    private SearchQueryPlanner searchQueryPlanner;
+    @Mock
+    private ArticleSearchCache articleSearchCache;
 
     private ArticleSearchServiceImpl searchService;
 
     @BeforeEach
     void setUp() {
         searchService = new ArticleSearchServiceImpl(articleMapper, categoryMapper, articleTagMapper,
-                tagMapper, searchRepository, searchMetrics);
+                tagMapper, searchRepository, searchMetrics, searchQueryPlanner, articleSearchCache);
     }
 
     @Test

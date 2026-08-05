@@ -1,5 +1,8 @@
 package com.yan.utils;
 
+import com.yan.cache.CacheInvalidationRecorder;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -19,9 +22,16 @@ public class CacheClient {
     private static final long LOCK_RETRY_INTERVAL_MILLIS = 25L;
 
     private final RedisCache redisCache;
+    private final CacheInvalidationRecorder invalidationRecorder;
 
     public CacheClient(RedisCache redisCache) {
+        this(redisCache, null);
+    }
+
+    @Autowired
+    public CacheClient(RedisCache redisCache, ObjectProvider<CacheInvalidationRecorder> invalidationRecorderProvider) {
         this.redisCache = redisCache;
+        this.invalidationRecorder = invalidationRecorderProvider == null ? null : invalidationRecorderProvider.getIfAvailable();
     }
 
     @SuppressWarnings("unchecked")
@@ -80,13 +90,40 @@ public class CacheClient {
     public void delete(String key) {
         try {
             redisCache.deleteObject(key);
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException deleteFailure) {
             // Cache invalidation must not roll back a successful database write.
+            recordInvalidation(key, false, deleteFailure);
         }
     }
 
     public void deleteAfterCommit(String... keys) {
         Runnable eviction = () -> Arrays.stream(keys).forEach(this::delete);
+        if (TransactionSynchronizationManager.isActualTransactionActive()
+                && TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    eviction.run();
+                }
+            });
+            return;
+        }
+        eviction.run();
+    }
+
+    public void deletePattern(String pattern) {
+        try {
+            java.util.Collection<String> keys = redisCache.keys(pattern);
+            if (keys != null && !keys.isEmpty()) {
+                redisCache.deleteObject(keys);
+            }
+        } catch (RuntimeException deleteFailure) {
+            recordInvalidation(pattern, true, deleteFailure);
+        }
+    }
+
+    public void deletePatternAfterCommit(String... patterns) {
+        Runnable eviction = () -> Arrays.stream(patterns).forEach(this::deletePattern);
         if (TransactionSynchronizationManager.isActualTransactionActive()
                 && TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
@@ -119,6 +156,18 @@ public class CacheClient {
             redisCache.setCacheObject(key, value, ttlMinutes + jitter, TimeUnit.MINUTES);
         } catch (RuntimeException ignored) {
             // Redis failure degrades to the database result already obtained above.
+        }
+    }
+
+    private void recordInvalidation(String key, boolean pattern, RuntimeException failure) {
+        if (invalidationRecorder == null) {
+            return;
+        }
+        try {
+            invalidationRecorder.record(key, pattern,
+                    failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage());
+        } catch (RuntimeException ignored) {
+            // The database write has already succeeded; invalidation recording must not break callers.
         }
     }
 

@@ -14,11 +14,17 @@ public class ArticleSearchOutboxEvent {
     @TableId
     private Long id;
     private Long articleId;
+    private String taskKey;
     private String status;
     private Integer retryCount;
+    private Integer maxRetry;
     private Date nextRetryAt;
     private Date lockedUntil;
     private String lastError;
+    private Date deadLetterAt;
+    private Integer processCount;
+    private Date lastProcessAt;
+    private Integer rerunRequested;
     @TableField(fill = FieldFill.INSERT)
     private Date createTime;
     @TableField(fill = FieldFill.INSERT_UPDATE)

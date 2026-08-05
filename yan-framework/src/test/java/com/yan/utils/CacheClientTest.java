@@ -1,6 +1,8 @@
 package com.yan.utils;
 
+import com.yan.cache.CacheInvalidationRecorder;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -10,6 +12,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,5 +58,20 @@ class CacheClientTest {
                 .queryWithMutex("key", 10, 5, () -> "database");
 
         assertThat(value).isEqualTo("database");
+    }
+
+    @Test
+    void recordsInvalidationWhenDeleteFails() {
+        RedisCache redisCache = mock(RedisCache.class);
+        CacheInvalidationRecorder recorder = mock(CacheInvalidationRecorder.class);
+        ObjectProvider<CacheInvalidationRecorder> recorderProvider = mock(ObjectProvider.class);
+        when(recorderProvider.getIfAvailable()).thenReturn(recorder);
+        org.mockito.Mockito.doThrow(new RuntimeException("redis down"))
+                .when(redisCache).deleteObject("article:1");
+
+        new CacheClient(redisCache, recorderProvider).delete("article:1");
+
+        verify(recorder).record("article:1", false, "redis down");
+        verifyNoMoreInteractions(recorder);
     }
 }

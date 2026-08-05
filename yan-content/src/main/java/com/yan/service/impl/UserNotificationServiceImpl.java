@@ -9,6 +9,8 @@ import com.yan.enums.AppHttpCodeEnum;
 import com.yan.exception.SystemException;
 import com.yan.mapper.UserNotificationMapper;
 import com.yan.mapper.UserFollowMapper;
+import com.yan.notification.NotificationDeliveryOutboxService;
+import com.yan.reliabletask.ReliableTaskKeys;
 import com.yan.service.UserNotificationService;
 import com.yan.utils.SecurityUtils;
 import org.springframework.stereotype.Service;
@@ -22,12 +24,20 @@ import java.util.Objects;
 @Service
 public class UserNotificationServiceImpl implements UserNotificationService {
     private final UserNotificationMapper userNotificationMapper;
+    private final NotificationDeliveryOutboxService deliveryOutboxService;
 
     @Autowired
     private UserFollowMapper userFollowMapper;
 
     public UserNotificationServiceImpl(UserNotificationMapper userNotificationMapper) {
+        this(userNotificationMapper, null);
+    }
+
+    @Autowired
+    public UserNotificationServiceImpl(UserNotificationMapper userNotificationMapper,
+                                       NotificationDeliveryOutboxService deliveryOutboxService) {
         this.userNotificationMapper = userNotificationMapper;
+        this.deliveryOutboxService = deliveryOutboxService;
     }
 
     @Override
@@ -76,7 +86,12 @@ public class UserNotificationServiceImpl implements UserNotificationService {
         if (receiverId == null || actorId == null || receiverId.equals(actorId)) {
             return;
         }
+        if (deliveryOutboxService != null) {
+            deliveryOutboxService.enqueue(receiverId, actorId, articleId, commentId, rootCommentId, type, content);
+            return;
+        }
         UserNotification notification = new UserNotification();
+        notification.setDedupeKey(ReliableTaskKeys.directNotification(type, receiverId, actorId, articleId, commentId, rootCommentId));
         notification.setReceiverId(receiverId);
         notification.setActorId(actorId);
         notification.setArticleId(articleId);
@@ -85,7 +100,7 @@ public class UserNotificationServiceImpl implements UserNotificationService {
         notification.setType(type);
         notification.setContent(content);
         notification.setIsRead(0);
-        userNotificationMapper.insert(notification);
+        userNotificationMapper.insertIgnore(notification);
     }
 
     @Override
@@ -102,6 +117,7 @@ public class UserNotificationServiceImpl implements UserNotificationService {
                     notification.setActorId(authorId);
                     notification.setArticleId(articleId);
                     notification.setType("ARTICLE_PUBLISHED");
+                    notification.setDedupeKey("ARTICLE_PUBLISHED:" + articleId + ":" + followerId);
                     notification.setContent(null);
                     notification.setIsRead(0);
                     return notification;

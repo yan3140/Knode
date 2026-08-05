@@ -23,6 +23,7 @@ public class UserNotification {
     private Long articleId;
     private Long commentId;
     private Long rootCommentId;
+    private String dedupeKey;
     private String type;
     private String content;
     private Integer isRead;

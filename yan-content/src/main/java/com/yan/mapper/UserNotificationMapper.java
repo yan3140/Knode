@@ -16,6 +16,8 @@ public interface UserNotificationMapper extends BaseMapper<UserNotification> {
     int markRead(@Param("id") Long id, @Param("receiverId") Long receiverId);
     int markAllRead(@Param("receiverId") Long receiverId);
     int deleteByIdAndReceiver(@Param("id") Long id, @Param("receiverId") Long receiverId);
+    int insertIgnore(@Param("item") UserNotification item);
+    int countByDedupeKey(@Param("dedupeKey") String dedupeKey);
     int insertBatch(@Param("items") List<UserNotification> items);
     int insertBatchIgnore(@Param("items") List<UserNotification> items);
 }

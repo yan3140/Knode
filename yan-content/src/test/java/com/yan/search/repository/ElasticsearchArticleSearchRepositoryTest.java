@@ -8,8 +8,10 @@ import co.elastic.clients.elasticsearch.indices.CreateIndexResponse;
 import co.elastic.clients.elasticsearch.indices.ElasticsearchIndicesClient;
 import co.elastic.clients.elasticsearch.indices.ExistsRequest;
 import co.elastic.clients.transport.endpoints.BooleanResponse;
+import co.elastic.clients.util.NamedValue;
 import com.yan.search.config.ElasticsearchProperties;
 import com.yan.search.model.ArticleSearchDocument;
+import com.yan.search.model.SearchQuery;
 import com.yan.search.model.SearchSort;
 import org.junit.jupiter.api.Test;
 
@@ -29,13 +31,17 @@ class ElasticsearchArticleSearchRepositoryTest {
         ElasticsearchArticleSearchRepository repository = new ElasticsearchArticleSearchRepository(
                 mock(ElasticsearchClient.class), new ElasticsearchProperties());
 
-        SearchRequest request = repository.searchRequest("Spring Boot", 2, 10, SearchSort.HOT);
+        SearchRequest request = repository.searchRequest(new SearchQuery(
+                "Spring Boot", 2, 10, SearchSort.HOT, false, 10_000, true, "cache-key"));
 
         assertThat(request.from()).isEqualTo(10);
         assertThat(request.size()).isEqualTo(10);
+        assertThat(request.trackTotalHits().count()).isEqualTo(10_000);
         assertThat(request.query().multiMatch().fields())
                 .containsExactly("title^5", "summary^3", "content", "categoryName^2", "tagNames^2");
         assertThat(request.highlight().preTags()).containsExactly("<em>");
+        assertThat(request.highlight().fields().stream().map(NamedValue::name).toList())
+                .doesNotContain("content");
         assertThat(request.sort().get(0).field().field()).isEqualTo("viewCount");
         assertThat(request.sort().get(0).field().order()).isEqualTo(co.elastic.clients.elasticsearch._types.SortOrder.Desc);
     }

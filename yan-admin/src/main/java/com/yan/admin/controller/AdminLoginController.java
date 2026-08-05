@@ -7,6 +7,8 @@ import com.yan.domain.vo.AdminUserInfoVo;
 import com.yan.domain.vo.UserInfoVo;
 import com.yan.enums.AppHttpCodeEnum;
 import com.yan.exception.SystemException;
+import com.yan.ratelimit.RateLimit;
+import com.yan.ratelimit.RateLimitTarget;
 import com.yan.service.LoginService;
 import com.yan.service.MenuService;
 import com.yan.service.RoleService;
@@ -31,6 +33,9 @@ public class AdminLoginController {
     private RoleService roleService;
 
     @PostMapping({"/user/login", "/api/admin/auth/login"})
+    @RateLimit(name = "admin:login:ip", target = RateLimitTarget.IP, limit = 15, windowSeconds = 300)
+    @RateLimit(name = "admin:login:username", target = RateLimitTarget.PARAM, paramName = "userName",
+            limit = 5, windowSeconds = 300)
     public ResponseResult login(@RequestBody User user) {
         if (!StringUtils.hasText(user.getUserName())) {
             throw new SystemException(AppHttpCodeEnum.REQUIRE_USERNAME);

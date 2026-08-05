@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.yan.domain.ResponseResult;
+import com.yan.constants.CacheConstants;
 import com.yan.domain.constants.SystemConstants;
 import com.yan.domain.entity.Comment;
 import com.yan.domain.entity.Article;
@@ -18,6 +19,7 @@ import com.yan.mapper.UserMapper;
 import com.yan.service.CommentService;
 import com.yan.service.UserNotificationService;
 import com.yan.utils.BeanCopyUtils;
+import com.yan.utils.CacheClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -45,16 +47,32 @@ public class CommentServiceImpl extends ServiceImpl<CommentMapper, Comment> impl
     private ArticleMapper articleMapper;
     @Autowired
     private UserNotificationService userNotificationService;
+    @Autowired
+    private CacheClient cacheClient;
 
     @Override
     public ResponseResult commentList(String commentType, Long articleId, Integer pageNum, Integer pageSize) {
+        long safePageNum = normalizePageNum(pageNum);
+        long safePageSize = normalizePageSize(pageSize);
+        if (isArticleFirstPage(commentType, articleId, safePageNum, safePageSize)) {
+            return cacheClient.queryWithMutex(
+                    commentFirstPageKey(articleId),
+                    CacheConstants.ARTICLE_COMMENT_TTL_MINUTES,
+                    CacheConstants.TTL_JITTER_MINUTES,
+                    () -> loadCommentList(commentType, articleId, safePageNum, safePageSize)
+            );
+        }
+        return loadCommentList(commentType, articleId, safePageNum, safePageSize);
+    }
+
+    private ResponseResult loadCommentList(String commentType, Long articleId, long pageNum, long pageSize) {
         LambdaQueryWrapper<Comment> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.eq(SystemConstants.ARTICLE_COMMENT.equals(commentType), Comment::getArticleId, articleId);
         queryWrapper.eq(Comment::getRootId, -1);
         queryWrapper.eq(Comment::getType, commentType);
         queryWrapper.orderByAsc(Comment::getCreateTime);
 
-        Page<Comment> page = new Page<>(normalizePageNum(pageNum), normalizePageSize(pageSize));
+        Page<Comment> page = new Page<>(pageNum, pageSize);
         page(page, queryWrapper);
         List<Comment> rootComments = page.getRecords();
         if (rootComments.isEmpty()) {
@@ -83,8 +101,16 @@ public class CommentServiceImpl extends ServiceImpl<CommentMapper, Comment> impl
             throw new SystemException(AppHttpCodeEnum.CONTENT_NOT_NULL);
         }
         save(comment);
+        evictCommentCache(comment);
         createCommentNotification(comment);
         return ResponseResult.okResult();
+    }
+
+    private void evictCommentCache(Comment comment) {
+        if (SystemConstants.ARTICLE_COMMENT.equals(comment.getType()) && comment.getArticleId() != null
+                && cacheClient != null) {
+            cacheClient.deleteAfterCommit(commentFirstPageKey(comment.getArticleId()));
+        }
     }
 
     private void createCommentNotification(Comment comment) {
@@ -145,6 +171,17 @@ public class CommentServiceImpl extends ServiceImpl<CommentMapper, Comment> impl
 
     private long normalizePageSize(Integer pageSize) {
         return pageSize == null || pageSize < 1 ? 10L : Math.min(pageSize, 100);
+    }
+
+    private boolean isArticleFirstPage(String commentType, Long articleId, long pageNum, long pageSize) {
+        return SystemConstants.ARTICLE_COMMENT.equals(commentType)
+                && articleId != null
+                && pageNum == 1L
+                && pageSize == 10L;
+    }
+
+    private String commentFirstPageKey(Long articleId) {
+        return CacheConstants.ARTICLE_COMMENT_FIRST_PAGE_PREFIX + articleId;
     }
 }
 

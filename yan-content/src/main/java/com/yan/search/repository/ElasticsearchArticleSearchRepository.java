@@ -21,6 +21,7 @@ import com.yan.domain.vo.SearchArticleVo;
 import com.yan.search.config.ElasticsearchProperties;
 import com.yan.search.model.ArticleSearchDocument;
 import com.yan.search.model.ArticleSearchPage;
+import com.yan.search.model.SearchQuery;
 import com.yan.search.model.SearchSort;
 import org.springframework.stereotype.Repository;
 
@@ -101,21 +102,21 @@ public class ElasticsearchArticleSearchRepository implements ArticleSearchReposi
     }
 
     @Override
-    public ArticleSearchPage search(String keyword, int pageNum, int pageSize, SearchSort sort) throws IOException {
+    public ArticleSearchPage search(SearchQuery query) throws IOException {
         ensureIndex();
         SearchResponse<ArticleSearchDocument> response = client.search(
-                searchRequest(keyword, pageNum, pageSize, sort), ArticleSearchDocument.class);
+                searchRequest(query), ArticleSearchDocument.class);
         return parseSearchPage(response);
     }
 
-    SearchRequest searchRequest(String keyword, int pageNum, int pageSize, SearchSort sort) {
-        return new SearchRequest.Builder()
+    SearchRequest searchRequest(SearchQuery query) {
+        SearchRequest.Builder builder = new SearchRequest.Builder()
                 .index(indexName)
-                .from((pageNum - 1) * pageSize)
-                .size(pageSize)
-                .trackTotalHits(track -> track.enabled(true))
-                .query(query -> query.multiMatch(multiMatch -> multiMatch
-                        .query(keyword)
+                .from(query.from())
+                .size(query.pageSize())
+                .trackTotalHits(track -> track.count(query.totalHitThreshold()))
+                .query(value -> value.multiMatch(multiMatch -> multiMatch
+                        .query(query.keyword())
                         .type(TextQueryType.BestFields)
                         .fields("title^5", "summary^3", "content", "categoryName^2", "tagNames^2")))
                 .source(source -> source.filter(filter -> filter.includes(
@@ -128,11 +129,22 @@ public class ElasticsearchArticleSearchRepository implements ArticleSearchReposi
                         .fields(
                                 highlightField("title", 0, null),
                                 highlightField("summary", 1, 160),
-                                highlightField("content", 1, 160),
                                 highlightField("categoryName", 0, null),
                                 highlightField("tagNames", 0, null)))
-                .sort(sortOptions(sort))
-                .build();
+                .sort(sortOptions(query.sort()));
+        if (query.highlightContent()) {
+            builder.highlight(highlight -> highlight
+                    .preTags("<em>")
+                    .postTags("</em>")
+                    .requireFieldMatch(false)
+                    .fields(
+                            highlightField("title", 0, null),
+                            highlightField("summary", 1, 160),
+                            highlightField("content", 1, 160),
+                            highlightField("categoryName", 0, null),
+                            highlightField("tagNames", 0, null)));
+        }
+        return builder.build();
     }
 
     BulkRequest bulkSynchronizeRequest(List<ArticleSearchDocument> documents,

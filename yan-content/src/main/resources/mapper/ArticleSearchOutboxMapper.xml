@@ -2,6 +2,22 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.yan.mapper.ArticleSearchOutboxMapper">
 
+  <insert id="enqueue">
+    INSERT INTO yan_article_search_outbox(article_id, task_key, status, retry_count, max_retry, next_retry_at, rerun_requested)
+    VALUES(#{articleId}, #{taskKey}, 'PENDING', 0, #{maxRetry}, NOW(3), 0)
+    ON DUPLICATE KEY UPDATE
+      article_id = VALUES(article_id),
+      max_retry = VALUES(max_retry),
+      retry_count = CASE WHEN status IN ('SUCCEEDED', 'FAILED') THEN 0 ELSE retry_count END,
+      next_retry_at = CASE WHEN status = 'PROCESSING' THEN next_retry_at ELSE NOW(3) END,
+      locked_until = CASE WHEN status = 'PROCESSING' THEN locked_until ELSE NULL END,
+      last_error = NULL,
+      dead_letter_at = NULL,
+      rerun_requested = CASE WHEN status = 'PROCESSING' THEN 1 ELSE 0 END,
+      status = CASE WHEN status = 'PROCESSING' THEN status ELSE 'PENDING' END,
+      update_time = NOW(3)
+  </insert>
+
   <select id="selectPending" resultType="com.yan.domain.entity.ArticleSearchOutboxEvent">
     SELECT *
     FROM yan_article_search_outbox
@@ -23,9 +39,20 @@
 
   <update id="markSucceeded">
     UPDATE yan_article_search_outbox
-    SET status = 'SUCCEEDED',
+    SET status = CASE WHEN rerun_requested = 1 THEN 'PENDING' ELSE 'SUCCEEDED' END,
         locked_until = NULL,
         last_error = NULL,
+        next_retry_at = CASE WHEN rerun_requested = 1 THEN NOW(3) ELSE next_retry_at END,
+        rerun_requested = 0,
+        update_time = NOW(3)
+    WHERE id = #{id}
+      AND status = 'PROCESSING'
+  </update>
+
+  <update id="markProcessingStarted">
+    UPDATE yan_article_search_outbox
+    SET process_count = process_count + 1,
+        last_process_at = NOW(3),
         update_time = NOW(3)
     WHERE id = #{id}
       AND status = 'PROCESSING'
@@ -33,11 +60,12 @@
 
   <update id="markForRetry">
     UPDATE yan_article_search_outbox
-    SET status = 'PENDING',
-        retry_count = retry_count + 1,
-        next_retry_at = DATE_ADD(NOW(3), INTERVAL #{delaySeconds} SECOND),
+    SET status = CASE WHEN retry_count + 1 &gt;= max_retry THEN 'FAILED' ELSE 'PENDING' END,
+        next_retry_at = CASE WHEN retry_count + 1 &gt;= max_retry THEN next_retry_at ELSE DATE_ADD(NOW(3), INTERVAL #{delaySeconds} SECOND) END,
         locked_until = NULL,
         last_error = #{lastError},
+        dead_letter_at = CASE WHEN retry_count + 1 &gt;= max_retry THEN NOW(3) ELSE dead_letter_at END,
+        retry_count = retry_count + 1,
         update_time = NOW(3)
     WHERE id = #{id}
       AND status = 'PROCESSING'
@@ -54,10 +82,25 @@
 
   <update id="requeuePending">
     UPDATE yan_article_search_outbox
-    SET next_retry_at = NOW(3),
+    SET retry_count = CASE WHEN status = 'FAILED' THEN 0 ELSE retry_count END,
+        status = 'PENDING',
+        next_retry_at = NOW(3),
+        locked_until = NULL,
         last_error = NULL,
+        dead_letter_at = NULL,
+        rerun_requested = 0,
         update_time = NOW(3)
-    WHERE status = 'PENDING'
+    WHERE status IN ('PENDING', 'FAILED')
   </update>
+
+  <select id="sumProcessCount" resultType="java.lang.Long">
+    SELECT COALESCE(SUM(process_count), 0)
+    FROM yan_article_search_outbox
+  </select>
+
+  <select id="maxProcessCount" resultType="java.lang.Integer">
+    SELECT COALESCE(MAX(process_count), 0)
+    FROM yan_article_search_outbox
+  </select>
 
 </mapper>

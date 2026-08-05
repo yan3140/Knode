@@ -53,7 +53,7 @@ YanBlog 当前是一个多模块 Spring Boot 项目：
 | 查询性能 | 评论树存在根评论循环查子评论的模式，容易出现 N+1 查询 | 高并发评论列表场景容易被追问 |
 | 权限深度 | 有 RBAC 雏形，但权限查询、缓存、前后台隔离还不完整 | 可以作为基础，不宜夸大 |
 | 搜索能力 | 没有全文检索，文章搜索若用数据库 LIKE 会比较普通 | 缺少内容平台的强亮点 |
-| 异步能力 | 除定时任务外，缺少消息队列/事件驱动 | “削峰、解耦、失败重试”不好讲 |
+| 异步能力 | 除定时任务外，缺少Redis Stream 队列/事件驱动 | “削峰、解耦、失败重试”不好讲 |
 | AI 能力 | 当前没有 AI 摘要、标签推荐、站内问答 | 与当前求职热点 AI 应用结合不足 |
 | 可观测性 | 没有 Actuator/Micrometer/Grafana/k6 压测记录 | 不能写真实 QPS、P95 延迟、错误率 |
 
@@ -71,7 +71,7 @@ YanBlog 当前是一个多模块 Spring Boot 项目：
 
 1. 不改业务主线，仍然是博客项目。
 2. 能自然解释高并发场景：热门文章、浏览量、评论、搜索、登录、AI 调用。
-3. 能体现后端能力：Redis、MySQL、Spring Security、消息队列、Elasticsearch、AI/RAG、监控压测。
+3. 能体现后端能力：Redis、MySQL、Spring Security、Redis Stream 队列、Elasticsearch、AI/RAG、监控压测。
 4. 与 OpsPilot 不冲突：OpsPilot 是 AI 运维诊断；YanBlog 是高性能内容平台，可以形成两个方向不同的简历项目。
 
 ## 3. 总体升级路线
@@ -115,9 +115,9 @@ flowchart LR
 
     ManageModule --> EventModule["内容事件 Module"]
     ContentModule --> EventModule
-    EventModule --> MQ["消息队列"]
-    MQ --> SearchSync["搜索索引同步 Adapter"]
-    MQ --> AiTask["AI 摘要/标签 Adapter"]
+    EventModule --> Redis Stream["Redis Stream 队列"]
+    Redis Stream --> SearchSync["搜索索引同步 Adapter"]
+    Redis Stream --> AiTask["AI 摘要/标签 Adapter"]
 
     SearchSync --> ES["Elasticsearch"]
     AiTask --> LLM["大模型服务"]
@@ -131,7 +131,7 @@ flowchart LR
 
 - **文章阅读 Module**：对外提供文章详情、热门文章、列表查询；内部隐藏 Redis 缓存、MySQL 回源、缓存重建细节。
 - **互动计数 Module**：对外提供浏览/点赞/收藏计数；内部隐藏 Redis 原子计数、脏数据集合、定时批量落库。
-- **内容事件 Module**：对外提供“文章已发布/文章已更新/文章已删除”等事件接口；内部隐藏消息队列、重试、死信和补偿逻辑。
+- **内容事件 Module**：对外提供“文章已发布/文章已更新/文章已删除”等事件接口；内部隐藏Redis Stream 队列、重试、死信和补偿逻辑。
 - **搜索 Module**：对外提供搜索接口；内部隐藏 ES 查询 DSL、高亮、分页、索引同步。
 - **AI 内容 Module**：对外提供摘要、标签推荐、站内问答；内部隐藏 Prompt、RAG、模型限流、降级。
 
@@ -166,13 +166,13 @@ flowchart LR
    - 演示账号说明
    - 已验证能力与未验证能力
 
-2. 新增 `docs/architecture.md`
+2. 新增 `docs/当前架构.md`
    - 当前多模块结构
    - 前台、后台、公共层关系
    - 数据流说明
    - 缓存、搜索、异步、AI 的演进路线
 
-3. 新增 `docs/runbook-local.md`
+3. 新增 `docs/本地运行手册.md`
    - JDK、Maven、MySQL、Redis 版本
    - 数据库初始化步骤
    - 常见启动失败排查
@@ -180,7 +180,7 @@ flowchart LR
 4. 新增 `docker-compose.yml`
    - MySQL
    - Redis
-   - 后续可追加 Elasticsearch、Kafka/RabbitMQ、Prometheus、Grafana
+   - 后续可追加 Elasticsearch、Kafka/Redis Stream、Prometheus、Grafana
 
 5. 配置安全改造
    - 将 `application.yml` 中的真实连接信息改为 `${MYSQL_HOST}`、`${MYSQL_PASSWORD}` 等环境变量。
@@ -395,16 +395,16 @@ flowchart LR
    - ES 是搜索视图，允许短暂延迟。
    - 搜索结果点击文章详情时仍以 MySQL/Redis 详情为准。
 
-### 消息队列选择
+### Redis Stream 队列选择
 
 建议二选一：
 
 | 方案 | 优点 | 缺点 | 建议 |
 |---|---|---|---|
-| RabbitMQ | 简单、适合任务队列、学习成本低 | 大数据流式能力不如 Kafka | 博客项目更推荐 |
+| Redis Stream | 简单、适合任务队列、学习成本低 | 大数据流式能力不如 Kafka | 博客项目更推荐 |
 | Kafka | 简历辨识度高、吞吐强、适合事件流 | 部署和解释成本更高 | 如果你想和 OpsPilot 技术栈呼应，可选 |
 
-如果目标是“更稳地完成简历项目”，优先 RabbitMQ。  
+如果目标是“更稳地完成简历项目”，优先 Redis Stream。  
 如果目标是“和 OpsPilot 一起展示 Kafka 能力”，可以选 Kafka，但要保证能讲清楚分区、消费组、重试和死信。
 
 ### 验收标准
@@ -509,7 +509,7 @@ AI 是加分项，不是项目主线。不要在没有评测前写“准确率�
      - Redis 命中率
      - MySQL 连接池
      - JVM GC
-     - 消息队列堆积
+     - Redis Stream 队列堆积
      - AI 调用耗时和失败率
 
 3. 结构化日志
@@ -526,7 +526,7 @@ AI 是加分项，不是项目主线。不要在没有评测前写“准确率�
    - `ai-qa.js`，如果实现 AI
 
 5. 压测报告
-   - `docs/performance-report.md`
+   - `docs/性能优化验证报告.md`
    - 记录：
      - 机器环境
      - JDK 版本
@@ -562,7 +562,7 @@ AI 是加分项，不是项目主线。不要在没有评测前写“准确率�
 
 ### 技术栈
 
-Spring Boot｜Spring Security｜JWT｜MyBatis-Plus｜MySQL｜Redis｜Elasticsearch｜RabbitMQ/Kafka｜Spring AI｜Prometheus｜Grafana｜k6｜Aliyun OSS
+Spring Boot｜Spring Security｜JWT｜MyBatis-Plus｜MySQL｜Redis｜Elasticsearch｜Redis Stream/Kafka｜Spring AI｜Prometheus｜Grafana｜k6｜Aliyun OSS
 
 ### 核心职责写法
 
@@ -625,7 +625,7 @@ Spring Boot｜Spring Security｜JWT｜MyBatis-Plus｜MySQL｜Redis｜Elasticsear
 1. 引入 Elasticsearch。
 2. 建文章索引 mapping。
 3. 实现搜索接口。
-4. 引入 RabbitMQ 或 Kafka。
+4. 引入 Redis Stream 或 Kafka。
 5. 文章发布/更新/删除异步同步索引。
 6. 加重试和补偿接口。
 
@@ -663,7 +663,7 @@ YanBlog 最初是一个基础博客项目，包含文章、分类、标签、评
    因为热门文章会产生大量重复写入，直接写库会放大行锁和磁盘 IO 压力。Redis 的 `HINCRBY` 是原子操作，适合承接高频计数；MySQL 作为持久化事实来源，通过定时批量落库降低写压力。
 
 2. **Redis 计数丢了怎么办？**  
-   当前设计应承认存在 Redis 到 MySQL 的同步窗口。改进方式是 dirty set 标记待同步文章、失败不删除 dirty 标记、应用关闭前尽量刷盘。如果要进一步增强，可以把计数变更写入消息队列或 Redis Stream，但 MVP 阶段先保证可解释和可测试。
+   当前设计应承认存在 Redis 到 MySQL 的同步窗口。改进方式是 dirty set 标记待同步文章、失败不删除 dirty 标记、应用关闭前尽量刷盘。如果要进一步增强，可以把计数变更写入Redis Stream 队列或 Redis Stream，但 MVP 阶段先保证可解释和可测试。
 
 3. **缓存击穿怎么处理？**  
    热点文章详情过期时，只允许一个请求通过 Redis `SETNX` 获得重建锁并回源 MySQL，其他请求短暂等待后重读缓存。锁必须设置 TTL，避免服务异常导致死锁。

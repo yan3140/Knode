@@ -19,7 +19,7 @@ import java.util.Map;
 import java.util.concurrent.ThreadPoolExecutor;
 
 @Configuration
-@EnableConfigurationProperties({ElasticsearchProperties.class, SearchSyncProperties.class})
+@EnableConfigurationProperties({ElasticsearchProperties.class, SearchSyncProperties.class, SearchQueryProperties.class})
 public class ElasticsearchConfig {
 
     @Bean(destroyMethod = "close")

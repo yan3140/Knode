@@ -2,6 +2,7 @@ package com.yan.constants;
 
 public final class CacheConstants {
     public static final String ARTICLE_DETAIL_PREFIX = "blog:article:detail:";
+    public static final String ARTICLE_COMMENT_FIRST_PAGE_PREFIX = "blog:article:comment:first-page:";
     public static final String HOT_ARTICLE_LIST = "blog:article:hot:list";
     public static final String CATEGORY_LIST = "blog:category:list";
     public static final String ALL_CATEGORY_LIST = "blog:category:all";
@@ -11,8 +12,10 @@ public final class CacheConstants {
     public static final String ARTICLE_VIEW_COUNT_PUBLISHED = "blog:article:view-count:published";
     public static final String ARTICLE_VIEWED_PREFIX = "blog:article:viewed:";
     public static final String LEGACY_ARTICLE_VIEW_COUNT = "article:viewCount";
+    public static final String SEARCH_RESULT_PATTERN = "blog:search:result:*";
 
     public static final int ARTICLE_DETAIL_TTL_MINUTES = 30;
+    public static final int ARTICLE_COMMENT_TTL_MINUTES = 5;
     public static final int HOT_ARTICLE_TTL_MINUTES = 10;
     public static final int DICTIONARY_TTL_MINUTES = 60;
     public static final int TTL_JITTER_MINUTES = 10;

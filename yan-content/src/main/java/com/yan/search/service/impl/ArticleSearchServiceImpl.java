@@ -16,14 +16,15 @@ import com.yan.mapper.CategoryMapper;
 import com.yan.mapper.TagMapper;
 import com.yan.search.model.ArticleSearchDocument;
 import com.yan.search.model.ArticleSearchPage;
-import com.yan.search.model.SearchSort;
 import com.yan.search.metrics.ArticleSearchMetrics;
 import com.yan.search.repository.ArticleSearchRepository;
+import com.yan.search.model.SearchQuery;
+import com.yan.search.service.ArticleSearchCache;
 import com.yan.search.service.ArticleSearchService;
+import com.yan.search.service.SearchQueryPlanner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.util.StringUtils;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -48,42 +49,50 @@ public class ArticleSearchServiceImpl implements ArticleSearchService {
     private final TagMapper tagMapper;
     private final ArticleSearchRepository searchRepository;
     private final ArticleSearchMetrics searchMetrics;
+    private final SearchQueryPlanner searchQueryPlanner;
+    private final ArticleSearchCache articleSearchCache;
 
     public ArticleSearchServiceImpl(ArticleMapper articleMapper,
                                     CategoryMapper categoryMapper,
                                     ArticleTagMapper articleTagMapper,
                                     TagMapper tagMapper,
                                     ArticleSearchRepository searchRepository,
-                                    ArticleSearchMetrics searchMetrics) {
+                                    ArticleSearchMetrics searchMetrics,
+                                    SearchQueryPlanner searchQueryPlanner,
+                                    ArticleSearchCache articleSearchCache) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
         this.articleTagMapper = articleTagMapper;
         this.tagMapper = tagMapper;
         this.searchRepository = searchRepository;
         this.searchMetrics = searchMetrics;
+        this.searchQueryPlanner = searchQueryPlanner;
+        this.articleSearchCache = articleSearchCache;
     }
 
     @Override
     public ResponseResult search(String keyword, Integer pageNum, Integer pageSize, String sort) {
-        if (!StringUtils.hasText(keyword)) {
-            throw new SystemException(AppHttpCodeEnum.PARAM_ERROR);
-        }
-        SearchSort searchSort = SearchSort.from(sort);
-        if (searchSort == null) {
-            throw new SystemException(AppHttpCodeEnum.PARAM_ERROR);
-        }
-        int safePageNum = pageNum == null || pageNum < 1 ? 1 : pageNum;
-        int safePageSize = pageSize == null || pageSize < 1 ? 10 : Math.min(pageSize, 50);
+        SearchQuery query = searchQueryPlanner.plan(keyword, pageNum, pageSize, sort);
         long start = System.nanoTime();
         try {
-            ArticleSearchPage page = searchRepository.search(
-                    keyword.trim(), safePageNum, safePageSize, searchSort);
+            ArticleSearchPage page = articleSearchCache.get(query)
+                    .orElseGet(() -> searchAndCache(query));
             searchMetrics.recordQuery(true, System.nanoTime() - start);
             return ResponseResult.okResult(new PageVo(page.rows(), page.total()));
-        } catch (IOException | RuntimeException searchFailure) {
+        } catch (RuntimeException searchFailure) {
             searchMetrics.recordQuery(false, System.nanoTime() - start);
             LOGGER.error("event=article_search_failed keyword={}", keyword, searchFailure);
             throw new SystemException(AppHttpCodeEnum.SEARCH_SERVICE_UNAVAILABLE);
+        }
+    }
+
+    private ArticleSearchPage searchAndCache(SearchQuery query) {
+        try {
+            ArticleSearchPage page = searchRepository.search(query);
+            articleSearchCache.put(query, page);
+            return page;
+        } catch (IOException searchFailure) {
+            throw new IllegalStateException(searchFailure);
         }
     }
 

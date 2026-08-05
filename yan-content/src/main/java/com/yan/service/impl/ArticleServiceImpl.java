@@ -370,7 +370,12 @@ public class ArticleServiceImpl extends ServiceImpl<ArticleMapper, Article> impl
                 .filter(Objects::nonNull)
                 .map(id -> CacheConstants.ARTICLE_DETAIL_PREFIX + id)
                 .forEach(keys::add);
+        articleIds.stream()
+                .filter(Objects::nonNull)
+                .map(id -> CacheConstants.ARTICLE_COMMENT_FIRST_PAGE_PREFIX + id)
+                .forEach(keys::add);
         cacheClient.deleteAfterCommit(keys.toArray(String[]::new));
+        cacheClient.deletePatternAfterCommit(CacheConstants.SEARCH_RESULT_PATTERN);
     }
 
     private Long getVC(Long id, Long databaseValue) {

@@ -9,6 +9,9 @@ import java.util.List;
 
 @Mapper
 public interface NotificationOutboxMapper extends BaseMapper<NotificationOutboxEvent> {
+    int enqueue(@Param("articleId") Long articleId, @Param("authorId") Long authorId,
+                @Param("taskKey") String taskKey, @Param("maxRetry") int maxRetry);
+
     List<NotificationOutboxEvent> selectPending(@Param("limit") int limit);
 
     int claim(@Param("id") Long id, @Param("leaseSeconds") int leaseSeconds);
@@ -19,9 +22,15 @@ public interface NotificationOutboxMapper extends BaseMapper<NotificationOutboxE
 
     int markForRetry(@Param("id") Long id, @Param("delaySeconds") int delaySeconds, @Param("reason") String reason);
 
+    int markProcessingStarted(@Param("id") Long id);
+
     int recoverExpiredClaims();
 
     int requeuePending();
+
+    Long sumProcessCount();
+
+    Integer maxProcessCount();
 
     List<Long> selectFollowerIdsAfter(@Param("authorId") Long authorId, @Param("cursorFollowerId") Long cursorFollowerId, @Param("limit") int limit);
 

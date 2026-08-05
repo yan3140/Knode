@@ -1,0 +1,41 @@
+{
+  "prefix": "load_20260728_170328",
+  "timestamp": "2026-07-28T17:07:42",
+  "esEvents": 10000,
+  "regularFollowers": 1000,
+  "largeFollowers": 10000,
+  "directNotifications": 10000,
+  "regularArticleId": 1785229508546000,
+  "largeArticleId": 1785229508546001,
+  "largeDirectNotifications": 0,
+  "checks": [
+    {
+      "label": "ES outbox SUCCEEDED",
+      "ok": true,
+      "expected": 10000,
+      "actual": 10000,
+      "seconds": 240.96
+    },
+    {
+      "label": "regular author notifications inserted",
+      "ok": true,
+      "expected": 1000,
+      "actual": 1000,
+      "seconds": 0.042
+    },
+    {
+      "label": "large author publish stream inserted",
+      "ok": true,
+      "expected": 1,
+      "actual": 1,
+      "seconds": 0.041
+    },
+    {
+      "label": "direct notifications inserted",
+      "ok": true,
+      "expected": 10000,
+      "actual": 10000,
+      "seconds": 0.047
+    }
+  ]
+}
