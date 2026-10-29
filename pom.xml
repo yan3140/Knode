@@ -21,6 +21,7 @@
         <module>yan-system</module>
         <module>yan-framework</module>
         <module>yan-content</module>
+        <module>yan-knowledge</module>
         <module>yan-blog</module>
         <module>yan-admin</module>
     </modules>
@@ -64,6 +65,11 @@
             <dependency>
                 <groupId>com.lx</groupId>
                 <artifactId>yan-content</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.lx</groupId>
+                <artifactId>yan-knowledge</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

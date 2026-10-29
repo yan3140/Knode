@@ -1,0 +1,21 @@
+{
+  "scenarios": [
+    {
+      "name": "grounded-knowledge-answer",
+      "userId": 1,
+      "knowledgeBaseId": 1,
+      "question": "请基于知识库说明这个项目的核心架构，并给出引用。",
+      "requestedMode": "AUTO",
+      "expectedStatus": "SUCCEEDED"
+    },
+    {
+      "name": "clarification-and-resume",
+      "userId": 1,
+      "knowledgeBaseId": 1,
+      "question": "这个应该怎么配置？",
+      "requestedMode": "AUTO",
+      "clarificationAnswer": "请说明知识库检索相关配置。",
+      "expectedStatus": "SUCCEEDED"
+    }
+  ]
+}

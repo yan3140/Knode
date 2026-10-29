@@ -8,6 +8,9 @@ const router = new Router({
 		if (to.name === 'Login') {
 			return { x: 0, y: 0 }
 		}
+		if (to.name === 'KnowledgeChat') {
+			return { x: 0, y: 0 }
+		}
 		if (savePosition) {
 			return savePosition;
 		} else {
@@ -101,6 +104,14 @@ const router = new Router({
 			},
 			name: 'Notifications'
 		}, //通知中心
+		{
+			path: '/KnowledgeChat',
+			component: resolve => require(['../pages/KnowledgeChat.vue'], resolve),
+			meta: {
+				auth: true
+			},
+			name: 'KnowledgeChat'
+		}, //知识库问答
 		{
 			path: '/UserProfile',
 			component: resolve => require(['../pages/UserProfile.vue'], resolve),

@@ -27,6 +27,7 @@ import com.yan.service.ArticleTagService;
 import com.yan.service.CategoryService;
 import com.yan.service.TagService;
 import com.yan.notification.NotificationFanoutOutboxService;
+import com.yan.knowledge.source.KnowledgeArticleChangeService;
 import com.yan.search.outbox.ArticleSearchOutboxService;
 import com.yan.utils.BeanCopyUtils;
 import com.yan.utils.CacheClient;
@@ -67,6 +68,8 @@ public class ArticleServiceImpl extends ServiceImpl<ArticleMapper, Article> impl
     private UserMapper userMapper;
     @Autowired
     private NotificationFanoutOutboxService notificationFanoutOutboxService;
+    @Autowired
+    private KnowledgeArticleChangeService knowledgeArticleChangeService;
 
     @Override
     public ResponseResult hotArticleList() {
@@ -227,6 +230,7 @@ public class ArticleServiceImpl extends ServiceImpl<ArticleMapper, Article> impl
         evictArticleCaches(List.of(article.getId()));
         synchronizeCounterAfterCommit(article.getId());
         articleSearchOutboxService.enqueue(article.getId());
+        knowledgeArticleChangeService.synchronize(article);
         if (String.valueOf(ARTICLE_STATUS_NORMAL).equals(article.getStatus())) {
             notificationFanoutOutboxService.enqueue(article.getId(), article.getCreateBy());
         }
@@ -286,6 +290,7 @@ public class ArticleServiceImpl extends ServiceImpl<ArticleMapper, Article> impl
         evictArticleCaches(List.of(articleDto.getId()));
         synchronizeCounterAfterCommit(articleDto.getId());
         articleSearchOutboxService.enqueue(articleDto.getId());
+        knowledgeArticleChangeService.synchronize(article);
         return ResponseResult.okResult();
     }
 
@@ -301,6 +306,7 @@ public class ArticleServiceImpl extends ServiceImpl<ArticleMapper, Article> impl
         evictArticleCaches(ids);
         removeCountersAfterCommit(ids);
         ids.forEach(articleSearchOutboxService::enqueue);
+        ids.forEach(knowledgeArticleChangeService::enqueueDeletion);
         return ResponseResult.okResult();
     }
 
@@ -319,6 +325,7 @@ public class ArticleServiceImpl extends ServiceImpl<ArticleMapper, Article> impl
         evictArticleCaches(List.of(id));
         synchronizeCounterAfterCommit(id);
         articleSearchOutboxService.enqueue(id);
+        knowledgeArticleChangeService.synchronize(getById(id));
         return ResponseResult.okResult();
     }
 

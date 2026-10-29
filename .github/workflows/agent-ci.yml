@@ -1,0 +1,132 @@
+name: Agent CI
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/agent-ci.yml"
+      - "contracts/**"
+      - "yan-agent/**"
+      - "yan-admin/src/main/java/com/yan/admin/config/AgentInternalSecurityProperties.java"
+      - "yan-admin/src/main/java/com/yan/admin/controller/InternalKnowledgeController.java"
+      - "yan-admin/src/main/java/com/yan/admin/filter/AgentServiceAuthenticationFilter.java"
+      - "yan-admin/src/main/java/com/yan/admin/security/AgentPrincipalTokenService.java"
+      - "yan-admin/src/test/java/com/yan/admin/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/agent-ci.yml"
+      - "contracts/**"
+      - "yan-agent/**"
+      - "yan-admin/src/main/java/com/yan/admin/**"
+
+jobs:
+  python-agent:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: yan_agent
+          POSTGRES_PASSWORD: yan_agent
+          POSTGRES_USER: yan_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yan_agent -d yan_agent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      PYTHON_DOTENV_DISABLED: "1"
+      YAN_AGENT_POSTGRES_DSN: postgresql://yan_agent:yan_agent@localhost:5432/yan_agent
+      YAN_AGENT_REDIS_URL: redis://localhost:6379/0
+      YAN_AGENT_TEST_POSTGRES_DSN: postgresql://yan_agent:yan_agent@localhost:5432/yan_agent
+      YAN_AGENT_TEST_REDIS_URL: redis://localhost:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.19"
+          python-version: "3.12"
+      - run: uv sync --frozen
+        working-directory: yan-agent
+      - run: uv lock --check
+        working-directory: yan-agent
+      - run: uv run ruff check .
+        working-directory: yan-agent
+      - run: uv run ruff format --check .
+        working-directory: yan-agent
+      - run: uv run mypy
+        working-directory: yan-agent
+      - run: uv run alembic upgrade head
+        working-directory: yan-agent
+      - name: Unit, graph, contract, security, and observability tests
+        run: uv run pytest tests --ignore=tests/integration -ra
+        working-directory: yan-agent
+      - name: PostgreSQL and Redis integration tests
+        run: uv run pytest tests/integration
+        working-directory: yan-agent
+      - name: Check optional external evaluation assets
+        id: eval_assets
+        working-directory: yan-agent
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          required = [
+              Path("evals/datasets/smoke_v1.jsonl"),
+              Path("evals/baselines/smoke_v1.json"),
+          ]
+          missing = [str(path) for path in required if not path.is_file()]
+          available = "false" if missing else "true"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"available={available}\n")
+          if missing:
+              message = (
+                  "External-data quality gate NOT RUN: optional assets are absent: "
+                  + ", ".join(missing)
+                  + ". Self-contained graph, security, and evaluation unit tests still run."
+              )
+              print(f"::notice::{message}")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write(message + "\n")
+          PY
+      - name: Optional external-data deterministic Agent quality gate
+        id: external_quality
+        if: steps.eval_assets.outputs.available == 'true'
+        run: uv run yan-agent-eval --output evals/reports/current.json
+        working-directory: yan-agent
+      - name: Upload external evaluation report
+        if: >-
+          always() && steps.eval_assets.outputs.available == 'true' &&
+          steps.external_quality.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: yan-agent-evaluation-report
+          path: yan-agent/evals/reports/current.json
+          if-no-files-found: error
+          retention-days: 30
+
+  java-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - run: >-
+          ./mvnw -pl yan-admin -am
+          -Dtest=InternalKnowledgeControllerTest,InternalKnowledgeOpenApiContractTest,AgentPrincipalTokenServiceTest
+          -Dsurefire.failIfNoSpecifiedTests=false test

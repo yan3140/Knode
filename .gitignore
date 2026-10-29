@@ -42,3 +42,44 @@ build/
 **/dist/
 logs/
 *.log
+
+### Local secrets ###
+.env
+
+### Python ###
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+*.py[cod]
+yan-agent/evals/reports/current.json
+yan-agent/.runtime/
+yan-agent/.tools/
+
+### Local documents, resumes, and evaluation data ###
+*.md
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.csv
+*.tsv
+*.jsonl
+*.zip
+*.db
+*.sqlite
+*.sqlite3
+.idea/
+yan-agent/evals/
+data/
+datasets/
+reports/
+backups/
+
+### Local environment variants ###
+.env.*
+!**/.env.example

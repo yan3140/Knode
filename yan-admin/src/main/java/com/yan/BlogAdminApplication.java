@@ -7,7 +7,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.EnableAsync;
 
 @SpringBootApplication(scanBasePackages = "com.yan")
-@MapperScan("com.yan.mapper")
+@MapperScan({"com.yan.mapper", "com.yan.knowledge.mapper"})
 @EnableScheduling
 @EnableAsync
 public class BlogAdminApplication {

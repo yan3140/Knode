@@ -2,6 +2,7 @@ package com.yan.admin.config;
 
 
 import com.yan.admin.filter.JwtAuthenticationTokenFilter;
+import com.yan.admin.filter.AgentServiceAuthenticationFilter;
 import com.yan.constants.AuthConstants;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
@@ -33,8 +34,10 @@ public class SecurityConfig {
     @Autowired
     private AccessDeniedHandler accessDeniedHandler;
 
-    public SecurityConfig(JwtAuthenticationTokenFilter authenticationTokenFilter) {
+    public SecurityConfig(JwtAuthenticationTokenFilter authenticationTokenFilter,
+                          AgentServiceAuthenticationFilter agentServiceAuthenticationFilter) {
         this.authenticationTokenFilter = authenticationTokenFilter;
+        this.agentServiceAuthenticationFilter = agentServiceAuthenticationFilter;
     }
 
     @Bean
@@ -43,6 +46,7 @@ public class SecurityConfig {
     }
 
     private final JwtAuthenticationTokenFilter authenticationTokenFilter;
+    private final AgentServiceAuthenticationFilter agentServiceAuthenticationFilter;
 
 
     @Bean
@@ -62,6 +66,8 @@ public class SecurityConfig {
                 )
                 // 配置请求授权规则
                 .authorizeHttpRequests(auth -> auth
+                                .requestMatchers("/internal/api/knowledge/**")
+                                .hasAuthority(AgentServiceAuthenticationFilter.AGENT_SERVICE_AUTHORITY)
                                 .requestMatchers(HttpMethod.POST,
                                         "/login", "/user/login", "/user/register",
                                         "/api/blog/auth/login", "/api/blog/user/register",
@@ -88,7 +94,8 @@ public class SecurityConfig {
                 //允许跨域
                 .cors(Customizer.withDefaults());
 
-        http.addFilterBefore(authenticationTokenFilter, UsernamePasswordAuthenticationFilter.class);
+        http.addFilterBefore(agentServiceAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+        http.addFilterAfter(authenticationTokenFilter, AgentServiceAuthenticationFilter.class);
         http.exceptionHandling(e ->
                 e.authenticationEntryPoint(authenticationEntryPoint)
                         .accessDeniedHandler(accessDeniedHandler));

@@ -14,6 +14,11 @@ import org.springframework.data.redis.core.HashOperations;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
 
 import java.util.List;
 import java.util.Map;
@@ -46,10 +51,17 @@ class ArticleCounterServiceImplTest {
     private ArticleSearchOutboxService articleSearchOutboxService;
 
     private ArticleCounterServiceImpl counterService;
+    private DataSourceTransactionManager transactionManager;
+    private Connection connection;
 
     @BeforeEach
-    void setUp() {
-        counterService = new ArticleCounterServiceImpl(redisTemplate, articleMapper, articleSearchOutboxService);
+    void setUp() throws Exception {
+        DataSource dataSource = org.mockito.Mockito.mock(DataSource.class);
+        connection = org.mockito.Mockito.mock(Connection.class);
+        org.mockito.Mockito.lenient().when(dataSource.getConnection()).thenReturn(connection);
+        transactionManager = new DataSourceTransactionManager(dataSource);
+        counterService = new ArticleCounterServiceImpl(redisTemplate, articleMapper,
+                articleSearchOutboxService, transactionManager);
     }
 
     @Test
@@ -117,7 +129,7 @@ class ArticleCounterServiceImplTest {
     }
 
     @Test
-    void successfulFlushPersistsSearchOutboxEvent() {
+    void successfulFlushPersistsSearchOutboxEvent() throws Exception {
         when(redisTemplate.<String, String>opsForHash()).thenReturn(hashOperations);
         when(redisTemplate.opsForSet()).thenReturn(setOperations);
         @SuppressWarnings("unchecked")
@@ -136,5 +148,54 @@ class ArticleCounterServiceImplTest {
         counterService.flushDirtyCounters(CacheConstants.ARTICLE_VIEW_FLUSH_BATCH_SIZE);
 
         verify(articleSearchOutboxService).enqueue(1L);
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(articleMapper, articleSearchOutboxService,
+                connection, redisTemplate);
+        order.verify(articleMapper).updateViewCounts(Map.of(1L, 15L));
+        order.verify(articleSearchOutboxService).enqueue(1L);
+        order.verify(connection).commit();
+        order.verify(redisTemplate).execute(any(RedisScript.class), anyList(), any(Object[].class));
+    }
+
+    @Test
+    void searchOutboxFailureKeepsDirtyMarkerForRetry() {
+        when(redisTemplate.<String, String>opsForHash()).thenReturn(hashOperations);
+        when(redisTemplate.opsForSet()).thenReturn(setOperations);
+        Cursor<String> cursor = org.mockito.Mockito.mock(Cursor.class);
+        when(setOperations.scan(eq(CacheConstants.ARTICLE_VIEW_COUNT_DIRTY), any())).thenReturn(cursor);
+        when(cursor.hasNext()).thenReturn(true, false);
+        when(cursor.next()).thenReturn("1");
+        when(hashOperations.multiGet(CacheConstants.ARTICLE_VIEW_COUNT, List.of("1"))).thenReturn(List.of("15"));
+        Article article = new Article();
+        article.setId(1L);
+        when(articleMapper.selectBatchIds(anyCollection())).thenReturn(List.of(article));
+        org.mockito.Mockito.doThrow(new IllegalStateException("outbox unavailable"))
+                .when(articleSearchOutboxService).enqueue(1L);
+
+        assertThrows(IllegalStateException.class, () -> counterService.flushDirtyCounters(10));
+
+        verify(redisTemplate, never()).execute(any(RedisScript.class), anyList(), any(Object[].class));
+    }
+
+    @Test
+    void outerTransactionRollbackDoesNotCleanDirtyMarker() throws Exception {
+        when(redisTemplate.<String, String>opsForHash()).thenReturn(hashOperations);
+        when(redisTemplate.opsForSet()).thenReturn(setOperations);
+        Cursor<String> cursor = org.mockito.Mockito.mock(Cursor.class);
+        when(setOperations.scan(eq(CacheConstants.ARTICLE_VIEW_COUNT_DIRTY), any())).thenReturn(cursor);
+        when(cursor.hasNext()).thenReturn(true, false);
+        when(cursor.next()).thenReturn("1");
+        when(hashOperations.multiGet(CacheConstants.ARTICLE_VIEW_COUNT, List.of("1"))).thenReturn(List.of("15"));
+        Article article = new Article();
+        article.setId(1L);
+        when(articleMapper.selectBatchIds(anyCollection())).thenReturn(List.of(article));
+
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            counterService.flushDirtyCounters(10);
+            verify(redisTemplate, never()).execute(any(RedisScript.class), anyList(), any(Object[].class));
+            status.setRollbackOnly();
+        });
+
+        verify(connection).rollback();
+        verify(redisTemplate, never()).execute(any(RedisScript.class), anyList(), any(Object[].class));
     }
 }

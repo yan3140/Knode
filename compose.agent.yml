@@ -1,0 +1,186 @@
+name: yan-agent-local
+
+x-agent-runtime: &agent-runtime
+  image: ${YAN_AGENT_IMAGE:-yan-agent:local}
+  build:
+    context: ./yan-agent
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  networks:
+    - agent-backend
+
+x-agent-common-environment: &agent-common-environment
+  YAN_AGENT_POSTGRES_DSN: postgresql://yan_agent:yan_agent@agent-postgres:5432/yan_agent
+  YAN_AGENT_REDIS_URL: redis://agent-redis:6379/0
+  YAN_AGENT_OTEL_SERVICE_NAME: yan-agent
+  YAN_AGENT_OTEL_EXPORTER_OTLP_ENDPOINT: http://agent-otel-collector:4318/v1/traces
+  YAN_AGENT_OTEL_TRACE_SAMPLE_RATIO: ${YAN_AGENT_OTEL_TRACE_SAMPLE_RATIO:-1.0}
+  YAN_AGENT_LOG_LEVEL: ${YAN_AGENT_LOG_LEVEL:-INFO}
+
+services:
+  agent-postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: yan_agent
+      POSTGRES_PASSWORD: yan_agent
+      POSTGRES_USER: yan_agent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yan_agent -d yan_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "${YAN_AGENT_POSTGRES_BIND:-127.0.0.1:55432}:5432"
+    volumes:
+      - yan-agent-postgres:/var/lib/postgresql/data
+    networks:
+      - agent-backend
+
+  agent-redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "${YAN_AGENT_REDIS_BIND:-127.0.0.1:56379}:6379"
+    volumes:
+      - yan-agent-redis:/data
+    networks:
+      - agent-backend
+
+  yan-agent-migrate:
+    <<: *agent-runtime
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      YAN_AGENT_POSTGRES_DSN: postgresql://yan_agent:yan_agent@agent-postgres:5432/yan_agent
+    depends_on:
+      agent-postgres:
+        condition: service_healthy
+
+  yan-agent:
+    <<: *agent-runtime
+    environment:
+      <<: *agent-common-environment
+      YAN_AGENT_PRINCIPAL_JWT_SECRET: ${YANBLOG_AGENT_PRINCIPAL_JWT_SECRET:?Set YANBLOG_AGENT_PRINCIPAL_JWT_SECRET in .env}
+    depends_on:
+      yan-agent-migrate:
+        condition: service_completed_successfully
+      agent-redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8990/health/ready', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    ports:
+      - "${YAN_AGENT_API_BIND:-127.0.0.1:8990}:8990"
+    stop_grace_period: 30s
+
+  yan-agent-worker:
+    <<: *agent-runtime
+    command: ["python", "-m", "yan_agent.worker"]
+    environment:
+      <<: *agent-common-environment
+      YAN_AGENT_JAVA_BASE_URL: ${YAN_AGENT_JAVA_BASE_URL:-http://host.docker.internal:8989}
+      YAN_AGENT_JAVA_SERVICE_KEY: ${YANBLOG_AGENT_SERVICE_KEY:?Set YANBLOG_AGENT_SERVICE_KEY in .env}
+      YAN_AGENT_MODEL_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+      YAN_AGENT_MODEL_RESPONSES_URL: ${YAN_AGENT_MODEL_RESPONSES_URL:-https://api.wenwenai.org/v1/responses}
+      YAN_AGENT_MODEL_NAME: ${YAN_AGENT_MODEL_NAME:-gpt-5.4}
+      YAN_AGENT_MODEL_REASONING_EFFORT: ${YAN_AGENT_MODEL_REASONING_EFFORT:-medium}
+      YAN_AGENT_MODEL_INPUT_COST_PER_MILLION: ${YAN_AGENT_MODEL_INPUT_COST_PER_MILLION:-0}
+      YAN_AGENT_MODEL_OUTPUT_COST_PER_MILLION: ${YAN_AGENT_MODEL_OUTPUT_COST_PER_MILLION:-0}
+      YAN_AGENT_WORKER_METRICS_PORT: 8991
+    depends_on:
+      yan-agent-migrate:
+        condition: service_completed_successfully
+      agent-redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8991/', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    stop_grace_period: 45s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  agent-otel-collector:
+    image: otel/opentelemetry-collector:0.157.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/agent/otel-collector.yml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "${YAN_AGENT_COLLECTOR_BIND:-127.0.0.1:13133}:13133"
+    networks:
+      - agent-backend
+    depends_on:
+      - agent-jaeger
+
+  agent-jaeger:
+    image: jaegertracing/jaeger:2.20.0
+    restart: unless-stopped
+    ports:
+      - "${YAN_AGENT_JAEGER_BIND:-127.0.0.1:16686}:16686"
+    networks:
+      - agent-backend
+
+  agent-prometheus:
+    image: prom/prometheus:v3.13.2
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/agent/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/agent/agent-alerts.yml:/etc/prometheus/agent-alerts.yml:ro
+      - yan-agent-prometheus:/prometheus
+    ports:
+      - "${YAN_AGENT_PROMETHEUS_BIND:-127.0.0.1:9090}:9090"
+    networks:
+      - agent-backend
+    depends_on:
+      yan-agent:
+        condition: service_healthy
+      yan-agent-worker:
+        condition: service_healthy
+
+networks:
+  agent-backend:
+    driver: bridge
+
+volumes:
+  yan-agent-postgres:
+  yan-agent-redis:
+  yan-agent-prometheus:

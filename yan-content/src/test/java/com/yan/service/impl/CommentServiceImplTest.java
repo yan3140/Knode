@@ -9,6 +9,7 @@ import com.yan.domain.vo.CommentVo;
 import com.yan.domain.vo.PageVo;
 import com.yan.mapper.CommentMapper;
 import com.yan.mapper.UserMapper;
+import com.yan.utils.CacheClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -23,20 +24,27 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 
 class CommentServiceImplTest {
 
     private CommentMapper commentMapper;
     private UserMapper userMapper;
+    private CacheClient cacheClient;
     private CommentServiceImpl commentService;
 
     @BeforeEach
     void setUp() {
         commentMapper = mock(CommentMapper.class);
         userMapper = mock(UserMapper.class);
+        cacheClient = mock(CacheClient.class);
         commentService = new CommentServiceImpl();
         ReflectionTestUtils.setField(commentService, "baseMapper", commentMapper);
         ReflectionTestUtils.setField(commentService, "userMapper", userMapper);
+        ReflectionTestUtils.setField(commentService, "cacheClient", cacheClient);
+        when(cacheClient.queryWithMutex(anyString(), anyInt(), anyInt(), any())).thenAnswer(invocation ->
+                ((java.util.function.Supplier<?>) invocation.getArgument(3)).get());
     }
 
     @Test

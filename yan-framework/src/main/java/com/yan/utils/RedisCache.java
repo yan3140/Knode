@@ -5,6 +5,7 @@ import org.springframework.data.redis.core.BoundSetOperations;
 import org.springframework.data.redis.core.HashOperations;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -13,6 +14,13 @@ import java.util.concurrent.TimeUnit;
 @SuppressWarnings(value = {"unchecked", "rawtypes"})
 @Component
 public class RedisCache {
+    private static final DefaultRedisScript<Long> DELETE_IF_VALUE_MATCHES = new DefaultRedisScript<>("""
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('DEL', KEYS[1])
+            end
+            return 0
+            """, Long.class);
+
     @Autowired
     public RedisTemplate redisTemplate;
 
@@ -86,6 +94,11 @@ public class RedisCache {
      */
     public boolean deleteObject(final String key) {
         return redisTemplate.delete(key);
+    }
+
+    public boolean deleteObjectIfValueMatches(String key, String expectedValue) {
+        return Long.valueOf(1L).equals(redisTemplate.execute(
+                DELETE_IF_VALUE_MATCHES, Collections.singletonList(key), expectedValue));
     }
 
     /**

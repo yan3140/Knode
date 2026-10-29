@@ -3,12 +3,15 @@ package com.yan.utils;
 import com.yan.cache.CacheInvalidationRecorder;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -39,14 +42,18 @@ class CacheClientTest {
     void rebuildsAndCachesValueWhileHoldingMutex() {
         RedisCache redisCache = mock(RedisCache.class);
         when(redisCache.getCacheObject("key")).thenReturn(null);
-        when(redisCache.setCacheObjectIfAbsent("lock:key", "1", 10, TimeUnit.SECONDS)).thenReturn(true);
+        when(redisCache.setCacheObjectIfAbsent(eq("lock:key"), anyString(), eq(10), eq(TimeUnit.SECONDS))).thenReturn(true);
 
         String value = new CacheClient(redisCache)
                 .queryWithMutex("key", 10, 0, () -> "database");
 
         assertThat(value).isEqualTo("database");
         verify(redisCache).setCacheObject("key", "database", 10, TimeUnit.MINUTES);
-        verify(redisCache).deleteObject("lock:key");
+        org.mockito.ArgumentCaptor<String> token = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(redisCache).setCacheObjectIfAbsent(eq("lock:key"), token.capture(), eq(10), eq(TimeUnit.SECONDS));
+        assertThat(token.getValue()).isNotBlank().isNotEqualTo("1");
+        verify(redisCache).deleteObjectIfValueMatches("lock:key", token.getValue());
+        verify(redisCache, never()).deleteObject("lock:key");
     }
 
     @Test
@@ -71,7 +78,47 @@ class CacheClientTest {
 
         new CacheClient(redisCache, recorderProvider).delete("article:1");
 
-        verify(recorder).record("article:1", false, "redis down");
+        verify(recorder).recordFailure("article:1", false, "redis down");
         verifyNoMoreInteractions(recorder);
+    }
+
+    @Test
+    void recordsInvalidationInBusinessTransactionBeforeDeletingAfterCommit() {
+        RedisCache redisCache = mock(RedisCache.class);
+        CacheInvalidationRecorder recorder = mock(CacheInvalidationRecorder.class);
+        ObjectProvider<CacheInvalidationRecorder> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(recorder);
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            new CacheClient(redisCache, provider).deleteAfterCommit("article:1");
+
+            verify(recorder).record(eq("article:1"), eq(false), anyString());
+            verify(redisCache, never()).deleteObject("article:1");
+            TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
+            verify(redisCache).deleteObject("article:1");
+        } finally {
+            TransactionSynchronizationManager.clear();
+        }
+    }
+
+    @Test
+    void recordsPatternInvalidationBeforeCommitAndDoesNotEvictOnRollback() {
+        RedisCache redisCache = mock(RedisCache.class);
+        CacheInvalidationRecorder recorder = mock(CacheInvalidationRecorder.class);
+        ObjectProvider<CacheInvalidationRecorder> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(recorder);
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            new CacheClient(redisCache, provider).deletePatternAfterCommit("search:*");
+
+            verify(recorder).record(eq("search:*"), eq(true), anyString());
+            TransactionSynchronizationManager.getSynchronizations().forEach(sync ->
+                    sync.afterCompletion(TransactionSynchronization.STATUS_ROLLED_BACK));
+            org.mockito.Mockito.verifyNoInteractions(redisCache);
+        } finally {
+            TransactionSynchronizationManager.clear();
+        }
     }
 }

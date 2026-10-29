@@ -64,6 +64,7 @@ public class ArticleSearchOutboxConsumer implements ApplicationRunner {
     @Scheduled(fixedDelayString = "${blog.search.outbox.stream.poll-delay-ms:200}")
     public void consume() {
         outboxMapper.recoverExpiredClaims();
+        // Logical consumer names are polled sequentially; consumerCount is not a worker-thread count.
         for (int i = 0; i < consumerCount; i++) {
             consumeAs(properties.getConsumers().getArticleSearch() + "-" + i);
         }

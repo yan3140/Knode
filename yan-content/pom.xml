@@ -25,6 +25,10 @@
             <artifactId>yan-framework</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.lx</groupId>
+            <artifactId>yan-knowledge</artifactId>
+        </dependency>
+        <dependency>
             <groupId>co.elastic.clients</groupId>
             <artifactId>elasticsearch-java</artifactId>
             <exclusions>

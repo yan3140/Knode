@@ -1,0 +1,282 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "YanBlog Knowledge-Agent Internal API",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/internal/api/knowledge/retrievals": {
+      "post": {
+        "operationId": "retrieveKnowledgeEvidence",
+        "security": [
+          {
+            "AgentServiceKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalRetrievalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Versioned evidence retrieved within the user's knowledge scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalRetrievalResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid retrieval request"
+          },
+          "401": {
+            "description": "Invalid Agent service identity"
+          },
+          "403": {
+            "description": "User cannot access the requested knowledge base"
+          },
+          "503": {
+            "description": "Agent integration or retrieval dependency is unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AgentServiceKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Agent-Service-Key"
+      }
+    },
+    "schemas": {
+      "RetrievalMode": {
+        "type": "string",
+        "enum": [
+          "AUTO",
+          "FULL_CONTEXT",
+          "EXACT",
+          "KEYWORD",
+          "VECTOR",
+          "HYBRID"
+        ]
+      },
+      "DegradationReason": {
+        "type": "string",
+        "enum": [
+          "VECTOR_UNAVAILABLE",
+          "KEYWORD_UNAVAILABLE",
+          "EMBEDDING_TIMEOUT",
+          "EXACT_ONLY",
+          "FULL_CONTEXT_ONLY",
+          "CONTEXT_BUDGET_EXCEEDED",
+          "NO_RESULT"
+        ]
+      },
+      "ExactMatchType": {
+        "type": "string",
+        "enum": [
+          "CLASS_NAME",
+          "METHOD_NAME",
+          "ERROR_CODE",
+          "EXCEPTION",
+          "CONFIG_KEY",
+          "HOST_OR_PORT",
+          "VERSION",
+          "METRIC_NAME",
+          "LOG_TERM",
+          "SQL_FRAGMENT",
+          "IDENTIFIER"
+        ]
+      },
+      "InternalRetrievalRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "retrievalRequestId",
+          "runId",
+          "userId",
+          "knowledgeBaseId",
+          "query",
+          "requestedMode"
+        ],
+        "properties": {
+          "retrievalRequestId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "userId": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "knowledgeBaseId": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "requestedMode": {
+            "$ref": "#/components/schemas/RetrievalMode"
+          },
+          "topK": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 10
+          },
+          "candidateK": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 30,
+            "description": "Must be greater than or equal to topK."
+          }
+        },
+        "example": {
+          "retrievalRequestId": "retrieval-1",
+          "runId": "run-1",
+          "userId": 3,
+          "knowledgeBaseId": 5,
+          "query": "线程池队列满了怎么办？",
+          "requestedMode": "AUTO",
+          "topK": 10,
+          "candidateK": 30
+        }
+      },
+      "KnowledgeCitation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "chunkId",
+          "documentId",
+          "documentVersionId",
+          "title",
+          "section",
+          "source",
+          "content",
+          "vectorSimilarity",
+          "keywordScore",
+          "rrfScore",
+          "finalScore",
+          "exactMatch",
+          "exactType"
+        ],
+        "properties": {
+          "chunkId": { "type": "string" },
+          "documentId": { "type": "string" },
+          "documentVersionId": { "type": "string" },
+          "title": { "type": "string" },
+          "section": { "type": "string" },
+          "source": { "type": "string" },
+          "content": { "type": "string" },
+          "vectorSimilarity": { "type": ["number", "null"] },
+          "keywordScore": { "type": ["number", "null"] },
+          "rrfScore": { "type": ["number", "null"] },
+          "finalScore": { "type": ["number", "null"] },
+          "exactMatch": { "type": "boolean" },
+          "exactType": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/ExactMatchType" },
+              { "type": "null" }
+            ]
+          }
+        }
+      },
+      "InternalRetrievalResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "queryId",
+          "requestedMode",
+          "selectedMode",
+          "citations",
+          "degraded",
+          "degradationReasons",
+          "totalElapsedMillis",
+          "traceId"
+        ],
+        "properties": {
+          "queryId": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "requestedMode": {
+            "$ref": "#/components/schemas/RetrievalMode"
+          },
+          "selectedMode": {
+            "$ref": "#/components/schemas/RetrievalMode"
+          },
+          "citations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeCitation"
+            }
+          },
+          "degraded": { "type": "boolean" },
+          "degradationReasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DegradationReason"
+            }
+          },
+          "totalElapsedMillis": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "traceId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "example": {
+          "queryId": 9,
+          "requestedMode": "AUTO",
+          "selectedMode": "HYBRID",
+          "citations": [
+            {
+              "chunkId": "chunk-1",
+              "documentId": "document-1",
+              "documentVersionId": "version-2",
+              "title": "线程池",
+              "section": "拒绝策略",
+              "source": "article:7",
+              "content": "队列满时执行配置的拒绝策略。",
+              "vectorSimilarity": null,
+              "keywordScore": 1.5,
+              "rrfScore": 0.5,
+              "finalScore": 0.9,
+              "exactMatch": false,
+              "exactType": null
+            }
+          ],
+          "degraded": false,
+          "degradationReasons": [],
+          "totalElapsedMillis": 12,
+          "traceId": "trace-1"
+        }
+      }
+    }
+  }
+}

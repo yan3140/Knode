@@ -1,6 +1,6 @@
 <!-- 头部公用 -->
 <template>
-<div class="">
+<div :class="{ 'compact-header': compact }">
 	<div class="headBack">
 		<el-row class="container">
 			<el-col :span="24">
@@ -12,6 +12,7 @@
 							<template slot="title"><i class="fa fa-wa fa-archive"></i> 分类</template>
 							<el-menu-item v-for="(item,index) in classListObj" :key="'class1'+index" :index="'/Share?classId='+item.id">{{item.name}}</el-menu-item>
 						</el-submenu>
+						<el-menu-item index="/KnowledgeChat"><i class="fa fa-wa fa-comments-o"></i> 知识问答</el-menu-item>
 						<el-menu-item index="/Reward"><i class="fa fa-wa fa-cny"></i> 赞赏</el-menu-item>
 						<el-menu-item index="/Friendslink"><i class="fa fa-wa fa-users"></i>友链</el-menu-item>
 
@@ -63,6 +64,9 @@
 			</el-col>
 		</el-row>
 		<div class="mobile-actions">
+			<button v-show="haslogin" class="mobile-agent-entry" type="button" aria-label="知识问答" @click="$router.push('/KnowledgeChat')">
+				<i class="fa fa-comments-o"></i>
+			</button>
 			<button class="mobile-search-trigger" type="button" aria-label="搜索文章" @click="toggleSearch">
 				<i class="fa fa-search"></i>
 			</button>
@@ -109,6 +113,12 @@ import {
 	Typeit
 } from '../utils/plug.js'
 export default {
+	props: {
+		compact: {
+			type: Boolean,
+			default: false
+		}
+	},
 	data() { //选项 / 数据
 		return {
 			userInfo: '', //用户信息
@@ -293,6 +303,7 @@ export default {
 		}
 	},
 	mounted() { //页面元素加载完成
+		if (this.compact) return
 		var that = this;
 		var timer = setTimeout(function() {
 			Typeit(that.$store.state.themeObj.user_start, "#luke"); //打字机效果
@@ -880,6 +891,23 @@ export default {
 	}
 	50% {
 		opacity: 0;
+	}
+}
+
+.compact-header .headImgBox {
+	height: 180px;
+	margin-bottom: 24px;
+}
+
+.compact-header .h-information,
+.compact-header .scene {
+	display: none;
+}
+
+@media screen and (max-width: 700px) {
+	.compact-header .headImgBox {
+		height: 112px!important;
+		margin-bottom: 14px!important;
 	}
 }
 </style>

@@ -10,6 +10,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
 
@@ -38,12 +40,22 @@ public class CacheInvalidationOutboxService implements CacheInvalidationRecorder
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void record(String cacheKey, boolean pattern, String reason) {
         if (cacheKey == null || cacheKey.isBlank()) {
             return;
         }
         String taskKey = (pattern ? "CACHE_INVALIDATE_PATTERN:" : "CACHE_INVALIDATE_KEY:") + cacheKey;
-        outboxMapper.enqueue(taskKey, cacheKey, pattern ? 1 : 0, taskPolicy.safeError(reason), taskPolicy.maxRetry());
+        if (outboxMapper.enqueue(taskKey, cacheKey, pattern ? 1 : 0,
+                taskPolicy.safeError(reason), taskPolicy.maxRetry()) < 1) {
+            throw new IllegalStateException("Unable to persist cache invalidation outbox event");
+        }
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+    public void recordFailure(String cacheKey, boolean pattern, String reason) {
+        record(cacheKey, pattern, reason);
     }
 
     @Scheduled(fixedDelayString = "${blog.cache.invalidation.poll-delay-ms:1000}")

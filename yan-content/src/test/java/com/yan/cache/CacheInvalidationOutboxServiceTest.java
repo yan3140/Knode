@@ -18,6 +18,8 @@ class CacheInvalidationOutboxServiceTest {
         RedisCache redisCache = mock(RedisCache.class);
         CacheInvalidationOutboxService service = new CacheInvalidationOutboxService(
                 mapper, redisCache, 50, 30, 10, 300, 8);
+        when(mapper.enqueue("CACHE_INVALIDATE_KEY:blog:article:detail:1",
+                "blog:article:detail:1", 0, "redis down", 8)).thenReturn(1);
 
         service.record("blog:article:detail:1", false, "redis down");
 

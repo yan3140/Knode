@@ -33,6 +33,8 @@ logging:
   pattern:
     level: "%5p requestId=%X{requestId:-}"
 spring:
+  config:
+    import: optional:file:.env[.properties]
   task:
     scheduling:
       pool:
@@ -63,6 +65,60 @@ mybatis-plus:
       logic-not-delete-value: 0
       id-type: auto
 blog:
+  agent:
+    gateway:
+      base-url: ${YANBLOG_AGENT_GATEWAY_BASE_URL:http://127.0.0.1:8990}
+      connect-timeout-seconds: ${YANBLOG_AGENT_GATEWAY_CONNECT_TIMEOUT_SECONDS:3}
+      request-timeout-seconds: ${YANBLOG_AGENT_GATEWAY_REQUEST_TIMEOUT_SECONDS:120}
+    internal:
+      enabled: ${YANBLOG_AGENT_INTERNAL_ENABLED:false}
+      service-key: ${YANBLOG_AGENT_SERVICE_KEY:}
+      principal-jwt-secret: ${YANBLOG_AGENT_PRINCIPAL_JWT_SECRET:}
+      principal-jwt-ttl-seconds: ${YANBLOG_AGENT_PRINCIPAL_JWT_TTL_SECONDS:60}
+  ai:
+    agent:
+      api-key: ${OPENAI_API_KEY:}
+      responses-url: ${YANBLOG_AGENT_RESPONSES_URL:https://api.wenwenai.org/v1/responses}
+      model: ${YANBLOG_AGENT_MODEL:gpt-5.6}
+      reasoning-effort: ${YANBLOG_AGENT_REASONING_EFFORT:medium}
+      stream: ${YANBLOG_AGENT_STREAM:false}
+      store: ${YANBLOG_AGENT_STORE:false}
+  knowledge:
+    search:
+      index-name: ${YANBLOG_KNOWLEDGE_INDEX_NAME:yan_knowledge_chunks_v1}
+      vector-candidate-similarity: ${YANBLOG_KNOWLEDGE_VECTOR_CANDIDATE_SIMILARITY:0.56}
+      vector-evidence-similarity: ${YANBLOG_KNOWLEDGE_VECTOR_EVIDENCE_SIMILARITY:0.65}
+      vector-strong-similarity: ${YANBLOG_KNOWLEDGE_VECTOR_STRONG_SIMILARITY:0.72}
+    embedding:
+      provider: ${YANBLOG_EMBEDDING_PROVIDER:zhipu-openai-compatible}
+      api-key: ${ZHIPU_KEY:}
+      base-url: ${YANBLOG_EMBEDDING_BASE_URL:https://open.bigmodel.cn/api/paas/v4/}
+      model: ${YANBLOG_EMBEDDING_MODEL:embedding-3}
+      dimensions: ${YANBLOG_EMBEDDING_DIMENSIONS:1024}
+    index:
+      keyword-enabled: true
+      vector-enabled: true
+      chunking-policy-version: markdown-heading-v1
+      keyword-schema-version: elasticsearch-standard-v1
+      require-keyword: true
+      require-vector: false
+      allow-partial: true
+    outbox:
+      poll-delay-ms: 1000
+      lease-seconds: 60
+      batch-size: 100
+      retry-delay-seconds: 10
+      max-retry-delay-seconds: 300
+      max-retry: 8
+      stream:
+        enabled: false
+        key: yanblog:stream:knowledge-index
+        group: yanblog-knowledge-index
+        consumer: yanblog-admin
+        poll-delay-ms: 200
+        batch-size: 50
+        consumer-count: 2
+        max-len: 100000
   cache:
     invalidation:
       poll-delay-ms: 1000
@@ -121,6 +177,7 @@ blog:
         enabled: true
         poll-delay-ms: 100
         consumer-batch-size: 200
+        # Logical consumer names polled sequentially, not concurrent worker threads.
         consumer-count: 4
       poll-delay-ms: 1000
       lease-seconds: 60

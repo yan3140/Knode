@@ -8,6 +8,7 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.Arrays;
+import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -42,12 +43,13 @@ public class CacheClient {
         }
 
         String lockKey = LOCK_PREFIX + key;
+        String lockToken = UUID.randomUUID().toString();
         boolean locked = false;
         try {
             for (int attempt = 0; attempt < LOCK_RETRY_COUNT; attempt++) {
                 try {
                     locked = redisCache.setCacheObjectIfAbsent(
-                            lockKey, "1", LOCK_TTL_SECONDS, TimeUnit.SECONDS);
+                            lockKey, lockToken, LOCK_TTL_SECONDS, TimeUnit.SECONDS);
                 } catch (RuntimeException redisFailure) {
                     return databaseFallback.get();
                 }
@@ -79,7 +81,7 @@ public class CacheClient {
         } finally {
             if (locked) {
                 try {
-                    redisCache.deleteObject(lockKey);
+                    redisCache.deleteObjectIfValueMatches(lockKey, lockToken);
                 } catch (RuntimeException ignored) {
                     // The lock has a short TTL and will release itself when Redis recovers.
                 }
@@ -97,6 +99,7 @@ public class CacheClient {
     }
 
     public void deleteAfterCommit(String... keys) {
+        recordBeforeCommit(keys, false);
         Runnable eviction = () -> Arrays.stream(keys).forEach(this::delete);
         if (TransactionSynchronizationManager.isActualTransactionActive()
                 && TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -123,6 +126,7 @@ public class CacheClient {
     }
 
     public void deletePatternAfterCommit(String... patterns) {
+        recordBeforeCommit(patterns, true);
         Runnable eviction = () -> Arrays.stream(patterns).forEach(this::deletePattern);
         if (TransactionSynchronizationManager.isActualTransactionActive()
                 && TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -164,10 +168,18 @@ public class CacheClient {
             return;
         }
         try {
-            invalidationRecorder.record(key, pattern,
+            invalidationRecorder.recordFailure(key, pattern,
                     failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage());
         } catch (RuntimeException ignored) {
             // The database write has already succeeded; invalidation recording must not break callers.
+        }
+    }
+
+    private void recordBeforeCommit(String[] keys, boolean pattern) {
+        if (invalidationRecorder != null) {
+            for (String key : keys) {
+                invalidationRecorder.record(key, pattern, "Cache invalidation requested");
+            }
         }
     }
 

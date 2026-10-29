@@ -14,7 +14,10 @@ import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
@@ -60,12 +63,15 @@ public class ArticleCounterServiceImpl implements ArticleCounterService {
     private final StringRedisTemplate redisTemplate;
     private final ArticleMapper articleMapper;
     private final ArticleSearchOutboxService articleSearchOutboxService;
+    private final TransactionTemplate transactionTemplate;
 
     public ArticleCounterServiceImpl(StringRedisTemplate redisTemplate, ArticleMapper articleMapper,
-                                     ArticleSearchOutboxService articleSearchOutboxService) {
+                                     ArticleSearchOutboxService articleSearchOutboxService,
+                                     PlatformTransactionManager transactionManager) {
         this.redisTemplate = redisTemplate;
         this.articleMapper = articleMapper;
         this.articleSearchOutboxService = articleSearchOutboxService;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     @Override
@@ -97,8 +103,11 @@ public class ArticleCounterServiceImpl implements ArticleCounterService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public int flushDirtyCounters(int batchSize) {
+        return transactionTemplate.execute(status -> flushInTransaction(batchSize));
+    }
+
+    private int flushInTransaction(int batchSize) {
         int safeBatchSize = Math.max(1, batchSize);
         List<String> dirtyIds = scanDirtyIds(safeBatchSize);
         if (dirtyIds.isEmpty()) {
@@ -137,11 +146,22 @@ public class ArticleCounterServiceImpl implements ArticleCounterService {
         }
 
         articleMapper.updateViewCounts(persistable);
-        persistable.forEach((id, count) -> redisTemplate.execute(
-                REMOVE_DIRTY_IF_UNCHANGED_SCRIPT,
-                List.of(CacheConstants.ARTICLE_VIEW_COUNT, CacheConstants.ARTICLE_VIEW_COUNT_DIRTY),
-                id.toString(), count.toString()));
         persistable.keySet().forEach(articleSearchOutboxService::enqueue);
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                persistable.forEach((id, count) -> {
+                    try {
+                        redisTemplate.execute(REMOVE_DIRTY_IF_UNCHANGED_SCRIPT,
+                                List.of(CacheConstants.ARTICLE_VIEW_COUNT, CacheConstants.ARTICLE_VIEW_COUNT_DIRTY),
+                                id.toString(), count.toString());
+                    } catch (RuntimeException cleanupFailure) {
+                        LOGGER.warn("Counter committed but dirty cleanup failed; retained for retry, articleId={}",
+                                id, cleanupFailure);
+                    }
+                });
+            }
+        });
         return persistable.size();
     }
 

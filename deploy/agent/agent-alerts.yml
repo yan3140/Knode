@@ -1,0 +1,131 @@
+groups:
+  - name: yan-agent
+    interval: 30s
+    rules:
+      - alert: YanAgentApiDown
+        expr: up{job="yan-agent-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Yan Agent API is not scrapeable
+
+      - alert: YanAgentWorkerDown
+        expr: up{job="yan-agent-worker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Yan Agent worker is not scrapeable
+
+      - alert: YanAgentHighHttp5xxRatio
+        expr: |
+          sum(rate(yan_agent_http_requests_total{status_class="5xx"}[5m]))
+          /
+          clamp_min(sum(rate(yan_agent_http_requests_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Yan Agent HTTP 5xx ratio is above 5 percent
+
+      - alert: YanAgentDependencyErrors
+        expr: |
+          sum by (dependency) (
+            rate(yan_agent_dependency_requests_total{outcome="error"}[5m])
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Yan Agent dependency errors are sustained
+
+      - alert: YanAgentContextRebuildP95High
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(yan_agent_context_rebuild_duration_seconds_bucket[10m]))
+          ) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Yan Agent context rebuild P95 is above one second
+
+      - alert: YanAgentPlannerFallbackRateHigh
+        expr: |
+          sum(rate(yan_agent_routing_decisions_total{fallback_reason=~"PLANNER_.*|FAST_PATH_RETRIEVAL_FALLBACK"}[10m]))
+          /
+          clamp_min(sum(rate(yan_agent_routing_decisions_total[10m])), 0.001)
+          > 0.20
+        for: 15m
+        labels:
+          severity: warning
+          rollout_action: rollback_to_b
+        annotations:
+          summary: Adaptive planner fallback rate is above 20 percent
+
+      - alert: YanAgentAdaptiveRunP95High
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(yan_agent_run_duration_seconds_bucket[10m]))
+          ) > 10.97
+        for: 15m
+        labels:
+          severity: warning
+          rollout_action: rollback_to_b
+        annotations:
+          summary: Adaptive run P95 exceeds the Stage 5.5-F rollback threshold
+
+      - alert: YanAgentFastPathNonSuccessRateHigh
+        expr: |
+          (
+            sum(rate(yan_agent_runs_total{effective_strategy="RAW_QUERY",status!="SUCCEEDED"}[10m]))
+            /
+            clamp_min(sum(rate(yan_agent_runs_total{effective_strategy="RAW_QUERY"}[10m])), 0.001)
+          ) > 0.02
+          and
+          sum(increase(yan_agent_runs_total{effective_strategy="RAW_QUERY"}[10m])) >= 20
+        for: 10m
+        labels:
+          severity: critical
+          rollout_action: rollback_to_b
+        annotations:
+          summary: A fast path non-success rate is above 2 percent
+
+      - alert: YanAgentFastPathP95Regression
+        expr: |
+          (
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(yan_agent_run_duration_seconds_bucket{effective_strategy="RAW_QUERY",status="SUCCEEDED"}[10m]))
+            )
+            /
+            clamp_min(
+              histogram_quantile(
+                0.95,
+                sum by (le) (rate(yan_agent_run_duration_seconds_bucket{effective_strategy="SINGLE_REWRITE",status="SUCCEEDED"}[10m]))
+              ),
+              0.001
+            )
+          ) > 1.20
+          and
+          sum(increase(yan_agent_runs_total{effective_strategy="RAW_QUERY"}[10m])) >= 20
+        for: 15m
+        labels:
+          severity: warning
+          rollout_action: rollback_to_b
+        annotations:
+          summary: A fast path P95 is more than 20 percent slower than B
+
+      - alert: YanAgentMultiQueryUnexpectedlyActive
+        expr: |
+          sum(increase(yan_agent_routing_decisions_total{effective_strategy="MULTI_QUERY"}[10m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          rollout_action: rollback_to_b
+        annotations:
+          summary: Multi Query executed while its quality gate remains blocked
