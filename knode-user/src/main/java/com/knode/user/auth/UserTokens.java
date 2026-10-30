@@ -50,10 +50,16 @@ public final class UserTokens {
     }
     public Principal authenticate(String token, String requiredScope) {
         if (!UserTokenVerifier.validScope(requiredScope)) throw new IllegalArgumentException("scope");
+        return authenticateInternal(token,requiredScope);
+    }
+    public Principal authenticateAnyScope(String token) {
+        return authenticateInternal(token,null);
+    }
+    private Principal authenticateInternal(String token,String requiredScope) {
         try {
             UserTokenVerifier.VerifiedToken verified = verifier.verifyToken(token);
             var state = reader.find(verified.sid()).map(s -> new Session(s.schemaVersion(),s.sid(),s.userId(),s.scope(),s.status(),s.expiresAt()));
-            var p = verifier.validateSession(verified,state,requiredScope);
+            var p = verifier.validateSession(verified,state,requiredScope==null ? verified.scope() : requiredScope);
             return new Principal(p.userId(),p.sid(),p.scope());
         } catch (SessionStore.Unavailable e) { throw new AuthenticationFailure(503); }
         catch (AuthFailure e) { throw new AuthenticationFailure(e.status()); }

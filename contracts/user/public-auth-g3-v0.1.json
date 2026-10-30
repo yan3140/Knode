@@ -1,0 +1,92 @@
+{
+  "name": "USER-PUBLIC-G3",
+  "version": "0.1",
+  "status": "candidate; HTTP contract tests only; consumer review pending",
+  "baseIdentityContract": "AUTH-USER-SESSION v0.2",
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/api/blog/auth/login",
+      "request": {
+        "userName": "string",
+        "password": "string"
+      },
+      "data": {
+        "token": "user JWT",
+        "userInfo": {
+          "id": "decimal string",
+          "nickName": "string",
+          "avatar": "string or null",
+          "sex": "string",
+          "email": "string"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/auth/login",
+      "request": {
+        "userName": "string",
+        "password": "string"
+      },
+      "data": {
+        "token": "admin scope user JWT"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/blog/user/register",
+      "request": {
+        "userName": "string",
+        "nickName": "string",
+        "password": "string",
+        "email": "string"
+      },
+      "data": "omitted"
+    },
+    {
+      "method": "GET",
+      "path": "/api/blog/user/userInfo",
+      "data": "id,nickName,avatar,sex,email; authenticated user only"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/blog/user/userInfo",
+      "request": "nickName,avatar,sex; target user is authenticated subject",
+      "data": "omitted"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/auth/me",
+      "data": "roles, permissions, user; roles and menus must be active"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/auth/routers",
+      "data": "menus tree, IDs decimal strings"
+    },
+    {
+      "method": "POST",
+      "path": "/api/blog/auth/logout",
+      "data": "omitted"
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/auth/logout",
+      "data": "omitted"
+    }
+  ],
+  "envelope": "code/msg/data; data omitted for null; Java Long IDs serialized as strings",
+  "errors": {
+    "401": "invalid, revoked or inactive user/session",
+    "403": "valid identity but insufficient scope/admin qualification",
+    "503": "DB or Redis state cannot be determined; body code 500",
+    "200 with code 501": "username already exists",
+    "200 with code 512": "nickname already exists",
+    "200 with code 503": "email already exists",
+    "200 with code 505": "wrong credentials or inactive account"
+  },
+  "revocation": "PENDING intent commits before Redis delete; local fact becomes REVOKED after successful delete. No delivery or Agent pause claimed.",
+  "security": "register and profile ignore non-whitelisted fields; current account and session validated on each protected request",
+  "limits": "no gateway integration, real MySQL/Redis validation, RBAC CRUD, Stream delivery, or legacy path aliases in this slice"
+}
