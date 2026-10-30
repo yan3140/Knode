@@ -68,8 +68,8 @@ class UserTokensTest {
     @Test void scopesAndSessionBindingCannotBeMixed() {
         Memory store = new Memory(); UserTokens auth = core(store,CLOCK);
         String blog=auth.issue("42","blog"), admin=auth.issue("42","admin");
-        denied(() -> auth.authenticate(blog,"admin"),401);
-        denied(() -> auth.authenticate(admin,"blog"),401);
+        denied(() -> auth.authenticate(blog,"admin"),403);
+        denied(() -> auth.authenticate(admin,"blog"),403);
         String sid=auth.authenticate(blog,"blog").sid();
         SessionStore.Session original=store.sessions.get(sid);
         for (SessionStore.Session bad : new SessionStore.Session[] {
@@ -168,5 +168,40 @@ class UserTokensTest {
         filter.doFilter(request,response,chain);
         assertNotNull(chain.getRequest());
         assertEquals("42",((UserTokens.Principal)request.getAttribute(UserAuthenticationFilter.PRINCIPAL_ATTRIBUTE)).userId());
+    }
+
+    @Test void scopeDenialRequiresValidSessionFirst() {
+        Memory store = new Memory(); UserTokens auth=core(store,CLOCK);
+        String blog=auth.issue("42","blog");
+        denied(() -> auth.authenticate(blog,"admin"),403);
+        store.unavailable=true;
+        denied(() -> auth.authenticate(blog,"admin"),503);
+        store.unavailable=false;
+        auth.revoke(blog,"blog");
+        denied(() -> auth.authenticate(blog,"admin"),401);
+    }
+
+    @Test void servletRejectsScopeMismatchDuplicateTokensAndSpoofedIdentity() throws Exception {
+        Memory store = new Memory(); UserTokens auth=core(store,CLOCK);
+        String token=auth.issue("42","blog");
+        var filter=new UserAuthenticationFilter(auth,"admin");
+        var request=new org.springframework.mock.web.MockHttpServletRequest();
+        request.addHeader("token",token);
+        var response=new org.springframework.mock.web.MockHttpServletResponse();
+        var chain=new org.springframework.mock.web.MockFilterChain();
+        filter.doFilter(request,response,chain);
+        assertEquals(403,response.getStatus()); assertNull(chain.getRequest());
+        filter=new UserAuthenticationFilter(auth,"blog");
+        for (int mode=0;mode<4;mode++) {
+            request=new org.springframework.mock.web.MockHttpServletRequest();
+            request.addHeader("token",mode==1 ? token+","+token : token);
+            if (mode==0) request.addHeader("token",token);
+            if (mode==2) request.addHeader("X-Internal-User-Id","42");
+            if (mode==3) request.addHeader("X-Forwarded-User","42");
+            response=new org.springframework.mock.web.MockHttpServletResponse();
+            chain=new org.springframework.mock.web.MockFilterChain();
+            filter.doFilter(request,response,chain);
+            assertEquals(401,response.getStatus()); assertNull(chain.getRequest());
+        }
     }
 }
