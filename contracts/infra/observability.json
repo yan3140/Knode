@@ -1,0 +1,1 @@
+{"version":"0.1-draft","status":"unfrozen","requestId":{"header":"X-Request-Id","pattern":"[A-Za-z0-9._-]{1,64}","invalid":"regenerate","duplicate":"reject"},"tracing":"pending","sentinelPublishing":"pending"}
