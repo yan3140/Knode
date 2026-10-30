@@ -1,3 +1,5 @@
+server:
+  forward-headers-strategy: none
 spring:
   application:
     name: knode-gateway
@@ -17,6 +19,9 @@ spring:
         server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
         namespace: ${NACOS_NAMESPACE:}
 management:
+  health:
+    redis:
+      enabled: false
   endpoint:
     health:
       probes:
@@ -37,3 +42,15 @@ knode:
       group: ${KNODE_GOV_NACOS_GROUP:KNODE_SENTINEL}
       username: ${KNODE_GOV_NACOS_USERNAME:}
       password: ${KNODE_GOV_NACOS_PASSWORD:}
+
+  gateway:
+    auth:
+      configured: ${KNODE_GATEWAY_AUTH_CONFIGURED:false}
+      public-keys: ${KNODE_GATEWAY_AUTH_PUBLIC_KEYS:}
+      environment: ${KNODE_GATEWAY_AUTH_ENVIRONMENT:}
+      redis-host: ${KNODE_GATEWAY_AUTH_REDIS_HOST:}
+      redis-port: ${KNODE_GATEWAY_AUTH_REDIS_PORT:0}
+      redis-username: ${KNODE_GATEWAY_AUTH_REDIS_USERNAME:}
+      redis-password: ${KNODE_GATEWAY_AUTH_REDIS_PASSWORD:}
+      redis-database: ${KNODE_GATEWAY_AUTH_REDIS_DATABASE:0}
+      timeout-ms: ${KNODE_GATEWAY_AUTH_TIMEOUT_MS:1000}

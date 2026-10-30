@@ -1,10 +1,10 @@
 {
-  "version": "0.2-draft",
+  "version": "0.3-draft",
   "status": "unfrozen",
   "serviceName": "knode-gateway",
   "health": "/actuator/health",
   "liveness": "/actuator/health/liveness",
-  "readiness": "503 until auth is ready and enabled Nacos rules are valid",
+  "readiness": "auth public-key configuration and authoritative Redis GET available, and enabled governance rules healthy",
   "nacos": {
     "defaultEnabled": false,
     "environment": [
@@ -18,7 +18,7 @@
       "NACOS_PASSWORD"
     ]
   },
-  "auth": "unavailable",
+  "auth": "Shared SDK v0.2 plus nonblocking authoritative session GET; no positive cache",
   "governanceEnvironment": [
     "KNODE_GOV_NACOS_ENABLED",
     "KNODE_GOV_NACOS_SERVER_ADDR",
@@ -26,5 +26,16 @@
     "KNODE_GOV_NACOS_GROUP",
     "KNODE_GOV_NACOS_USERNAME",
     "KNODE_GOV_NACOS_PASSWORD"
+  ],
+  "authEnvironment": [
+    "KNODE_GATEWAY_AUTH_CONFIGURED",
+    "KNODE_GATEWAY_AUTH_PUBLIC_KEYS",
+    "KNODE_GATEWAY_AUTH_ENVIRONMENT",
+    "KNODE_GATEWAY_AUTH_REDIS_HOST",
+    "KNODE_GATEWAY_AUTH_REDIS_PORT",
+    "KNODE_GATEWAY_AUTH_REDIS_USERNAME",
+    "KNODE_GATEWAY_AUTH_REDIS_PASSWORD",
+    "KNODE_GATEWAY_AUTH_REDIS_DATABASE",
+    "KNODE_GATEWAY_AUTH_TIMEOUT_MS"
   ]
 }

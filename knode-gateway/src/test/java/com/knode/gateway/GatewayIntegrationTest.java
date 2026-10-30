@@ -48,11 +48,11 @@ class GatewayIntegrationTest {
     @LocalServerPort int port;
     @Autowired RouteLocator routes;
     @MockitoBean AccessGate gate;
-    @BeforeEach void failClosedByDefault() { when(gate.allowed(any())).thenCallRealMethod(); }
+    @BeforeEach void failClosedByDefault() { when(gate.authorize(any())).thenReturn(reactor.core.publisher.Mono.error(new com.knode.auth.AuthFailure(503))); }
     WebTestClient client() { return WebTestClient.bindToServer().baseUrl("http://127.0.0.1:" + port).build(); }
 
     @Test void profileActuallyForwardsWithoutTrustingForgedIdentity() {
-        when(gate.allowed(any())).thenReturn(true);
+        when(gate.authorize(any())).thenReturn(reactor.core.publisher.Mono.empty());
         client().get().uri("/api/blog/user/profile/42?q=hello")
                 .header("token", "sample-token").header("X-User-Id", "forged")
                 .header("X-Request-Id", "request-1").exchange().expectStatus().isOk()
@@ -61,7 +61,7 @@ class GatewayIntegrationTest {
     }
 
     @Test void sentinelBlocksRouteWithHttp429() {
-        when(gate.allowed(any())).thenReturn(true);
+        when(gate.authorize(any())).thenReturn(reactor.core.publisher.Mono.empty());
         com.alibaba.csp.sentinel.adapter.gateway.common.rule.GatewayRuleManager.loadRules(
                 java.util.Set.of(new com.alibaba.csp.sentinel.adapter.gateway.common.rule.GatewayFlowRule("profile-content").setCount(0)));
         int before = CONTENT_CALLS.get();
@@ -74,7 +74,7 @@ class GatewayIntegrationTest {
     }
 
     @Test void nacosPayloadApiGroupActuallyBlocksRoute() {
-        when(gate.allowed(any())).thenReturn(true);
+        when(gate.authorize(any())).thenReturn(reactor.core.publisher.Mono.empty());
         NacosGatewayRules source = new NacosGatewayRules(
                 org.mockito.Mockito.mock(com.alibaba.nacos.api.config.ConfigService.class),
                 new com.fasterxml.jackson.databind.ObjectMapper(), "KNODE_SENTINEL");
@@ -115,14 +115,14 @@ class GatewayIntegrationTest {
     }
 
     @Test void encodedOrdinaryPathAndInternalSubstringForwardUnchanged() {
-        when(gate.allowed(any())).thenReturn(true);
+        when(gate.authorize(any())).thenReturn(reactor.core.publisher.Mono.empty());
         client().get().uri(java.net.URI.create("http://127.0.0.1:" + port + "/api/blog/user/profile/internalized/%E4%B8%AD?q=%E4%B8%AD"))
                 .exchange().expectStatus().isOk().expectBody(String.class)
                 .value(value -> assertThat(value).startsWith("/api/blog/user/profile/internalized/%E4%B8%AD?q=%E4%B8%AD|"));
     }
 
     @Test void suspiciousPathFormsDoNotReachBackend() {
-        when(gate.allowed(any())).thenReturn(true);
+        when(gate.authorize(any())).thenReturn(reactor.core.publisher.Mono.empty());
         int before = CONTENT_CALLS.get();
         for (String path : java.util.List.of("/api/blog/user/profile/%69nternal/x",
                 "/api/blog/user/profile/%2e%2e/internal/x", "/api/blog/user/profile/%2Finternal/x",
@@ -134,14 +134,14 @@ class GatewayIntegrationTest {
     }
 
     @Test void searchWriteActuallyForwardsOnlyWithTestAuthenticationStub() {
-        when(gate.allowed(any())).thenReturn(true);
+        when(gate.authorize(any())).thenReturn(reactor.core.publisher.Mono.empty());
         client().post().uri("/api/admin/content/search/rebuild?q=hello").header("X-User-Id", "forged")
                 .bodyValue("sample-body").exchange().expectStatus().isOk()
                 .expectBody(String.class).isEqualTo("/api/admin/content/search/rebuild?q=hello|sample-body|null");
     }
 
     @Test void failedNonIdempotentWriteIsNotRetried() {
-        when(gate.allowed(any())).thenReturn(true);
+        when(gate.authorize(any())).thenReturn(reactor.core.publisher.Mono.empty());
         int before = SEARCH_CALLS.get();
         client().post().uri("/api/admin/content/search/rebuild?fail=yes").bodyValue("sample-body")
                 .exchange().expectStatus().isEqualTo(503);

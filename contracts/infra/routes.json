@@ -1,9 +1,9 @@
 {
-  "version": "0.2-draft",
+  "version": "0.3-draft",
   "status": "unfrozen",
   "prefix": "preserved",
   "routeMatchingMethods": "all; business service enforces methods",
-  "productionAccess": "all business requests return HTTP 503 until authentication and public allowlist are frozen",
+  "productionAccess": "credentials and designated anonymous methods allowed; protected methods validate user token and authoritative session; unconfigured auth returns 503 for token-dependent requests",
   "routes": [
     {
       "id": "profile-content",
@@ -14,7 +14,7 @@
         "/api/blog/user/profile/**"
       ],
       "candidateAuthClass": "mixed-unknown",
-      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+      "methodPolicy": "route matches methods; explicit anonymous method rules precede scope enforcement"
     },
     {
       "id": "admin-search",
@@ -25,7 +25,7 @@
         "/api/admin/content/search/**"
       ],
       "candidateAuthClass": "admin-required",
-      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+      "methodPolicy": "route matches methods; explicit anonymous method rules precede scope enforcement"
     },
     {
       "id": "user",
@@ -46,7 +46,7 @@
         "/api/admin/system/menu/**"
       ],
       "candidateAuthClass": "mixed",
-      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+      "methodPolicy": "route matches methods; explicit anonymous method rules precede scope enforcement"
     },
     {
       "id": "blog-content",
@@ -65,7 +65,7 @@
         "/api/blog/link/**"
       ],
       "candidateAuthClass": "mixed",
-      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+      "methodPolicy": "route matches methods; explicit anonymous method rules precede scope enforcement"
     },
     {
       "id": "admin-content",
@@ -79,7 +79,7 @@
         "/api/admin/ops/outbox/**"
       ],
       "candidateAuthClass": "admin-required",
-      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+      "methodPolicy": "route matches methods; explicit anonymous method rules precede scope enforcement"
     },
     {
       "id": "community",
@@ -92,7 +92,7 @@
         "/api/blog/notification/**"
       ],
       "candidateAuthClass": "mixed",
-      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+      "methodPolicy": "route matches methods; explicit anonymous method rules precede scope enforcement"
     },
     {
       "id": "search",
@@ -102,7 +102,7 @@
         "/api/blog/search"
       ],
       "candidateAuthClass": "anonymous-candidate",
-      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+      "methodPolicy": "route matches methods; explicit anonymous method rules precede scope enforcement"
     },
     {
       "id": "knowledge",
@@ -113,7 +113,7 @@
         "/api/blog/knowledge/**"
       ],
       "candidateAuthClass": "mixed",
-      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+      "methodPolicy": "route matches methods; explicit anonymous method rules precede scope enforcement"
     }
   ],
   "candidateMethodClassification": [
@@ -297,5 +297,35 @@
       "/api/blog/knowledge",
       "/api/blog/knowledge/**"
     ]
-  }
+  },
+  "anonymousPolicy": {
+    "GET": [
+      "/api/blog/article/**",
+      "/api/blog/category/**",
+      "/api/blog/tag/**",
+      "/api/blog/link/**",
+      "/api/blog/comment/**",
+      "/api/blog/search/**",
+      "/api/blog/user/profile/**",
+      "/api/blog/follow/{userId}/following"
+    ],
+    "PUT": [
+      "/api/blog/article/updateViewCount/**"
+    ],
+    "optionalToken": "if supplied it must validate signature and session, using its own scope"
+  },
+  "credentialEndpoints": {
+    "POST": [
+      "/api/blog/auth/login",
+      "/api/admin/auth/login",
+      "/api/blog/user/register"
+    ],
+    "oldToken": "ignored and removed before forwarding"
+  },
+  "protectedScopes": {
+    "/api/blog/**": "blog",
+    "/api/admin/**": "admin"
+  },
+  "clientIpPolicy": "external forwarding headers stripped; server forward headers strategy none",
+  "allRulesStatus": "approved input; implementation integration pending review"
 }

@@ -1,0 +1,17 @@
+{
+  "version": "0.1-draft",
+  "status": "implementation pending review",
+  "sdk": "com.lx:knode-auth:1.0-SNAPSHOT",
+  "verification": "bounded elastic CPU signature verification followed by nonblocking authoritative Redis GET and SDK session binding and scope check",
+  "sessionKey": "knode:<environment>:v1:auth:session:<sid>",
+  "authority": "separately configured read-only Redis account",
+  "keys": "kid to RSA public PEM file allowlist; changes require restart; no network key retrieval",
+  "health": "GET on same prefix readiness marker under read-only ACL; no sid state cache",
+  "failure": {
+    "invalid_or_revoked": 401,
+    "scope": 403,
+    "redis_or_malformed_session": 503
+  },
+  "identityHeaders": "strip all shared v0.2 identity families and external forwarding headers",
+  "credentials": "ignore and strip stale token for exact login and registration methods"
+}
