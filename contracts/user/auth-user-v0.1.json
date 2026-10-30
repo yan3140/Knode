@@ -1,0 +1,45 @@
+{
+  "name": "AUTH-USER-SESSION",
+  "version": "0.1",
+  "status": "candidate; pending controller and consumer review",
+  "jwt": {
+    "algorithm": "RS256",
+    "kid": "configured allowlist; never load external keys from headers",
+    "issuer": "knode-user",
+    "audience": "knode-api",
+    "token_use": "user",
+    "subject": "decimal user ID string",
+    "sid": "random UUID string distinct per session",
+    "scope": [
+      "blog",
+      "admin"
+    ],
+    "jti": "random UUID string",
+    "iat_exp": "integer Unix seconds",
+    "default_ttl_seconds": 3600
+  },
+  "session": {
+    "key": "knode:local:v1:auth:session:<sid>",
+    "fields": {
+      "schemaVersion": "integer 1",
+      "sid": "string",
+      "userId": "decimal string",
+      "scope": "blog or admin",
+      "status": "ACTIVE or REVOKED",
+      "expiresAt": "integer Unix seconds"
+    },
+    "authority": "user writes; validators read current authoritative state; no positive caching",
+    "binding": "JWT sid/sub/scope must equal session sid/userId/scope; both expirations valid"
+  },
+  "errors": {
+    "401": "invalid signature, claims, scope, binding, missing, revoked or expired session",
+    "503": "authoritative session state unavailable; protected handler must not execute",
+    "403": "authenticated but forbidden by separate authorization layer"
+  },
+  "revocation": "revoke current sid only; durable coordination and propagation are not implemented in G1",
+  "public_compatibility": "existing public endpoints retain token header, code/msg/data wrapper, Long values as strings and nullable data omission",
+  "internal_types": "new internal DTO IDs are decimal strings, bounded integers are JSON numbers, times ISO-8601 UTC unless JWT/session specifies Unix seconds",
+  "service_delegation": "future distinct token_use=service/delegation; single target audience, independent machine authorization and actor-bound restricted delegation. No implementation or endpoint in this slice.",
+  "retry_idempotency": "read retry bounded by caller budget; revocation should be idempotent; no blind write retry without durable guarantees",
+  "validation": "isolated tests only; real Redis and cross-service integration pending"
+}
