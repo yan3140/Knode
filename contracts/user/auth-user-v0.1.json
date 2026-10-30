@@ -1,7 +1,7 @@
 {
   "name": "AUTH-USER-SESSION",
   "version": "0.1",
-  "status": "candidate; pending controller and consumer review",
+  "status": "superseded by AUTH-USER-SESSION v0.2; retained for history",
   "jwt": {
     "algorithm": "RS256",
     "kid": "configured allowlist; never load external keys from headers",

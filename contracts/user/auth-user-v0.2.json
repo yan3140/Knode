@@ -1,0 +1,47 @@
+{
+  "name": "AUTH-USER-SESSION",
+  "version": "0.2",
+  "status": "approved by controller for G2 semantic revision; consumer integration pending",
+  "jwt": {
+    "algorithm": "RS256",
+    "kid": "configured allowlist; never load external keys from headers",
+    "issuer": "knode-user",
+    "audience": "knode-api",
+    "token_use": "user",
+    "subject": "decimal user ID string",
+    "sid": "random UUID string distinct per session",
+    "scope": [
+      "blog",
+      "admin"
+    ],
+    "jti": "random UUID string",
+    "iat_exp": "integer Unix seconds",
+    "default_ttl_seconds": 3600
+  },
+  "session": {
+    "key": "knode:<environment>:v1:auth:session:<sid>",
+    "fields": {
+      "schemaVersion": "integer 1",
+      "sid": "string",
+      "userId": "decimal string",
+      "scope": "blog or admin",
+      "status": "ACTIVE or REVOKED",
+      "expiresAt": "integer Unix seconds"
+    },
+    "authority": "user writes; validators read current authoritative state; no positive caching",
+    "binding": "JWT sid/sub/scope must equal session sid/userId/scope; both expirations valid",
+    "serialization": "JSON with strict field types; malformed state is unavailable (503), valid but mismatched state is invalid (401)"
+  },
+  "errors": {
+    "401": "invalid token, missing, revoked, expired or mismatched session",
+    "403": "verified active user has insufficient route scope or resource authorization",
+    "503": "authoritative session state unavailable or unparseable"
+  },
+  "revocation": "revoke current sid only; durable coordination and propagation are not implemented in G1",
+  "public_compatibility": "existing public endpoints retain token header, code/msg/data wrapper, Long values as strings and nullable data omission",
+  "internal_types": "new internal DTO IDs are decimal strings, bounded integers are JSON numbers, times ISO-8601 UTC unless JWT/session specifies Unix seconds",
+  "service_delegation": "future distinct token_use=service/delegation; single target audience, independent machine authorization and actor-bound restricted delegation. No implementation or endpoint in this slice.",
+  "retry_idempotency": "read retry bounded by caller budget; revocation should be idempotent; no blind write retry without durable guarantees",
+  "validation": "G2 shared core and Redis adapter tests pending; no real Redis or cross-service validation",
+  "authorization_order": "Verify signature and claims, fetch and validate authoritative session, then check route scope. Revoked token must yield 401 even for a different route scope."
+}

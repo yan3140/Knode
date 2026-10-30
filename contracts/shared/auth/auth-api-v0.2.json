@@ -1,0 +1,38 @@
+{
+  "version": "0.2",
+  "status": "controller approved semantic revision; consumer integration pending",
+  "module": "com.lx:knode-auth:1.0-SNAPSHOT",
+  "flow": [
+    "verifyToken(token) performs CPU-only signature and claim verification",
+    "load session JSON by verified sid using authoritative asynchronous read",
+    "SessionCodec.decode(json) rejects malformed state with status 503",
+    "validateSession(verified, optionalSession, requiredScope) checks current expiry and binding then route scope"
+  ],
+  "missing_session": 401,
+  "invalid_session": 401,
+  "insufficient_scope": 403,
+  "unavailable_or_malformed_state": 503,
+  "sample_session": {
+    "schemaVersion": 1,
+    "sid": "00000000-0000-0000-0000-000000000001",
+    "userId": "42",
+    "scope": "blog",
+    "status": "ACTIVE",
+    "expiresAt": 1793318700
+  },
+  "session_key": "knode:<environment>:v1:auth:session:<sid>",
+  "external_token_header": "exactly one token header; reject duplicates or comma-merged values",
+  "identity_headers": "reject X-Internal-*, X-User-*, X-Principal-*, X-Service-*, X-Identity-*, X-Authenticated-*, X-Forwarded-User, X-Remote-User, X-Auth-Request-User",
+  "client_notes": "Never trust forwarded identity; validate directly. No positive session cache. Private keys and blocking Redis clients are excluded. Redis GET must use a non-pipelined, non-transactional client so null means missing, not an incomplete operation.",
+  "java_api": {
+    "constructor": "new com.knode.auth.UserTokenVerifier(Map<String, RSAPublicKey> trustedKeys, Clock clock)",
+    "verify": "VerifiedToken verifyToken(String rawToken) throws AuthFailure(401); VerifiedToken exposes userId(), sid(), scope(), expiresAt()",
+    "decode": "Session SessionCodec.decode(String json) throws AuthFailure(503) for malformed or incompatible representation",
+    "authorize": "Principal validateSession(VerifiedToken token, Optional<Session> state, String requiredScope) throws AuthFailure(401/403); requiredScope is blog or admin",
+    "exception": "AuthFailure.status() is 401, 403 or 503",
+    "async": "Use verified.sid() to asynchronously GET the authority. A missing key becomes Optional.empty(); Redis errors/timeouts become 503. Decode non-null JSON and then call validateSession. Recheck validity at validation time."
+  },
+  "sources": [
+    "https://docs.spring.io/spring-data/redis/docs/3.5.x/api/org/springframework/data/redis/core/ValueOperations.html"
+  ]
+}
