@@ -1,0 +1,8 @@
+G1-USER-01 integration notes (candidate v0.1)
+This module provides a core, not a ready production authentication service.
+A trusted first-party credential verifier must validate account eligibility before calling issue; never expose issue(userId, scope) as an HTTP login operation.
+Configure a user-only RSA private key and matching trusted kid/public key allowlist from a secret manager. Public validators construct UserTokens with null private key and writer.
+Provide an authoritative SessionStore.Reader and a user-only SessionStore.Writer. Implementations must translate inability to read or write into SessionStore.Unavailable, store each sid atomically and enforce unique sid creation. Session reads must consult the authority each time and never cache a positive result. Preserve the v0.1 schema and key prefix in the candidate contract.
+UserAuthenticationFilter maps authentication failures to HTTP 401/503 before invoking protected handlers. It is not automatically registered: future integration must explicitly register it on protected routes with the expected scope and separately enforce resource authorization.
+The in-memory implementation exists only in tests. No production Redis adapter, password/database verification, durable revocation intent, event publication, service/delegation token issuance, key distribution endpoint, browser login, or cross-service integration is implemented.
+Authentication is checked before invoking an operation; resource authorization and races involving in-flight operations need their own policy. Logout of an already-invalid token returns 401. A future durable revoke writer must make its state transition idempotent.
