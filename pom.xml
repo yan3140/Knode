@@ -25,6 +25,7 @@
         <module>yan-blog</module>
         <module>yan-admin</module>
         <module>knode-gateway</module>
+        <module>knode-user</module>
     </modules>
 
     <properties>

@@ -21,7 +21,19 @@ management:
     health:
       probes:
         enabled: true
+      group:
+        readiness:
+          include: readinessState,authentication,governance
   endpoints:
     web:
       exposure:
         include: health
+knode:
+  governance:
+    nacos:
+      enabled: ${KNODE_GOV_NACOS_ENABLED:false}
+      server-addr: ${KNODE_GOV_NACOS_SERVER_ADDR:}
+      namespace: ${KNODE_GOV_NACOS_NAMESPACE:}
+      group: ${KNODE_GOV_NACOS_GROUP:KNODE_SENTINEL}
+      username: ${KNODE_GOV_NACOS_USERNAME:}
+      password: ${KNODE_GOV_NACOS_PASSWORD:}

@@ -1,0 +1,11 @@
+{
+  "status": "template-only",
+  "namespace": "explicit isolated namespace id required",
+  "group": "KNODE_SENTINEL",
+  "entries": [
+    "knode-gateway.gw-flow.json",
+    "knode-gateway.gw-api-group.json"
+  ],
+  "overwriteExisting": false,
+  "deployment": "check existing Data IDs before importing"
+}

@@ -35,6 +35,7 @@ class GatewayIntegrationTest {
     }).bindNow();
     static final DisposableServer SEARCH = HttpServer.create().host("127.0.0.1").port(0).handle((req, res) -> {
         SEARCH_CALLS.incrementAndGet();
+        if (req.uri().contains("fail=yes")) return res.status(503).sendString(reactor.core.publisher.Mono.just("unavailable"));
         return res.sendString(req.receive().aggregate().asString().map(body -> req.uri() + "|" + body + "|" + req.requestHeaders().get("X-User-Id")));
     }).bindNow();
     @DynamicPropertySource static void endpoints(DynamicPropertyRegistry r) {
@@ -59,6 +60,38 @@ class GatewayIntegrationTest {
                 .expectBody(String.class).isEqualTo("/api/blog/user/profile/42?q=hello|sample-token|null|request-1");
     }
 
+    @Test void sentinelBlocksRouteWithHttp429() {
+        when(gate.allowed(any())).thenReturn(true);
+        com.alibaba.csp.sentinel.adapter.gateway.common.rule.GatewayRuleManager.loadRules(
+                java.util.Set.of(new com.alibaba.csp.sentinel.adapter.gateway.common.rule.GatewayFlowRule("profile-content").setCount(0)));
+        int before = CONTENT_CALLS.get();
+        try {
+            client().get().uri("/api/blog/user/profile/42").exchange().expectStatus().isEqualTo(429);
+            assertThat(CONTENT_CALLS.get()).isEqualTo(before);
+        } finally {
+            com.alibaba.csp.sentinel.adapter.gateway.common.rule.GatewayRuleManager.loadRules(java.util.Set.of());
+        }
+    }
+
+    @Test void nacosPayloadApiGroupActuallyBlocksRoute() {
+        when(gate.allowed(any())).thenReturn(true);
+        NacosGatewayRules source = new NacosGatewayRules(
+                org.mockito.Mockito.mock(com.alibaba.nacos.api.config.ConfigService.class),
+                new com.fasterxml.jackson.databind.ObjectMapper(), "KNODE_SENTINEL");
+        source.apply("knode-gateway.gw-api-group.json",
+                "[{\"apiName\":\"profile-api\",\"predicateItems\":[{\"pattern\":\"/api/blog/user/profile/**\",\"matchStrategy\":1}]}]");
+        source.apply("knode-gateway.gw-flow.json",
+                "[{\"resource\":\"profile-api\",\"resourceMode\":1,\"count\":0}]");
+        int before = CONTENT_CALLS.get();
+        try {
+            client().get().uri("/api/blog/user/profile/42").exchange().expectStatus().isEqualTo(429);
+            assertThat(CONTENT_CALLS.get()).isEqualTo(before);
+        } finally {
+            com.alibaba.csp.sentinel.adapter.gateway.common.rule.GatewayRuleManager.loadRules(java.util.Set.of());
+            com.alibaba.csp.sentinel.adapter.gateway.common.api.GatewayApiDefinitionManager.loadApiDefinitions(java.util.Set.of());
+        }
+    }
+
     @Test void routeOrderSelectsPreciseRules() {
         assertThat(routeFor("/api/blog/user/profile/42")).isEqualTo("profile-content");
         assertThat(routeFor("/api/admin/content/search/rebuild")).isEqualTo("admin-search");
@@ -70,11 +103,49 @@ class GatewayIntegrationTest {
                 .next().map(route -> route.getId()).block();
     }
 
+    @Test void matrixResolvesAllServices() {
+        assertThat(routeFor("/api/blog/auth/login")).isEqualTo("user");
+        assertThat(routeFor("/api/admin/system/role/list")).isEqualTo("user");
+        assertThat(routeFor("/api/blog/article/42")).isEqualTo("blog-content");
+        assertThat(routeFor("/api/admin/upload")).isEqualTo("admin-content");
+        assertThat(routeFor("/api/admin/ops/outbox/list")).isEqualTo("admin-content");
+        assertThat(routeFor("/api/blog/follow/42")).isEqualTo("community");
+        assertThat(routeFor("/api/blog/search")).isEqualTo("search");
+        assertThat(routeFor("/api/blog/knowledge/5")).isEqualTo("knowledge");
+    }
+
+    @Test void encodedOrdinaryPathAndInternalSubstringForwardUnchanged() {
+        when(gate.allowed(any())).thenReturn(true);
+        client().get().uri(java.net.URI.create("http://127.0.0.1:" + port + "/api/blog/user/profile/internalized/%E4%B8%AD?q=%E4%B8%AD"))
+                .exchange().expectStatus().isOk().expectBody(String.class)
+                .value(value -> assertThat(value).startsWith("/api/blog/user/profile/internalized/%E4%B8%AD?q=%E4%B8%AD|"));
+    }
+
+    @Test void suspiciousPathFormsDoNotReachBackend() {
+        when(gate.allowed(any())).thenReturn(true);
+        int before = CONTENT_CALLS.get();
+        for (String path : java.util.List.of("/api/blog/user/profile/%69nternal/x",
+                "/api/blog/user/profile/%2e%2e/internal/x", "/api/blog/user/profile/%2Finternal/x",
+                "/api/blog/user/profile/%5Cinternal/x", "/api/blog/user/profile/%2569nternal/x",
+                "/api/blog/user/profile/internal;foo/x")) {
+            client().get().uri(java.net.URI.create("http://127.0.0.1:" + port + path)).exchange().expectStatus().isForbidden();
+        }
+        assertThat(CONTENT_CALLS.get()).isEqualTo(before);
+    }
+
     @Test void searchWriteActuallyForwardsOnlyWithTestAuthenticationStub() {
         when(gate.allowed(any())).thenReturn(true);
         client().post().uri("/api/admin/content/search/rebuild?q=hello").header("X-User-Id", "forged")
                 .bodyValue("sample-body").exchange().expectStatus().isOk()
                 .expectBody(String.class).isEqualTo("/api/admin/content/search/rebuild?q=hello|sample-body|null");
+    }
+
+    @Test void failedNonIdempotentWriteIsNotRetried() {
+        when(gate.allowed(any())).thenReturn(true);
+        int before = SEARCH_CALLS.get();
+        client().post().uri("/api/admin/content/search/rebuild?fail=yes").bodyValue("sample-body")
+                .exchange().expectStatus().isEqualTo(503);
+        assertThat(SEARCH_CALLS.get()).isEqualTo(before + 1);
     }
 
     @Test void protectedWriteAndInternalPathNeverReachBackend() {
@@ -94,6 +165,6 @@ class GatewayIntegrationTest {
         client().get().uri("/api/blog/user/profile/42").header("Authorization", "one", "two")
                 .exchange().expectStatus().isBadRequest();
         client().get().uri("/actuator/health/liveness").exchange().expectStatus().isOk();
-        client().get().uri("/actuator/health/readiness").exchange().expectStatus().isOk();
+        client().get().uri("/actuator/health/readiness").exchange().expectStatus().isEqualTo(503);
     }
 }

@@ -1,0 +1,43 @@
+{
+  "version": "0.1-draft",
+  "status": "unfrozen",
+  "namespace": "explicit isolated namespace required",
+  "group": "KNODE_SENTINEL",
+  "dataIds": [
+    {
+      "id": "knode-gateway.gw-flow.json",
+      "type": "gw-flow",
+      "resource": "routeId or apiName",
+      "gatewayClient": "implemented"
+    },
+    {
+      "id": "knode-gateway.gw-api-group.json",
+      "type": "gw-api-group",
+      "resource": "apiName and path predicates",
+      "gatewayClient": "implemented"
+    },
+    {
+      "id": "knode-<service>.flow.json",
+      "type": "flow",
+      "resource": "actual registered resource name",
+      "gatewayClient": "service adapter pending"
+    },
+    {
+      "id": "knode-<service>.degrade.json",
+      "type": "degrade",
+      "resource": "actual registered resource name",
+      "gatewayClient": "service adapter pending"
+    }
+  ],
+  "loading": {
+    "emptyArray": "explicit clear",
+    "missingOrInvalid": "retain last valid rules and mark unavailable",
+    "clientDisconnected": "readiness unavailable",
+    "initialFailure": "readiness unavailable",
+    "publisher": "dashboard publishing not implemented",
+    "listenerRegistrationException": "unready; recovery may require restart if listener was not registered",
+    "unchangedRule": "accepted; Sentinel may report no change"
+  },
+  "blockHttpStatus": 429,
+  "apiPredicateSemantics": "matchStrategy 0 exact, 1 Ant path pattern (use /** for descendants), 2 regex"
+}

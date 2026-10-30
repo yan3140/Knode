@@ -1,1 +1,30 @@
-{"version":"0.1-draft","status":"unfrozen","serviceName":"knode-gateway","health":"/actuator/health","liveness":"/actuator/health/liveness","readiness":"/actuator/health/readiness","nacos":{"defaultEnabled":false,"environment":["NACOS_DISCOVERY_ENABLED","NACOS_CONFIG_ENABLED","NACOS_SERVER_ADDR","NACOS_NAMESPACE","NACOS_CONFIG_IMPORT","NACOS_GROUP","NACOS_USERNAME","NACOS_PASSWORD"]},"auth":"unavailable"}
+{
+  "version": "0.2-draft",
+  "status": "unfrozen",
+  "serviceName": "knode-gateway",
+  "health": "/actuator/health",
+  "liveness": "/actuator/health/liveness",
+  "readiness": "503 until auth is ready and enabled Nacos rules are valid",
+  "nacos": {
+    "defaultEnabled": false,
+    "environment": [
+      "NACOS_DISCOVERY_ENABLED",
+      "NACOS_CONFIG_ENABLED",
+      "NACOS_SERVER_ADDR",
+      "NACOS_NAMESPACE",
+      "NACOS_CONFIG_IMPORT",
+      "NACOS_GROUP",
+      "NACOS_USERNAME",
+      "NACOS_PASSWORD"
+    ]
+  },
+  "auth": "unavailable",
+  "governanceEnvironment": [
+    "KNODE_GOV_NACOS_ENABLED",
+    "KNODE_GOV_NACOS_SERVER_ADDR",
+    "KNODE_GOV_NACOS_NAMESPACE",
+    "KNODE_GOV_NACOS_GROUP",
+    "KNODE_GOV_NACOS_USERNAME",
+    "KNODE_GOV_NACOS_PASSWORD"
+  ]
+}

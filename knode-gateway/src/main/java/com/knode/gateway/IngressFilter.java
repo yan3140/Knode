@@ -20,7 +20,7 @@ public class IngressFilter implements WebFilter, Ordered {
     @Override public int getOrder() { return Ordered.HIGHEST_PRECEDENCE; }
     @Override public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         String path = exchange.getRequest().getURI().getRawPath();
-        if (path.toLowerCase(java.util.Locale.ROOT).contains("/internal") || path.contains("%")) {
+        if (!PathBoundary.isSafe(exchange.getRequest().getURI())) {
             exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
             return exchange.getResponse().setComplete();
         }

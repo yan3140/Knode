@@ -1,1 +1,301 @@
-{"version":"0.1-draft","status":"unfrozen","routes":[{"id":"profile-content","path":"/api/blog/user/profile/**","service":"knode-content","authentication":"unavailable","anonymousMethodsPending":true,"order":-20},{"id":"admin-search","path":"/api/admin/content/search/**","service":"knode-search","authentication":"unavailable","order":-20},{"id":"user","path":"/api/blog/user/**","service":"knode-user","authentication":"unavailable","order":0},{"id":"admin-content","path":"/api/admin/content/**","service":"knode-content","authentication":"unavailable","order":0}],"prefixPreserved":true,"automaticRetry":false}
+{
+  "version": "0.2-draft",
+  "status": "unfrozen",
+  "prefix": "preserved",
+  "routeMatchingMethods": "all; business service enforces methods",
+  "productionAccess": "all business requests return HTTP 503 until authentication and public allowlist are frozen",
+  "routes": [
+    {
+      "id": "profile-content",
+      "order": -20,
+      "service": "knode-content",
+      "paths": [
+        "/api/blog/user/profile",
+        "/api/blog/user/profile/**"
+      ],
+      "candidateAuthClass": "mixed-unknown",
+      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+    },
+    {
+      "id": "admin-search",
+      "order": -20,
+      "service": "knode-search",
+      "paths": [
+        "/api/admin/content/search",
+        "/api/admin/content/search/**"
+      ],
+      "candidateAuthClass": "admin-required",
+      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+    },
+    {
+      "id": "user",
+      "order": 0,
+      "service": "knode-user",
+      "paths": [
+        "/api/blog/auth",
+        "/api/blog/auth/**",
+        "/api/admin/auth",
+        "/api/admin/auth/**",
+        "/api/blog/user",
+        "/api/blog/user/**",
+        "/api/admin/system/user",
+        "/api/admin/system/user/**",
+        "/api/admin/system/role",
+        "/api/admin/system/role/**",
+        "/api/admin/system/menu",
+        "/api/admin/system/menu/**"
+      ],
+      "candidateAuthClass": "mixed",
+      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+    },
+    {
+      "id": "blog-content",
+      "order": 0,
+      "service": "knode-content",
+      "paths": [
+        "/api/blog/article",
+        "/api/blog/article/**",
+        "/api/blog/category",
+        "/api/blog/category/**",
+        "/api/blog/tag",
+        "/api/blog/tag/**",
+        "/api/blog/comment",
+        "/api/blog/comment/**",
+        "/api/blog/link",
+        "/api/blog/link/**"
+      ],
+      "candidateAuthClass": "mixed",
+      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+    },
+    {
+      "id": "admin-content",
+      "order": 0,
+      "service": "knode-content",
+      "paths": [
+        "/api/admin/content",
+        "/api/admin/content/**",
+        "/api/admin/upload",
+        "/api/admin/ops/outbox",
+        "/api/admin/ops/outbox/**"
+      ],
+      "candidateAuthClass": "admin-required",
+      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+    },
+    {
+      "id": "community",
+      "order": 0,
+      "service": "knode-community",
+      "paths": [
+        "/api/blog/follow",
+        "/api/blog/follow/**",
+        "/api/blog/notification",
+        "/api/blog/notification/**"
+      ],
+      "candidateAuthClass": "mixed",
+      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+    },
+    {
+      "id": "search",
+      "order": 0,
+      "service": "knode-search",
+      "paths": [
+        "/api/blog/search"
+      ],
+      "candidateAuthClass": "anonymous-candidate",
+      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+    },
+    {
+      "id": "knowledge",
+      "order": 0,
+      "service": "knode-knowledge",
+      "paths": [
+        "/api/blog/knowledge",
+        "/api/blog/knowledge/**"
+      ],
+      "candidateAuthClass": "mixed",
+      "methodPolicy": "route accepts any; upstream determines method; current gateway denies until auth is integrated"
+    }
+  ],
+  "candidateMethodClassification": [
+    {
+      "method": "POST",
+      "paths": [
+        "/api/blog/auth/login",
+        "/api/admin/auth/login",
+        "/api/blog/user/register"
+      ],
+      "classification": "anonymous-candidate"
+    },
+    {
+      "method": "GET",
+      "paths": [
+        "/api/blog/article/articleList",
+        "/api/blog/article/hotArticleList",
+        "/api/blog/article/{id}",
+        "/api/blog/category/getCategoryList",
+        "/api/blog/tag/listAllTag",
+        "/api/blog/link/getAllLink",
+        "/api/blog/search"
+      ],
+      "classification": "anonymous-candidate"
+    },
+    {
+      "method": "GET",
+      "paths": [
+        "/api/blog/user/userInfo",
+        "/api/admin/auth/me",
+        "/api/admin/auth/routers",
+        "/api/blog/notification/list",
+        "/api/blog/notification/unread-count"
+      ],
+      "classification": "user-required"
+    },
+    {
+      "method": "POST",
+      "paths": [
+        "/api/blog/auth/logout",
+        "/api/admin/auth/logout",
+        "/api/blog/comment",
+        "/api/admin/content/search/rebuild",
+        "/api/admin/content/search/retry",
+        "/api/admin/content/search/sync/{articleId}",
+        "/api/admin/upload"
+      ],
+      "classification": "user-required"
+    },
+    {
+      "method": "PUT",
+      "paths": [
+        "/api/blog/user/userInfo",
+        "/api/blog/follow/{followeeId}",
+        "/api/blog/notification/{id}/read",
+        "/api/blog/notification/read-all"
+      ],
+      "classification": "user-required"
+    },
+    {
+      "method": "DELETE",
+      "paths": [
+        "/api/blog/follow/{followeeId}",
+        "/api/blog/notification/{id}"
+      ],
+      "classification": "user-required"
+    },
+    {
+      "method": "GET",
+      "paths": [
+        "/api/blog/comment/commentList",
+        "/api/blog/comment/linkCommentList",
+        "/api/blog/follow/{userId}/following"
+      ],
+      "classification": "public-candidate-subject-to-service-policy"
+    },
+    {
+      "method": "POST",
+      "paths": [
+        "/api/blog/article",
+        "/api/admin/content/article",
+        "/api/blog/knowledge",
+        "/api/blog/knowledge/{id}/documents",
+        "/api/blog/knowledge/{id}/articles/{articleId}",
+        "/api/blog/knowledge/{id}/query",
+        "/api/blog/knowledge/query/{queryId}/feedback",
+        "/api/blog/knowledge/{id}/agent/runs"
+      ],
+      "classification": "user-required"
+    },
+    {
+      "method": "GET",
+      "paths": [
+        "/api/blog/follow/status/{followeeId}",
+        "/api/blog/follow/following",
+        "/api/blog/follow/followers",
+        "/api/blog/knowledge/mine",
+        "/api/blog/knowledge/{id}/documents/{documentId}/history"
+      ],
+      "classification": "user-required"
+    },
+    {
+      "method": "GET",
+      "paths": [
+        "/api/blog/knowledge/system"
+      ],
+      "classification": "public-candidate-subject-to-service-policy"
+    },
+    {
+      "method": "PUT",
+      "paths": [
+        "/api/blog/article/updateViewCount/{id}"
+      ],
+      "classification": "pending-confirmation"
+    },
+    {
+      "method": "PUT",
+      "paths": [
+        "/api/admin/content/article",
+        "/api/admin/content/article/{id}/status",
+        "/api/blog/knowledge/{id}",
+        "/api/blog/knowledge/{id}/documents/{documentId}"
+      ],
+      "classification": "user-required"
+    },
+    {
+      "method": "DELETE",
+      "paths": [
+        "/api/admin/content/article/{ids}",
+        "/api/blog/knowledge/{id}",
+        "/api/blog/knowledge/{id}/documents/{documentId}",
+        "/api/blog/knowledge/{id}/documents/{documentId}/association"
+      ],
+      "classification": "user-required"
+    }
+  ],
+  "defaultClassification": "protected until endpoint method and anonymity are confirmed",
+  "internalPaths": "never exposed",
+  "automaticRetry": false,
+  "legacyAliasAudit": {
+    "source": "API integration document sections 3-7",
+    "unknownLegacyAliases": "pending owner inventory; no speculative aliases enabled",
+    "state": "partial: documented examples and prefixes; exact old aliases require service-owner evidence",
+    "targetPrefixes": [
+      "/api/blog/user/profile",
+      "/api/blog/user/profile/**",
+      "/api/admin/content/search",
+      "/api/admin/content/search/**",
+      "/api/blog/auth",
+      "/api/blog/auth/**",
+      "/api/admin/auth",
+      "/api/admin/auth/**",
+      "/api/blog/user",
+      "/api/blog/user/**",
+      "/api/admin/system/user",
+      "/api/admin/system/user/**",
+      "/api/admin/system/role",
+      "/api/admin/system/role/**",
+      "/api/admin/system/menu",
+      "/api/admin/system/menu/**",
+      "/api/blog/article",
+      "/api/blog/article/**",
+      "/api/blog/category",
+      "/api/blog/category/**",
+      "/api/blog/tag",
+      "/api/blog/tag/**",
+      "/api/blog/comment",
+      "/api/blog/comment/**",
+      "/api/blog/link",
+      "/api/blog/link/**",
+      "/api/admin/content",
+      "/api/admin/content/**",
+      "/api/admin/upload",
+      "/api/admin/ops/outbox",
+      "/api/admin/ops/outbox/**",
+      "/api/blog/follow",
+      "/api/blog/follow/**",
+      "/api/blog/notification",
+      "/api/blog/notification/**",
+      "/api/blog/search",
+      "/api/blog/knowledge",
+      "/api/blog/knowledge/**"
+    ]
+  }
+}
