@@ -1,0 +1,35 @@
+{
+  "name": "AUTH-REVOKED-STREAM",
+  "version": "1.0",
+  "status": "G6 producer implementation; consumer integration pending",
+  "stream": {
+    "default": "knode:<environment>:v1:events:session",
+    "entry": "Exactly one UTF-8 field event containing the full SessionRevoked JSON envelope.",
+    "id": "Redis stream ID is independent of the stable eventId.",
+    "schema": "session-revoked-v1.schema.json",
+    "order": "No global or cross-instance ordering guarantee."
+  },
+  "semantics": {
+    "boundary": "Redis session deletion is confirmed first; intent REVOKED and outbox fact are committed together. PENDING or CLAIMED is not published. PUBLISHED means XADD accepted and DB acknowledgement committed; it does not mean any consumer processed the event.",
+    "delivery": "At least once. An XADD followed by failed DB acknowledgement can repeat the same immutable eventId and JSON. Consumers must persist deduplication atomically with their own effect.",
+    "scope": "Only aggregateId/payload.sid and its current executions are targeted. userId is descriptive and must never select other sessions.",
+    "reasons": {
+      "LOGOUT": "Direct session logout",
+      "ACCOUNT_SECURITY_CHANGED": "Explicit account status, password, or deletion action",
+      "UNSPECIFIED": "Historical fact with no recorded reason, or general administrator edit whose exact security change is not established"
+    }
+  },
+  "operations": {
+    "monitor": "GET /api/admin/auth/session-events and /metrics require system:session-event:monitor",
+    "replay": "POST /api/admin/auth/session-events/{eventId}/replay requires system:session-event:replay; only DEAD; same eventId, transactionally audited",
+    "retries": "Finite per-item lease and batch, capped exponential delay, DEAD after configured attempts. Expired claims recover; no event is discarded.",
+    "redaction": "Only constant delivery error codes retained; no token, credentials, or personal profile in envelope, operations, or logs."
+  },
+  "retention": {
+    "local": "Published facts and matching completed coordination/index rows only, or naturally expired session indexes with no intent/outbox, older than configured retention (minimum 7 days, default 30 days), bounded batches. Pending, claimed, DEAD, and unrepresented historical intents are preserved.",
+    "stream": "No XTRIM by producer. Operators and consumers must agree retention and durable consumer watermarks before any independent trimming.",
+    "historicalGap": "Existing G3 REVOKED intents without outbox remain absent; no automatic backfill."
+  },
+  "readiness": "Disabled reports DISABLED. Enabled probes a separate stream with atomic MULTI/XADD/EXPIRE/EXEC and exact-key DEL. Target-key ACL may differ and is explicitly reported unverified; most recent successful publication is exposed, not a guarantee of current target ACL.",
+  "notImplemented": "Agent consumption, deduplication, pause/checkpoint and downstream completion."
+}

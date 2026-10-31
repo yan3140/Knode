@@ -17,6 +17,12 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 @Configuration
 public class UserConfiguration {
     @Bean Clock clock() { return Clock.systemUTC(); }
+    @Bean(destroyMethod="close") SessionEventTransport sessionEventTransport(Environment env) {
+        String enabled=env.getProperty("KNODE_SESSION_EVENTS_ENABLED","false");
+        if ("false".equals(enabled)) return new DisabledSessionEventTransport();
+        if ("true".equals(enabled)) return new RedisSessionEventTransport(env);
+        throw new IllegalArgumentException("Invalid session events enabled flag");
+    }
     @Bean BCryptPasswordEncoder passwords() { return new BCryptPasswordEncoder(); }
     private Map<String,String> settings(Environment env, String prefix) {
         var result=new HashMap<String,String>();

@@ -18,8 +18,9 @@ public class AdminController {
     private final AdminMenuService menus;
     private final AdminSupport security;
     private final RevocationCoordinator revocations;
-    public AdminController(AdminUserService users,AdminRoleService roles,AdminMenuService menus,AdminSupport security,RevocationCoordinator revocations) {
-        this.users=users;this.roles=roles;this.menus=menus;this.security=security;this.revocations=revocations;
+    private final com.knode.user.auth.SessionEventRelay sessionEvents;
+    public AdminController(AdminUserService users,AdminRoleService roles,AdminMenuService menus,AdminSupport security,RevocationCoordinator revocations,com.knode.user.auth.SessionEventRelay sessionEvents) {
+        this.users=users;this.roles=roles;this.menus=menus;this.security=security;this.revocations=revocations;this.sessionEvents=sessionEvents;
     }
     private long actor(HttpServletRequest req) { return Long.parseLong(((UserTokens.Principal)req.getAttribute(UserRequestFilter.PRINCIPAL)).userId()); }
     @GetMapping("/system/user/list") public ApiResponse users(HttpServletRequest req,Integer pageNum,Integer pageSize,String userName,String phonenumber,String status) {
@@ -49,6 +50,18 @@ public class AdminController {
     @PostMapping("/system/menu") public ApiResponse addMenu(HttpServletRequest req,@RequestBody MenuInput input) { menus.add(actor(req),input);return ApiResponse.ok(); }
     @PutMapping("/system/menu") public ApiResponse updateMenu(HttpServletRequest req,@RequestBody MenuInput input) { menus.update(actor(req),input);return ApiResponse.ok(); }
     @DeleteMapping("/system/menu/{id}") public ApiResponse deleteMenu(HttpServletRequest req,@PathVariable long id) { menus.delete(actor(req),id);return ApiResponse.ok(); }
+    @GetMapping("/auth/session-events")
+    public ApiResponse sessionEvents(HttpServletRequest req,@RequestParam(defaultValue="50") int limit) {
+        security.require(actor(req),"system:session-event:monitor");return ApiResponse.ok(sessionEvents.list(limit));
+    }
+    @GetMapping("/auth/session-events/metrics")
+    public ApiResponse sessionEventMetrics(HttpServletRequest req) {
+        security.require(actor(req),"system:session-event:monitor");return ApiResponse.ok(sessionEvents.metrics());
+    }
+    @PostMapping("/auth/session-events/{eventId}/replay")
+    public ApiResponse replaySessionEvent(HttpServletRequest req,@PathVariable String eventId) {
+        long actor=actor(req);security.require(actor,"system:session-event:replay");sessionEvents.replay(eventId,actor);return ApiResponse.ok();
+    }
     @GetMapping("/ops/revocations/metrics") public ApiResponse metrics(HttpServletRequest req) {
         security.require(actor(req),"system:revocation:monitor");
         return ApiResponse.ok(Map.of("pending",Long.toString(security.db.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE state='PENDING'",Long.class)),

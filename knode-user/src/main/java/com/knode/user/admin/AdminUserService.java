@@ -77,7 +77,7 @@ public class AdminUserService {
         Long id=u==null?null:u.id();if (id==null) throw AdminSupport.invalid();
         tx.executeWithoutResult(status -> {
             a.lock();a.require(actor,"system:user:edit");validate(u,false);a.allowTarget(actor,id);a.allowRoles(actor,u.roleIds());
-            int before=a.manageable();revocations.enqueueUser(id);
+            int before=a.manageable();revocations.enqueueUser(id,"UNSPECIFIED");
             // Every profile write advances the revision, independent of database collation.
             a.db.update("UPDATE sys_user SET profile_revision=profile_revision+1,profile_updated_at=CURRENT_TIMESTAMP,nick_name=?,status=?,email=?,phonenumber=?,sex=?,update_by=?,update_time=CURRENT_TIMESTAMP WHERE id=?",
                     u.nickName(),u.status(),u.email(),u.phonenumber(),u.sex(),actor,id);

@@ -1,0 +1,64 @@
+{
+  "name": "SESSION-EVENT-RELAY-CONFIG",
+  "status": "G6 producer; all secrets external",
+  "enabledDefault": false,
+  "environment": [
+    "KNODE_SESSION_EVENTS_ENABLED=true|false",
+    "KNODE_AUTH_ENVIRONMENT",
+    "KNODE_SESSION_EVENTS_REDIS_HOST",
+    "KNODE_SESSION_EVENTS_REDIS_PORT",
+    "KNODE_SESSION_EVENTS_REDIS_USERNAME",
+    "KNODE_SESSION_EVENTS_REDIS_PASSWORD",
+    "KNODE_SESSION_EVENTS_REDIS_DATABASE (default 0)",
+    "KNODE_SESSION_EVENTS_REDIS_TLS (default true)",
+    "KNODE_SESSION_EVENTS_STREAM_KEY (optional; default knode:<environment>:v1:events:session)",
+    "KNODE_SESSION_EVENTS_PROBE_KEY (required when enabled; separate dedicated key)",
+    "KNODE_SESSION_EVENTS_MAX_ATTEMPTS (1..100; default 5)",
+    "KNODE_SESSION_EVENTS_RETENTION_DAYS (7..3650; default 30)",
+    "KNODE_SESSION_EVENTS_POLL_MS",
+    "KNODE_SESSION_EVENTS_INITIAL_MS",
+    "KNODE_SESSION_EVENTS_CLEANUP_POLL_MS",
+    "KNODE_SESSION_EVENTS_CLEANUP_INITIAL_MS"
+  ],
+  "credentials": "Use a dedicated event identity distinct from session read and write identities. No production in-memory publisher. Redis credential and private values must be injected externally.",
+  "probe": "Dedicated key only: MULTI, XADD probe 1, EXPIRE 10, EXEC, then DEL. XADD and expiry commit atomically; no synthetic event is added to the business event stream. Probe-key ACL does not prove target-key ACL.",
+  "minimumAcl": {
+    "producerTarget": [
+      "XADD <explicit-target> * event <json>"
+    ],
+    "producerProbe": [
+      "MULTI",
+      "XADD <explicit-probe> * probe 1",
+      "EXPIRE <explicit-probe> 10",
+      "EXEC",
+      "DISCARD on transaction failure",
+      "DEL <explicit-probe>"
+    ],
+    "realTestOnly": [
+      "XRANGE <new-test-stream> - +",
+      "DEL <new-test-stream>"
+    ],
+    "connection": "Client authentication, SELECT if a nonzero DB is explicitly used, and client handshake commands as required by driver/server. No ACL SETUSER/DELUSER is issued."
+  },
+  "realTest": {
+    "class": "com.knode.user.ExternalRelayIT",
+    "optIn": "-Dknode.it.real.relay.enabled=true -Dtest=ExternalRelayIT",
+    "guard": "Explicit verify- environment, empty MySQL schema on 127.0.0.1 non-3306 port, and event prefix strictly under knode:<verify-environment>:v1:business:",
+    "environment": [
+      "KNODE_IT_AUTH_ENVIRONMENT",
+      "KNODE_IT_DB_URL",
+      "KNODE_IT_DB_USERNAME",
+      "KNODE_IT_DB_PASSWORD",
+      "KNODE_IT_REDIS_HOST",
+      "KNODE_IT_REDIS_PORT",
+      "KNODE_IT_REDIS_DATABASE",
+      "KNODE_IT_REDIS_TLS",
+      "KNODE_IT_REDIS_READ_USERNAME",
+      "KNODE_IT_REDIS_WRITE_USERNAME",
+      "KNODE_IT_EVENT_REDIS_USERNAME",
+      "KNODE_IT_EVENT_REDIS_PASSWORD",
+      "KNODE_IT_EVENT_STREAM_PREFIX"
+    ],
+    "cleanup": "Only two newly random-named test keys are deleted; no scans or ACL mutations."
+  }
+}

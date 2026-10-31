@@ -1,0 +1,71 @@
+{
+  "name": "AUTH-DELEGATION",
+  "version": "0.1-candidate",
+  "status": "Unfrozen proposal; no implementation or issuer exists in G6.",
+  "fundamental": [
+    "Issuer knode-user holds signing key; single target audience; token_use=delegation. Validate algorithm, trusted kid, issuer, expiry and token type.",
+    "An authenticated machine service token and a valid user token or independently verifiable parent grant are both required. act.sub is the actual authenticated calling service, not a body claim.",
+    "sub/user_scope/sid derive from verified user or durable parent grant. Check sid/sub/scope against current authoritative session on issuance and every protected use; unavailable authority is 503, revoked or mismatched is 401.",
+    "Permissions and resource constraints are the intersection of user authority, authenticated service grants, parent authority and target operation; none may expand. Effective expiry never exceeds parent authority and session expiry."
+  ],
+  "creation": {
+    "binding": [
+      "clientRequestId",
+      "knowledgeBaseId",
+      "conversationId when applicable",
+      "creation operation",
+      "actual caller",
+      "user and sid"
+    ],
+    "proof": "Knowledge must supply an authenticated durable authorization/registration proof binding the request to the authenticated user's authorized knowledgeBaseId and idempotency identity. The issuer cannot trust self-reported IDs; no runId exists yet."
+  },
+  "execution": {
+    "binding": [
+      "runId",
+      "controlEpoch",
+      "knowledgeBaseId",
+      "current worker/actor",
+      "sid",
+      "allowed execution operations"
+    ],
+    "proof": "Agent must supply authenticated durable registration/lease evidence mapping the completed creation grant to runId, current controlEpoch, worker and expiry. The issuer or target must check current authority and epoch against that source; stale epochs are denied even with an unexpired token."
+  },
+  "exchange": {
+    "path": "Agent -> knode-knowledge",
+    "checks": [
+      "Verify actual Agent machine identity and permitted exchange chain.",
+      "Verify parent signature, audience for its current holder, lifetime, durable grant, current sid, runId, controlEpoch and resource bindings.",
+      "Issue only knode-knowledge audience and reduced operations/resources; act.sub becomes the actual Agent caller.",
+      "Never derive a new valid grant from an expired, revoked, exhausted or superseded parent."
+    ]
+  },
+  "manualContinue": {
+    "requires": "Explicit action by the authenticated user under a currently valid new sid; recheck knowledge access and obtain fresh durable authorization.",
+    "prohibits": "Do not reuse or refresh the expired/revoked parent or silently turn WAITING_INPUT into an answer.",
+    "epoch": "Agent authority must atomically advance and attest the new controlEpoch and invalidate the previous execution lease."
+  },
+  "revokedCheckpoint": {
+    "purpose": "After revocation, permit only one already-started safe-step checkpoint to be persisted and paused; no new work, reads, user output, privilege expansion or completion.",
+    "proof": "Agent's durable step-start record, worker identity, runId, epoch, bounded checkpoint scope and one-use/short lifetime must be verified independently. A user-delegation sid bypass must not confer general API access; target must enforce the one narrow capability."
+  },
+  "dependencies": {
+    "user": [
+      "Authoritative session validation and aud-bound delegation signer; current user and machine verification; durable revocation check."
+    ],
+    "knowledge": [
+      "Durable authorization and creation registration proof tied to user, knowledgeBaseId, clientRequestId and permissible operations; resource revocation lookup."
+    ],
+    "agent": [
+      "Durable run registration, current controlEpoch, worker lease, step-start and one-use checkpoint proof; atomic epoch advancement and revocation."
+    ],
+    "shared": [
+      "Frozen proof formats, verification keys, audience and permissions matrix, expiry/replay/error semantics, event consumer deduplication and failure policy."
+    ]
+  },
+  "openDecisions": [
+    "Who owns and signs persistent grants and registration proofs; exact APIs and revocation consistency guarantees.",
+    "Checkpoint capability replay protection and the transaction boundary for step completion versus revocation.",
+    "Allowed delegation chains, maximum lifetimes and operation-specific resource scopes."
+  ],
+  "nonGoals": "No delegation endpoint, authorization proof service, Agent state machine or consumer is implemented by this candidate."
+}

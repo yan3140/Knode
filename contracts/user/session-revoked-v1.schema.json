@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SessionRevoked v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "eventType",
+    "schemaVersion",
+    "producer",
+    "aggregateType",
+    "aggregateId",
+    "sourceRevision",
+    "occurredAt",
+    "visibility",
+    "payload"
+  ],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "eventType": {
+      "const": "SessionRevoked"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "producer": {
+      "const": "knode-user"
+    },
+    "aggregateType": {
+      "const": "AUTH_SESSION"
+    },
+    "aggregateId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sourceRevision": {
+      "const": "1"
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "visibility": {
+      "const": "INTERNAL"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sid",
+        "userId",
+        "scope",
+        "reason",
+        "executionScope"
+      ],
+      "properties": {
+        "sid": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,18}$"
+        },
+        "scope": {
+          "enum": [
+            "blog",
+            "admin"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "LOGOUT",
+            "ACCOUNT_SECURITY_CHANGED",
+            "UNSPECIFIED"
+          ]
+        },
+        "executionScope": {
+          "const": "SID_CURRENT_EXECUTIONS"
+        }
+      }
+    }
+  }
+}

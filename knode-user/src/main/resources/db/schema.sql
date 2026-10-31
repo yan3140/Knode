@@ -27,7 +27,7 @@ CREATE TABLE sys_user_role (user_id BIGINT NOT NULL, role_id BIGINT NOT NULL, PR
 CREATE TABLE sys_role_menu (role_id BIGINT NOT NULL, menu_id BIGINT NOT NULL, PRIMARY KEY(role_id,menu_id));
 CREATE TABLE auth_revocation_intent (
  sid VARCHAR(36) NOT NULL PRIMARY KEY, user_id BIGINT NOT NULL, scope VARCHAR(5) NOT NULL,
- event_id VARCHAR(36) NOT NULL UNIQUE, state VARCHAR(16) NOT NULL,
+ event_id VARCHAR(36) NOT NULL UNIQUE, state VARCHAR(16) NOT NULL, reason VARCHAR(32) NOT NULL DEFAULT 'UNSPECIFIED',
  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, revoked_at TIMESTAMP NULL,
  attempts INT NOT NULL DEFAULT 0, next_attempt_at TIMESTAMP NULL, claim_token VARCHAR(36), claim_until TIMESTAMP NULL, last_error VARCHAR(128)
 );
@@ -35,7 +35,14 @@ CREATE TABLE auth_revocation_intent (
 CREATE TABLE auth_revocation_outbox (
  event_id VARCHAR(36) NOT NULL PRIMARY KEY, sid VARCHAR(36) NOT NULL UNIQUE,
  user_id BIGINT NOT NULL, scope VARCHAR(5) NOT NULL, occurred_at TIMESTAMP NOT NULL,
- execution_scope VARCHAR(32) NOT NULL, state VARCHAR(16) NOT NULL
+ execution_scope VARCHAR(32) NOT NULL, state VARCHAR(16) NOT NULL,
+ reason VARCHAR(32) NOT NULL DEFAULT 'UNSPECIFIED', event_json TEXT,
+ attempts INT NOT NULL DEFAULT 0, next_attempt_at TIMESTAMP NULL,
+ claim_token VARCHAR(36), claim_until TIMESTAMP NULL, last_error VARCHAR(128), published_at TIMESTAMP NULL
+);
+CREATE TABLE auth_revocation_replay_audit (
+ id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, event_id VARCHAR(36) NOT NULL, actor_id BIGINT NOT NULL,
+ requested_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE user_security_lock (id INT NOT NULL PRIMARY KEY);
 INSERT INTO user_security_lock(id) VALUES (1);
@@ -48,3 +55,7 @@ CREATE INDEX idx_auth_login_user ON auth_login_session(user_id,active);
 
 CREATE INDEX idx_auth_revoke_due ON auth_revocation_intent(state,next_attempt_at,claim_until);
 CREATE INDEX idx_auth_outbox_state ON auth_revocation_outbox(state,occurred_at);
+
+CREATE INDEX idx_auth_outbox_due ON auth_revocation_outbox(state,next_attempt_at,claim_until);
+
+CREATE INDEX idx_auth_login_expiry ON auth_login_session(expires_at);

@@ -28,7 +28,7 @@ public class RevocationCoordinator {
         try {
             tx.executeWithoutResult(status -> {
                 jdbc.queryForList("SELECT sid FROM auth_login_session WHERE sid=? FOR UPDATE",String.class,principal.sid());
-                jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES (?,?,?,?,'PENDING')",
+                jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state,reason) VALUES (?,?,?,?,'PENDING','LOGOUT')",
                         principal.sid(),userId,principal.scope(),UUID.randomUUID().toString());
             });
         } catch (DuplicateKeyException ignored) {
@@ -45,13 +45,15 @@ public class RevocationCoordinator {
             throw new AuthenticationFailure(503);
         }
         Boolean changed=tx.execute(status -> {
-            var rows=jdbc.queryForList("SELECT sid,user_id,scope,event_id,state FROM auth_revocation_intent WHERE sid=? FOR UPDATE",sid);
+            var rows=jdbc.queryForList("SELECT sid,user_id,scope,event_id,state,reason FROM auth_revocation_intent WHERE sid=? FOR UPDATE",sid);
             if (rows.size()!=1) throw new AuthenticationFailure(503);
             var row=rows.get(0);
             if ("PENDING".equals(row.get("state"))) {
                 Timestamp occurred=Timestamp.from(clock.instant());
-                jdbc.update("INSERT INTO auth_revocation_outbox(event_id,sid,user_id,scope,occurred_at,execution_scope,state) VALUES(?,?,?,?,?,'SID_CURRENT_EXECUTIONS','PENDING')",
-                        row.get("event_id"),sid,row.get("user_id"),row.get("scope"),occurred);
+                String envelope=SessionEventEnvelope.encode((String)row.get("event_id"),sid,
+                        ((Number)row.get("user_id")).longValue(),(String)row.get("scope"),(String)row.get("reason"),occurred.toInstant());
+                jdbc.update("INSERT INTO auth_revocation_outbox(event_id,sid,user_id,scope,occurred_at,execution_scope,state,reason,event_json) VALUES(?,?,?,?,?,'SID_CURRENT_EXECUTIONS','PENDING',?,?)",
+                        row.get("event_id"),sid,row.get("user_id"),row.get("scope"),occurred,row.get("reason"),envelope);
                 jdbc.update("UPDATE auth_revocation_intent SET state='REVOKED',revoked_at=?,claim_token=NULL,claim_until=NULL,last_error=NULL WHERE sid=? AND state='PENDING'",occurred,sid);
                 jdbc.update("UPDATE auth_login_session SET active=0 WHERE sid=?",sid);
                 return true;
@@ -80,15 +82,17 @@ public class RevocationCoordinator {
         return Timestamp.from(clock.instant().plusSeconds(delay));
     }
     /** Must be called while the account mutation transaction holds its row lock. */
-    public void enqueueUser(long userId) {
+    public void enqueueUser(long userId) { enqueueUser(userId,"ACCOUNT_SECURITY_CHANGED"); }
+    public void enqueueUser(long userId,String reason) {
+        if (!java.util.Set.of("ACCOUNT_SECURITY_CHANGED","UNSPECIFIED").contains(reason)) throw new IllegalArgumentException("Invalid revocation reason");
         if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
             throw new IllegalStateException("Account mutation transaction required");
         var sessions=jdbc.queryForList("SELECT sid,scope FROM auth_login_session WHERE user_id=? AND active=1 FOR UPDATE",userId);
         for (var session:sessions) {
             String sid=(String)session.get("sid"), scope=(String)session.get("scope");
             Integer present=jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE sid=?",Integer.class,sid);
-            if (present==0) jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES (?,?,?,?,'PENDING')",
-                    sid,userId,scope,UUID.randomUUID().toString());
+            if (present==0) jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state,reason) VALUES (?,?,?,?,'PENDING',?)",
+                    sid,userId,scope,UUID.randomUUID().toString(),reason);
         }
         jdbc.update("UPDATE auth_login_session SET active=0 WHERE user_id=? AND active=1",userId);
     }

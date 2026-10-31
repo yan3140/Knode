@@ -15,8 +15,9 @@ public class HealthController {
     private final SessionStore.Writer writer;
     private final TransactionTemplate tx;
     private final com.knode.user.internal.ServiceTokens serviceTokens;
-    public HealthController(JdbcTemplate jdbc,SessionStore.Reader sessions,SessionStore.Writer writer,TransactionTemplate tx,com.knode.user.internal.ServiceTokens serviceTokens) {
-        this.jdbc=jdbc;this.sessions=sessions;this.writer=writer;this.tx=tx;this.serviceTokens=serviceTokens;
+    private final com.knode.user.auth.SessionEventRelay sessionEvents;
+    public HealthController(JdbcTemplate jdbc,SessionStore.Reader sessions,SessionStore.Writer writer,TransactionTemplate tx,com.knode.user.internal.ServiceTokens serviceTokens,com.knode.user.auth.SessionEventRelay sessionEvents) {
+        this.jdbc=jdbc;this.sessions=sessions;this.writer=writer;this.tx=tx;this.serviceTokens=serviceTokens;this.sessionEvents=sessionEvents;
     }
     @GetMapping("/health/live") public Map<String,String> live() { return Map.of("status","UP"); }
     @GetMapping("/health/ready") public Map<String,String> ready() {
@@ -24,6 +25,9 @@ public class HealthController {
         for (String table:new String[]{"sys_user","sys_role","yan_menu","sys_user_role","sys_role_menu","auth_login_session","auth_revocation_outbox","user_security_lock"})
             jdbc.queryForObject("SELECT COUNT(*) FROM "+table+" WHERE 1=0",Integer.class);
         if (jdbc.queryForObject("SELECT COUNT(*) FROM user_security_lock WHERE id=1",Integer.class)!=1) throw new AuthenticationFailure(503);
+        jdbc.queryForList("SELECT reason FROM auth_revocation_intent WHERE 1=0");
+        jdbc.queryForList("SELECT event_json,reason,attempts,next_attempt_at,claim_token,claim_until,last_error,published_at FROM auth_revocation_outbox WHERE 1=0");
+        jdbc.queryForList("SELECT event_id,actor_id,requested_at FROM auth_revocation_replay_audit WHERE 1=0");
         tx.executeWithoutResult(status -> {
             jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES(?,0,'blog',?,'PENDING')",sid,UUID.randomUUID().toString());
             jdbc.update("UPDATE auth_revocation_intent SET attempts=attempts WHERE sid=?",sid);
@@ -33,6 +37,8 @@ public class HealthController {
         });
         try { sessions.find(sid); writer.probe(); }
         catch (SessionStore.Unavailable e) { throw new AuthenticationFailure(503); }
-        return Map.of("status","UP","serviceIssuer",serviceTokens.enabled()?"ENABLED":"DISABLED");
+        if (sessionEvents.enabled() && !sessionEvents.probe()) throw new AuthenticationFailure(503);
+        return Map.of("status","UP","serviceIssuer",serviceTokens.enabled()?"ENABLED":"DISABLED",
+                "sessionEvents",sessionEvents.enabled()?"PROBE_OK_TARGET_WRITE_UNVERIFIED":"DISABLED");
     }
 }

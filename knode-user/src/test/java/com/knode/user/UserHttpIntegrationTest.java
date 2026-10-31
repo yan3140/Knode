@@ -36,6 +36,9 @@ class UserHttpIntegrationTest {
     @Autowired ObjectMapper json;
     @Autowired RevocationCoordinator coordinator;
     @Autowired UserTokens tokens;
+    @Autowired SessionEventRelay relay;
+    @Autowired org.springframework.transaction.support.TransactionTemplate transactionTemplate;
+    @MockitoBean SessionEventTransport eventTransport;
     @MockitoBean SessionStore.Reader reader;
     @MockitoBean SessionStore.Writer writer;
     @MockitoBean(name="authReadConnection") LettuceConnectionFactory readConnection;
@@ -69,16 +72,18 @@ class UserHttpIntegrationTest {
         registry.add("spring.datasource.username",() -> System.getProperty("knode.test.mysql.user","sa"));registry.add("spring.datasource.password",() -> "");
         registry.add("KNODE_AUTH_ENVIRONMENT",() -> "test");
         registry.add("KNODE_AUTH_REVOCATION_INITIAL_MS",() -> "600000");
+        registry.add("KNODE_SESSION_EVENTS_INITIAL_MS",() -> "600000");
+        registry.add("KNODE_SESSION_EVENTS_CLEANUP_INITIAL_MS",() -> "600000");
         registry.add("KNODE_AUTH_SIGNING_KID",() -> "test-key");
         registry.add("KNODE_AUTH_SIGNING_PRIVATE_FILE",() -> privateKey.toString());
         registry.add("KNODE_AUTH_SIGNING_PUBLIC_FILE",() -> publicKey.toString());
     }
     @BeforeAll void schema() { new ResourceDatabasePopulator(new ClassPathResource("db/schema.sql")).execute(dataSource); }
     @BeforeEach void setup() {
-        for (String table:new String[]{"auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_role_menu","sys_user_role","yan_menu","sys_role","sys_user"})
+        for (String table:new String[]{"auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_role_menu","sys_user_role","yan_menu","sys_role","sys_user"})
             jdbc.update("DELETE FROM "+table);
         sessions.clear(); failRead.set(false);failWrite.set(false);failMark.set(false);
-        reset(reader,writer);
+        reset(reader,writer,eventTransport);
         when(reader.find(anyString())).thenAnswer(inv -> {
             if (failRead.get()) throw new SessionStore.Unavailable("simulated read");
             return Optional.ofNullable(sessions.get(inv.getArgument(0)));
@@ -515,6 +520,181 @@ class UserHttpIntegrationTest {
              assertEquals(503,failed.getStatusCode().value());assertTrue(data(failed).has("error"));assertFalse(data(failed).has("items"));}
         finally {jdbc.execute("ALTER TABLE sys_user_temp RENAME TO sys_user");}
     }
+    @Test void relayDeadLetterReplayAndRealAdminAuthorization() throws Exception {
+        when(eventTransport.enabled()).thenReturn(true);
+        String alice=login("alice","blog"), admin=login("admin","admin");
+        assertEquals(200,call(HttpMethod.POST,"/api/blog/auth/logout",null,alice).getStatusCode().value());
+        String event=jdbc.queryForObject("SELECT event_id FROM auth_revocation_outbox",String.class);
+        String envelope=jdbc.queryForObject("SELECT event_json FROM auth_revocation_outbox WHERE event_id=?",String.class,event);
+        var payload=json.readTree(envelope);
+        assertEquals(event,payload.path("eventId").asText());assertEquals("SessionRevoked",payload.path("eventType").asText());
+        assertTrue(payload.path("schemaVersion").isInt());assertEquals(1,payload.path("schemaVersion").asInt());
+        assertEquals("knode-user",payload.path("producer").asText());assertEquals("AUTH_SESSION",payload.path("aggregateType").asText());
+        assertEquals("1",payload.path("sourceRevision").asText());assertEquals("INTERNAL",payload.path("visibility").asText());
+        java.time.Instant.parse(payload.path("occurredAt").asText());
+        assertEquals(payload.path("aggregateId").asText(),payload.path("payload").path("sid").asText());
+        assertEquals("42",payload.path("payload").path("userId").asText());
+        assertEquals("LOGOUT",payload.path("payload").path("reason").asText());
+        assertEquals("SID_CURRENT_EXECUTIONS",payload.path("payload").path("executionScope").asText());
+        assertFalse(envelope.contains("test-password"));assertFalse(envelope.contains(alice));assertFalse(envelope.contains("alice@example.invalid"));
+        jdbc.update("UPDATE auth_revocation_outbox SET attempts=4 WHERE event_id=?",event);
+        doThrow(new IllegalStateException("sensitive detail must not be stored")).when(eventTransport).publish(anyString());
+        assertEquals(0,relay.relay(10));
+        assertEquals("DEAD",jdbc.queryForObject("SELECT state FROM auth_revocation_outbox WHERE event_id=?",String.class,event));
+        assertEquals("DELIVERY_UNCONFIRMED",jdbc.queryForObject("SELECT last_error FROM auth_revocation_outbox WHERE event_id=?",String.class,event));
+        assertEquals(403,call(HttpMethod.GET,"/api/admin/auth/session-events",null,admin).getStatusCode().value());
+        permission(901,"system:session-event:monitor");
+        assertEquals(200,call(HttpMethod.GET,"/api/admin/auth/session-events",null,admin).getStatusCode().value());
+        assertEquals(403,call(HttpMethod.POST,"/api/admin/auth/session-events/"+event+"/replay",null,admin).getStatusCode().value());
+        String blog=login("bob","blog");
+        assertEquals(403,call(HttpMethod.GET,"/api/admin/auth/session-events",null,blog).getStatusCode().value());
+        permission(902,"system:session-event:replay");
+        assertEquals(200,data(call(HttpMethod.POST,"/api/admin/auth/session-events/"+event+"/replay",null,admin)).path("code").asInt());
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_replay_audit WHERE event_id=? AND actor_id=44",Integer.class,event));
+        assertEquals(envelope,jdbc.queryForObject("SELECT event_json FROM auth_revocation_outbox WHERE event_id=?",String.class,event));
+        doNothing().when(eventTransport).publish(anyString());
+        assertEquals(1,relay.relay(10));
+        assertEquals("PUBLISHED",jdbc.queryForObject("SELECT state FROM auth_revocation_outbox WHERE event_id=?",String.class,event));
+        verify(eventTransport,times(2)).publish(envelope);
+        assertEquals(401,call(HttpMethod.GET,"/api/blog/user/userInfo",null,alice).getStatusCode().value());
+        assertEquals(200,call(HttpMethod.GET,"/api/blog/user/userInfo",null,blog).getStatusCode().value());
+    }
+
+    @Test void relayRetriesSameEventAfterAppendWithoutDatabaseAck() throws Exception {
+        when(eventTransport.enabled()).thenReturn(true);
+        String user=login("alice","blog");
+        assertEquals(200,call(HttpMethod.POST,"/api/blog/auth/logout",null,user).getStatusCode().value());
+        String id=jdbc.queryForObject("SELECT event_id FROM auth_revocation_outbox",String.class);
+        var appended=new java.util.ArrayList<String>();
+        doAnswer(inv -> {
+            appended.add(inv.getArgument(0));
+            jdbc.execute("ALTER TABLE auth_revocation_outbox RENAME TO auth_revocation_outbox_temp");
+            return null;
+        }).doAnswer(inv -> {appended.add(inv.getArgument(0));return null;}).when(eventTransport).publish(anyString());
+        try {assertEquals(0,relay.relay(10));}
+        finally {jdbc.execute("ALTER TABLE auth_revocation_outbox_temp RENAME TO auth_revocation_outbox");}
+        assertEquals("CLAIMED",jdbc.queryForObject("SELECT state FROM auth_revocation_outbox WHERE event_id=?",String.class,id));
+        jdbc.update("UPDATE auth_revocation_outbox SET claim_until=? WHERE event_id=?",java.sql.Timestamp.from(java.time.Instant.now().minusSeconds(1)),id);
+        var restarted=new SessionEventRelay(jdbc,transactionTemplate,eventTransport,java.time.Clock.systemUTC(),new org.springframework.mock.env.MockEnvironment());
+        assertEquals(1,restarted.relay(10));
+        assertEquals(2,appended.size());assertEquals(appended.get(0),appended.get(1));
+        assertEquals(id,json.readTree(appended.get(1)).path("eventId").asText());
+        assertEquals("PUBLISHED",jdbc.queryForObject("SELECT state FROM auth_revocation_outbox WHERE event_id=?",String.class,id));
+    }
+
+    @Test void relayClaimsConcurrentlyAndContinuesAfterIndividualFailure() throws Exception {
+        when(eventTransport.enabled()).thenReturn(true);
+        String one=login("alice","blog"),two=login("bob","blog");
+        call(HttpMethod.POST,"/api/blog/auth/logout",null,one);call(HttpMethod.POST,"/api/blog/auth/logout",null,two);
+        var ids=jdbc.queryForList("SELECT event_id FROM auth_revocation_outbox ORDER BY occurred_at,event_id",String.class);
+        String failure=ids.get(0);
+        doAnswer(inv -> {if (json.readTree((String)inv.getArgument(0)).path("eventId").asText().equals(failure)) throw new IllegalStateException("test failure");return null;})
+                .when(eventTransport).publish(anyString());
+        assertEquals(1,relay.relay(10));
+        assertEquals("PENDING",jdbc.queryForObject("SELECT state FROM auth_revocation_outbox WHERE event_id=?",String.class,failure));
+        assertEquals("PUBLISHED",jdbc.queryForObject("SELECT state FROM auth_revocation_outbox WHERE event_id=?",String.class,ids.get(1)));
+        jdbc.update("UPDATE auth_revocation_outbox SET next_attempt_at=NULL WHERE event_id=?",failure);
+        var entered=new java.util.concurrent.CountDownLatch(1);var release=new java.util.concurrent.CountDownLatch(1);
+        doAnswer(inv -> {entered.countDown();assertTrue(release.await(10,java.util.concurrent.TimeUnit.SECONDS));return null;}).when(eventTransport).publish(anyString());
+        var pool=java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var first=pool.submit(() -> relay.relay(10));assertTrue(entered.await(10,java.util.concurrent.TimeUnit.SECONDS));
+            var second=pool.submit(() -> relay.relay(10));assertEquals(0,second.get(10,java.util.concurrent.TimeUnit.SECONDS));
+            release.countDown();assertEquals(1,first.get(10,java.util.concurrent.TimeUnit.SECONDS));
+        } finally {release.countDown();pool.shutdownNow();}
+        assertEquals("PUBLISHED",jdbc.queryForObject("SELECT state FROM auth_revocation_outbox WHERE event_id=?",String.class,failure));
+        verify(eventTransport,times(3)).publish(anyString());
+    }
+
+    @Test void cleanupRetainsPendingClaimedDeadAndHistoricalFacts() throws Exception {
+        var past=java.sql.Timestamp.from(java.time.Instant.now().minus(java.time.Duration.ofDays(40)));
+        var future=java.sql.Timestamp.from(java.time.Instant.now().plusSeconds(3600));
+        Map<String,String> ids=new LinkedHashMap<>();
+        for (String state:List.of("PUBLISHED","PENDING","CLAIMED","DEAD")) {
+            String sid=UUID.randomUUID().toString(),id=UUID.randomUUID().toString();ids.put(state,id);
+            jdbc.update("INSERT INTO auth_login_session(sid,user_id,scope,expires_at,active) VALUES(?,42,'blog',?,0)",sid,future);
+            jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES(?,42,'blog',?,'REVOKED')",sid,id);
+            jdbc.update("INSERT INTO auth_revocation_outbox(event_id,sid,user_id,scope,occurred_at,execution_scope,state,published_at) VALUES(?,?,42,'blog',?,'SID_CURRENT_EXECUTIONS',?,?)",id,sid,past,state,past);
+        }
+        List<String> protectedIds=new ArrayList<>();
+        for (String kind:List.of("recent","active","intentPending","intentMismatch")) {
+            String sid=UUID.randomUUID().toString(),id=UUID.randomUUID().toString();protectedIds.add(id);
+            jdbc.update("INSERT INTO auth_login_session(sid,user_id,scope,expires_at,active) VALUES(?,42,'blog',?,?)",sid,future,kind.equals("active")?1:0);
+            jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES(?,42,'blog',?,?)",sid,kind.equals("intentMismatch")?UUID.randomUUID().toString():id,kind.equals("intentPending")?"PENDING":"REVOKED");
+            jdbc.update("INSERT INTO auth_revocation_outbox(event_id,sid,user_id,scope,occurred_at,execution_scope,state,published_at) VALUES(?,?,42,'blog',?,'SID_CURRENT_EXECUTIONS','PUBLISHED',?)",
+                    id,sid,past,kind.equals("recent")?java.sql.Timestamp.from(java.time.Instant.now()):past);
+        }
+        String legacySid=UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES(?,42,'blog',?,'REVOKED')",legacySid,UUID.randomUUID().toString());
+        String expired=UUID.randomUUID().toString(),pendingExpired=UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO auth_login_session(sid,user_id,scope,expires_at,active) VALUES(?,42,'blog',?,1),(?,42,'blog',?,1)",expired,past,pendingExpired,past);
+        jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES(?,42,'blog',?,'PENDING')",pendingExpired,UUID.randomUUID().toString());
+        assertEquals(2,relay.cleanup(10));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM auth_login_session WHERE sid=?",Integer.class,expired));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_login_session WHERE sid=?",Integer.class,pendingExpired));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox WHERE event_id=?",Integer.class,ids.get("PUBLISHED")));
+        for (String state:List.of("PENDING","CLAIMED","DEAD"))
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox WHERE event_id=?",Integer.class,ids.get(state)));
+        for (String id:protectedIds) assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox WHERE event_id=?",Integer.class,id));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE sid=?",Integer.class,legacySid));
+    }
+
+    @Test void logoutOutboxFailureLeavesRecoverableIntentAndNoFalseSuccess() throws Exception {
+        String user=login("alice","blog");
+        jdbc.execute("ALTER TABLE auth_revocation_outbox RENAME TO auth_revocation_outbox_temp");
+        try {assertEquals(503,call(HttpMethod.POST,"/api/blog/auth/logout",null,user).getStatusCode().value());}
+        finally {jdbc.execute("ALTER TABLE auth_revocation_outbox_temp RENAME TO auth_revocation_outbox");}
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE state='PENDING'",Integer.class));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox",Integer.class));
+        assertEquals(1,coordinator.recoverPending(10));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox WHERE state='PENDING'",Integer.class));
+        assertEquals(401,call(HttpMethod.GET,"/api/blog/user/userInfo",null,user).getStatusCode().value());
+    }
+
+    @Test void relayMaterializesLegacyFactsWithoutInventingLogoutAndExhaustsExpiredClaims() throws Exception {
+        when(eventTransport.enabled()).thenReturn(true);
+        var time=java.sql.Timestamp.from(java.time.Instant.now().minusSeconds(60));
+        String sid=UUID.randomUUID().toString(),id=UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO auth_revocation_outbox(event_id,sid,user_id,scope,occurred_at,execution_scope,state) VALUES(?,?,42,'blog',?,'SID_CURRENT_EXECUTIONS','PENDING')",id,sid,time);
+        assertEquals(1,relay.relay(10));
+        String event=jdbc.queryForObject("SELECT event_json FROM auth_revocation_outbox WHERE event_id=?",String.class,id);
+        assertEquals("UNSPECIFIED",json.readTree(event).path("payload").path("reason").asText());
+        verify(eventTransport).publish(event);
+        String exhausted=UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO auth_revocation_outbox(event_id,sid,user_id,scope,occurred_at,execution_scope,state,attempts,claim_until) VALUES(?,?,42,'blog',?,'SID_CURRENT_EXECUTIONS','CLAIMED',5,?)",
+                exhausted,UUID.randomUUID().toString(),time,time);
+        assertEquals(0,relay.relay(10));
+        assertEquals("DEAD",jdbc.queryForObject("SELECT state FROM auth_revocation_outbox WHERE event_id=?",String.class,exhausted));
+    }
+
+    @Test void readinessReportsDisabledAndRequiresARealProbeWhenEnabled() throws Exception {
+        var disabled=data(call(HttpMethod.GET,"/health/ready",null,null));
+        assertEquals("DISABLED",disabled.path("sessionEvents").asText());
+        when(eventTransport.enabled()).thenReturn(true);when(eventTransport.probe()).thenReturn(false,true);
+        assertEquals(503,call(HttpMethod.GET,"/health/ready",null,null).getStatusCode().value());
+        var response=call(HttpMethod.GET,"/health/ready",null,null);
+        assertEquals(200,response.getStatusCode().value());
+        assertEquals("PROBE_OK_TARGET_WRITE_UNVERIFIED",data(response).path("sessionEvents").asText());
+    }
+
+    @Test void securityChangeRecordsItsActualEventReason() throws Exception {
+        permission(900,"*:*:*");String admin=login("admin","admin"), alice=login("alice","blog");
+        var result=call(HttpMethod.PUT,"/api/admin/system/user/changeStatus","{\"userId\":42,\"status\":\"1\"}",admin);
+        assertEquals(200,data(result).path("code").asInt());
+        String envelope=jdbc.queryForObject("SELECT event_json FROM auth_revocation_outbox",String.class);
+        assertEquals("ACCOUNT_SECURITY_CHANGED",json.readTree(envelope).path("payload").path("reason").asText());
+        assertEquals(401,call(HttpMethod.GET,"/api/blog/user/userInfo",null,alice).getStatusCode().value());
+    }
+
+    @Test void adminProfileEditDoesNotInventSecurityChangeReason() throws Exception {
+        permission(900,"*:*:*");String admin=login("admin","admin"),alice=login("alice","blog");
+        var result=call(HttpMethod.PUT,"/api/admin/system/user","{\"id\":42,\"nickName\":\"Alice New\",\"status\":\"0\",\"email\":\"alice@example.invalid\",\"sex\":\"2\",\"roleIds\":[]}",admin);
+        assertEquals(200,data(result).path("code").asInt());
+        String envelope=jdbc.queryForObject("SELECT event_json FROM auth_revocation_outbox",String.class);
+        assertEquals("UNSPECIFIED",json.readTree(envelope).path("payload").path("reason").asText());
+        assertEquals(401,call(HttpMethod.GET,"/api/blog/user/userInfo",null,alice).getStatusCode().value());
+    }
+
     @Test void adminProfileRevisionAdvancesForCollationEquivalentNames() throws Exception {
         permission(900,"*:*:*");
         String admin=login("admin","admin"), existingSession=login("alice","blog");
