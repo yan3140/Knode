@@ -170,15 +170,32 @@
                         <fail message="Official Sentinel source archive checksum mismatch">
                             <condition><not><equals arg1="${source.actual.sha256}" arg2="6380e273d4e3c9f72a77f91c8aae7ffc5466a1a462a5ebdf9740fb577f50ca6f"/></not></condition>
                         </fail>
+                        <delete file="${project.build.directory}/upstream/Sentinel-d75a6687b82711f8611ef91f6a56e993d24f57c5/sentinel-dashboard/src/main/webapp/resources/dist/js/app.js"/>
                         <unzip src="${project.build.directory}/sentinel-source.zip" dest="${project.build.directory}/upstream">
                             <patternset><include name="Sentinel-d75a6687b82711f8611ef91f6a56e993d24f57c5/sentinel-dashboard/**"/></patternset>
                         </unzip>
                         <copy todir="${project.build.directory}/upstream/Sentinel-d75a6687b82711f8611ef91f6a56e993d24f57c5/sentinel-dashboard/src/main/java" overwrite="true">
                             <fileset dir="${project.basedir}/overlay/java" erroronmissingdir="false"/>
                         </copy>
+                        <copy todir="${project.build.directory}/upstream/Sentinel-d75a6687b82711f8611ef91f6a56e993d24f57c5/sentinel-dashboard/src/main/resources" overwrite="true">
+                            <fileset dir="${project.basedir}/overlay/resources" erroronmissingdir="false"/>
+                        </copy>
                         <copy todir="${project.build.directory}/upstream/Sentinel-d75a6687b82711f8611ef91f6a56e993d24f57c5/sentinel-dashboard/src/main/webapp" overwrite="true">
                             <fileset dir="${project.basedir}/overlay/webapp" erroronmissingdir="false"/>
                         </copy>
+                        <!-- The official index loads the dist bundle, whose module bootstrap must use our maintained interceptor. -->
+                        <copy file="${project.build.directory}/upstream/Sentinel-d75a6687b82711f8611ef91f6a56e993d24f57c5/sentinel-dashboard/src/main/webapp/resources/dist/js/app.js" tofile="${project.build.directory}/dashboard-services.js" overwrite="true"/>
+                        <replaceregexp file="${project.build.directory}/dashboard-services.js" encoding="UTF-8"
+                            match="^.*\(app=angular\.module\(&quot;sentinelDashboardApp&quot;\)\)\.filter\(&quot;range&quot;"
+                            replace="var app;&#10;(app=angular.module(&quot;sentinelDashboardApp&quot;)).filter(&quot;range&quot;"/>
+                        <loadfile property="dashboard.tail" srcFile="${project.build.directory}/dashboard-services.js" encoding="UTF-8"/>
+                        <fail message="Pinned Dashboard bundle bootstrap marker not found">
+                            <condition><not><contains string="${dashboard.tail}" substring="var app;&#10;(app=angular.module(&quot;sentinelDashboardApp&quot;)).filter(&quot;range&quot;"/></not></condition>
+                        </fail>
+                        <concat destfile="${project.build.directory}/upstream/Sentinel-d75a6687b82711f8611ef91f6a56e993d24f57c5/sentinel-dashboard/src/main/webapp/resources/dist/js/app.js" encoding="UTF-8" fixlastline="true">
+                            <filelist dir="${project.basedir}/overlay/webapp/resources/app/scripts" files="app.js"/>
+                            <filelist dir="${project.build.directory}" files="dashboard-services.js"/>
+                        </concat>
                     </target></configuration>
                 </execution></executions>
             </plugin>

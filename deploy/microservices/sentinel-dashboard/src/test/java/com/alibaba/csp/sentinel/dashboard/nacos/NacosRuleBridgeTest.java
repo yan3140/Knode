@@ -149,6 +149,58 @@ class NacosRuleBridgeTest {
         assertEquals("[ ]", store.get("demo.gw-api-group.json"));
     }
 
+
+    @Test void minimalSdkRuleShowsDefaultsAndRetainsRegexOnEdit() throws Exception {
+        String raw = "[{\"resource\":\"/r.*\",\"count\":2,\"regex\":true}]";
+        store.put("demo.flow.json", raw);
+        MvcResult read = perform(get("/v1/flow/rules").param("app","demo").param("ip","127.0.0.1").param("port","8719"));
+        JsonNode row = content(read).path("data").get(0);
+        assertEquals("default", row.path("limitApp").asText());
+        assertEquals(0, row.path("strategy").asInt(-1));
+        assertEquals(0, row.path("controlBehavior").asInt(-1));
+        assertTrue(row.path("regex").asBoolean());
+        MvcResult updated = perform(put("/v1/flow/save.json").param("app","demo")
+                .param("id", row.path("id").asText()).param("count","3")
+                .header("X-Nacos-Version", read.getResponse().getHeader("X-Nacos-Version")));
+        assertEquals(0, content(updated).path("code").asInt(), updated.getResponse().getContentAsString());
+        assertTrue(json.readTree(store.get("demo.flow.json")).get(0).path("regex").asBoolean());
+    }
+
+    @Test void rejectsInvalidPersistedRulesAndNonfiniteInputs() throws Exception {
+        String[] badFlow = {
+            "[{\"resource\":\"r\",\"grade\":8,\"count\":2}]",
+            "[{\"resource\":\"r\",\"grade\":1,\"count\":2,\"strategy\":9}]",
+            "[{\"resource\":\"r\",\"grade\":1,\"count\":2,\"controlBehavior\":9}]",
+            "[{\"resource\":\"r\",\"grade\":1,\"count\":2,\"strategy\":1}]",
+            "[{\"resource\":\"r\",\"grade\":1,\"count\":1e999}]"
+        };
+        for (String raw : badFlow) {
+            store.put("demo.flow.json", raw);
+            assertNotEquals(0, content(perform(get("/v1/flow/rules").param("app","demo"))).path("code").asInt(), raw);
+            assertEquals(raw, store.get("demo.flow.json"));
+        }
+        String badGw = "[{\"resource\":\"r\",\"resourceMode\":7,\"grade\":1,\"count\":1,\"intervalSec\":1}]";
+        store.put("demo.gw-flow.json", badGw);
+        assertNotEquals(0, content(perform(get("/gateway/flow/list.json").param("app","demo"))).path("code").asInt());
+        store.put("demo.flow.json", "[]");
+        String inf = "{\"app\":\"demo\",\"resource\":\"r\",\"grade\":1,\"count\":1e999,\"strategy\":0,\"controlBehavior\":0}";
+        assertNotEquals(0, content(perform(post("/v1/flow/rule").param("app","demo")
+            .header("X-Nacos-Version",md5("[]")).contentType(MediaType.APPLICATION_JSON).content(inf))).path("code").asInt());
+        assertEquals("[]",store.get("demo.flow.json"));
+        String legal = "[{\"resource\":\"r\",\"grade\":1,\"count\":2,\"controlBehavior\":3,\"warmUpPeriodSec\":1,\"maxQueueingTimeMs\":100}]";
+        store.put("demo.flow.json", legal);
+        assertEquals(0, content(perform(get("/v1/flow/rules").param("app","demo"))).path("code").asInt());
+        String ant = "[{\"apiName\":\"plain\",\"predicateItems\":[{\"pattern\":\"/a\",\"matchStrategy\":1}]}]";
+        store.put("demo.gw-api-group.json", ant);
+        assertEquals(0, content(perform(get("/gateway/api/list.json").param("app","demo"))).path("code").asInt());
+        store.put("demo.gw-api-group.json", "[{\"apiName\":\"default\",\"predicateItems\":[{\"pattern\":\"/x\"}]}]");
+        JsonNode defaultItem = content(perform(get("/gateway/api/list.json").param("app","demo")))
+                .path("data").get(0).path("predicateItems").get(0);
+        assertEquals(0, defaultItem.path("matchStrategy").asInt(-1));
+        store.put("demo.gw-api-group.json", "[{\"apiName\":\"bad\",\"predicateItems\":[{\"pattern\":\"/x\",\"matchStrategy\":\"bad\"}]}]");
+        assertNotEquals(0, content(perform(get("/gateway/api/list.json").param("app","demo"))).path("code").asInt());
+    }
+
     private MvcResult perform(MockHttpServletRequestBuilder request) throws Exception { return mvc.perform(request).andReturn(); }
     private JsonNode content(MvcResult result) throws Exception { return json.readTree(result.getResponse().getContentAsString()); }
     private static String md5(String value) throws Exception {

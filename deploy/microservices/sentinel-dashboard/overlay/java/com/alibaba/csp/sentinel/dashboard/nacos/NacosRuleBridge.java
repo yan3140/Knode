@@ -12,6 +12,7 @@ import com.alibaba.csp.sentinel.dashboard.domain.Result;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRule;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRuleManager;
 import com.alibaba.csp.sentinel.slots.block.flow.FlowRule;
+import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleUtil;
 import com.alibaba.nacos.api.config.ConfigService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -193,7 +194,31 @@ public class NacosRuleBridge implements HandlerInterceptor {
             String ip = first(req.getParameter("ip"), "127.0.0.1");
             String port = first(req.getParameter("port"), "0");
             ui = mapper.valueToTree(GatewayFlowRuleEntity.fromGatewayFlowRule(app, ip, Integer.valueOf(port), flow));
-        } else ui = ((ObjectNode)rule).deepCopy();
+        } else {
+            ui = ((ObjectNode) rule).deepCopy();
+            ObjectNode defaults = null;
+            if ("flow".equals(kind)) {
+                FlowRule value = mapper.treeToValue(rule, FlowRule.class);
+                if (value.getLimitApp() == null || value.getLimitApp().trim().isEmpty()) value.setLimitApp("default");
+                defaults = mapper.valueToTree(FlowRuleEntity.fromFlowRule(app, "127.0.0.1", 0, value));
+            } else if ("degrade".equals(kind)) {
+                DegradeRule value = mapper.treeToValue(rule, DegradeRule.class);
+                if (value.getLimitApp() == null || value.getLimitApp().trim().isEmpty()) value.setLimitApp("default");
+                defaults = mapper.valueToTree(DegradeRuleEntity.fromDegradeRule(app, "127.0.0.1", 0, value));
+            }
+            if (defaults != null) {
+                Iterator<Map.Entry<String, JsonNode>> fields = defaults.fields();
+                while (fields.hasNext()) {
+                    Map.Entry<String, JsonNode> field = fields.next();
+                    if (!ui.hasNonNull(field.getKey()) && !field.getValue().isNull()
+                            && !java.util.Arrays.asList("app", "ip", "port").contains(field.getKey()))
+                        ui.set(field.getKey(), field.getValue());
+                }
+            }
+        }
+        if ("gw-api-group".equals(kind)) ui = normalizeApi(ui);
+        if (("flow".equals(kind) || "degrade".equals(kind))
+                && ui.path("limitApp").asText("").trim().isEmpty()) ui.put("limitApp", "default");
         ui.put("id", id); ui.put("app", app);
         if (!ui.hasNonNull("ip")) ui.put("ip", first(req.getParameter("ip"), "127.0.0.1"));
         if (!ui.hasNonNull("port")) ui.put("port", Integer.parseInt(first(req.getParameter("port"), "0")));
@@ -207,25 +232,21 @@ public class NacosRuleBridge implements HandlerInterceptor {
 
     private JsonNode convertRule(String kind, ObjectNode input) throws Exception {
         if ("flow".equals(kind)) {
-            FlowRuleEntity entity = mapper.treeToValue(input, FlowRuleEntity.class);
-            FlowRule rule = entity.toRule();
-            if (rule.getResource() == null || rule.getResource().trim().isEmpty() || rule.getCount() < 0
-                    || rule.getGrade() < 0 || rule.getGrade() > 1 || rule.getStrategy() < 0 || rule.getStrategy() > 2
-                    || rule.getControlBehavior() < 0 || rule.getControlBehavior() > 2)
-                throw new IllegalArgumentException("Invalid flow rule");
+            FlowRule rule = mapper.treeToValue(input, FlowRule.class);
+            if (!validFlow(rule)) throw new IllegalArgumentException("Invalid flow rule");
             return mapper.valueToTree(rule);
         }
         if ("degrade".equals(kind)) {
-            DegradeRule rule = mapper.treeToValue(input, DegradeRuleEntity.class).toRule();
-            if (!DegradeRuleManager.isValidRule(rule)) throw new IllegalArgumentException("Invalid degrade rule");
+            DegradeRule rule = mapper.treeToValue(input, DegradeRule.class);
+            if (!validDegrade(rule)) throw new IllegalArgumentException("Invalid degrade rule");
             return mapper.valueToTree(rule);
         }
         if ("gw-flow".equals(kind)) {
             GatewayFlowRule rule = mapper.treeToValue(input, GatewayFlowRuleEntity.class).toGatewayFlowRule();
-            if (!GatewayRuleManager.isValidRule(rule)) throw new IllegalArgumentException("Invalid gateway flow rule");
+            if (!validGateway(rule)) throw new IllegalArgumentException("Invalid gateway flow rule");
             return mapper.valueToTree(rule);
         }
-        ApiDefinition rule = mapper.treeToValue(input, ApiDefinitionEntity.class).toApiDefinition();
+        ApiDefinition rule = mapper.treeToValue(normalizeApi(input), ApiDefinitionEntity.class).toApiDefinition();
         if (!GatewayApiDefinitionManager.isValidApi(rule)) throw new IllegalArgumentException("Invalid gateway API");
         rule.getPredicateItems().forEach(item -> {
             com.alibaba.csp.sentinel.adapter.gateway.common.api.ApiPathPredicateItem path =
@@ -242,7 +263,7 @@ public class NacosRuleBridge implements HandlerInterceptor {
         for (JsonNode rule : rules) {
             if (!rule.isObject()) throw new IllegalArgumentException("Rule must be an object");
             if ("gw-flow".equals(kind)) {
-                if (!GatewayRuleManager.isValidRule(mapper.treeToValue(rule, GatewayFlowRule.class)))
+                if (!validGateway(mapper.treeToValue(rule, GatewayFlowRule.class)))
                     throw new IllegalArgumentException("Invalid gateway rule");
             } else if ("gw-api-group".equals(kind)) {
                 String name = rule.path("apiName").asText("");
@@ -250,13 +271,52 @@ public class NacosRuleBridge implements HandlerInterceptor {
                 toRule(kind, (ObjectNode)rule);
             } else if ("flow".equals(kind)) {
                 FlowRule flow = mapper.treeToValue(rule, FlowRule.class);
-                if (flow.getResource() == null || flow.getResource().trim().isEmpty() || flow.getCount() < 0)
+                if (!validFlow(flow))
                     throw new IllegalArgumentException("Invalid flow rule");
             } else if ("degrade".equals(kind)) {
-                if (!DegradeRuleManager.isValidRule(mapper.treeToValue(rule, DegradeRule.class)))
+                if (!validDegrade(mapper.treeToValue(rule, DegradeRule.class)))
                     throw new IllegalArgumentException("Invalid degrade rule");
             }
         }
+    }
+
+    private ObjectNode normalizeApi(ObjectNode source) {
+        ObjectNode copy = source.deepCopy();
+        JsonNode items = copy.get("predicateItems");
+        if (items == null || !items.isArray()) throw new IllegalArgumentException("Invalid API predicates");
+        for (JsonNode item : items) {
+            if (!item.isObject()) throw new IllegalArgumentException("Invalid API predicate");
+            JsonNode strategy = item.get("matchStrategy");
+            if (strategy == null) ((ObjectNode) item).put("matchStrategy", 0);
+            else if (!strategy.isIntegralNumber() || !strategy.canConvertToInt())
+                throw new IllegalArgumentException("Invalid API strategy");
+        }
+        return copy;
+    }
+
+    private boolean validFlow(FlowRule rule) {
+        return rule != null && Double.isFinite(rule.getCount()) && rule.getGrade() >= 0 && rule.getGrade() <= 1
+                && rule.getStrategy() >= 0 && rule.getStrategy() <= 2
+                && rule.getControlBehavior() >= 0 && rule.getControlBehavior() <= 3
+                && FlowRuleUtil.isValidRule(rule);
+    }
+
+    private boolean validDegrade(DegradeRule rule) {
+        return rule != null && Double.isFinite(rule.getCount()) && Double.isFinite(rule.getSlowRatioThreshold())
+                && DegradeRuleManager.isValidRule(rule);
+    }
+
+    private boolean validGateway(GatewayFlowRule rule) {
+        if (rule == null || !Double.isFinite(rule.getCount()) || !GatewayRuleManager.isValidRule(rule)
+                || rule.getResourceMode() > 1 || rule.getGrade() > 1 || rule.getControlBehavior() > 2) return false;
+        com.alibaba.csp.sentinel.adapter.gateway.common.rule.GatewayParamFlowItem item = rule.getParamItem();
+        if (item == null) return true;
+        if (item.getParseStrategy() > 4) return false;
+        if (item.getPattern() != null && !item.getPattern().isEmpty()) {
+            if (item.getMatchStrategy() > 2) return false;
+            if (item.getMatchStrategy() == 2) java.util.regex.Pattern.compile(item.getPattern());
+        }
+        return true;
     }
 
     private static String first(String value, String fallback) { return value == null || value.isEmpty() ? fallback : value; }

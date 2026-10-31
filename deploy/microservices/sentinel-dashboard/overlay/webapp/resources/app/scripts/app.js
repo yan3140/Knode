@@ -23,9 +23,10 @@ angular
     'selectize',
     'angularUtils.directives.dirPagination'
   ])
-  .factory('NacosVersionInterceptor', ['$q', '$window', function ($q, $window) {
+  .factory('NacosVersionInterceptor', ['$q', '$window', '$timeout', '$injector', function ($q, $window, $timeout, $injector) {
     var versions = Object.create(null);
     var rows = Object.create(null);
+    var pending = Object.create(null);
     function type(url) {
       if (/(?:^|\/)v1\/flow\//.test(url)) return 'flow';
       if (/(?:^|\/)degrade\//.test(url)) return 'degrade';
@@ -63,7 +64,23 @@ angular
             var app = response.headers('X-Nacos-Application');
             var version = response.headers('X-Nacos-Version');
             if (app && version && Array.isArray(response.data.data)) {
-              versions[kind + '|' + app] = version;
+              var key = kind + '|' + app;
+              if (pending[key] && pending[key] !== version) {
+                var tries = response.config._nacosReadRetry || 0;
+                if (tries < 10) {
+                  var retry = {};
+                  Object.keys(response.config).forEach(function (name) { retry[name] = response.config[name]; });
+                  var base = $window.document.getElementsByTagName('base')[0].href;
+                  if (retry.url.indexOf(base) === 0) retry.url = retry.url.substring(base.length);
+                  retry._nacosReadRetry = tries + 1;
+                  return $timeout(function () {}, 100).then(function () { return $injector.get('$http')(retry); });
+                }
+                delete pending[key];
+                $window.alert('\u89c4\u5219\u5df2\u53d1\u5e03\uff0c\u4f46\u8bfb\u53d6\u5c1a\u672a\u540c\u6b65\uff0c\u8bf7\u5237\u65b0\u3002');
+                return $q.reject(response);
+              }
+              delete pending[key];
+              versions[key] = version;
               response.data.data.forEach(function (rule) {
                 rows[kind + '|' + String(rule.id)] = {app: app, version: version};
               });
@@ -71,6 +88,10 @@ angular
           } else {
             $window.alert('\u89c4\u5219\u8bfb\u53d6\u5931\u8d25\uff1a' + ((response.data || {}).msg || '\u8bf7\u91cd\u8bd5'));
           }
+        } else if (response.data && response.data.code === 0) {
+          var changedApp = response.headers('X-Nacos-Application');
+          var changedVersion = response.headers('X-Nacos-Version');
+          if (changedApp && changedVersion) pending[kind + '|' + changedApp] = changedVersion;
         }
         return response;
       },

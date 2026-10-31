@@ -1,4 +1,5 @@
 server:
+  port: ${GATEWAY_PORT:18089}
   forward-headers-strategy: none
 spring:
   application:
@@ -12,12 +13,12 @@ spring:
       discovery:
         enabled: ${NACOS_DISCOVERY_ENABLED:false}
         server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
-        namespace: ${NACOS_NAMESPACE:}
+        namespace: ${NACOS_DISCOVERY_NAMESPACE:${NACOS_NAMESPACE:}}
       config:
         group: ${NACOS_GROUP:KNODE_SERVICE}
         enabled: ${NACOS_CONFIG_ENABLED:false}
         server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
-        namespace: ${NACOS_NAMESPACE:}
+        namespace: ${NACOS_CONFIG_NAMESPACE:${NACOS_NAMESPACE:}}
 management:
   health:
     redis:

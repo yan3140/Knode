@@ -4,8 +4,12 @@
   "group": "KNODE_SENTINEL",
   "entries": [
     "knode-gateway.gw-flow.json",
-    "knode-gateway.gw-api-group.json"
+    "knode-gateway.gw-api-group.json",
+    "<service>.flow.json",
+    "<service>.degrade.json"
   ],
   "overwriteExisting": false,
-  "deployment": "check existing Data IDs before importing"
+  "deployment": "check existing Data IDs before importing",
+  "serviceSample": "Replace <service> with the exact spring.application.name; initialize from the sample arrays.",
+  "separateDiscoveryAndConfigurationNamespaces": "Use distinct explicit namespace IDs as required; governance namespace is independent."
 }

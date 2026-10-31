@@ -1,5 +1,5 @@
 {
-  "version": "0.2-draft",
+  "version": "0.3-draft",
   "status": "unfrozen",
   "namespace": "explicit isolated namespace required",
   "group": "KNODE_SENTINEL",
@@ -20,13 +20,13 @@
       "id": "knode-<service>.flow.json",
       "type": "flow",
       "resource": "actual registered resource name",
-      "gatewayClient": "service adapter pending"
+      "serviceClient": "opt-in knode-governance; not wired into business services"
     },
     {
       "id": "knode-<service>.degrade.json",
       "type": "degrade",
       "resource": "actual registered resource name",
-      "gatewayClient": "service adapter pending"
+      "serviceClient": "opt-in knode-governance; not wired into business services"
     }
   ],
   "loading": {
@@ -43,5 +43,29 @@
     "dashboardClientState": "unverified until independently observed at each client"
   },
   "blockHttpStatus": 429,
-  "apiPredicateSemantics": "matchStrategy 0 exact, 1 Ant path pattern (use /** for descendants), 2 regex"
+  "apiPredicateSemantics": "matchStrategy 0 exact, 1 Ant path pattern (use /** for descendants), 2 regex",
+  "ordinaryService": {
+    "enable": "Add knode-governance dependency, enable knode.governance.enabled and provide explicit Nacos address/namespace.",
+    "httpResource": "HTTP <UPPERCASE_METHOD> <Spring MVC best-matching path template>; actuator excluded; async work after handoff is not protected.",
+    "feignResource": "feign:<client>#<operation>; caller must wrap the synchronous Feign invocation with GovernedCall.execute.",
+    "failure": "HTTP flow block 429; HTTP circuit block and protected dependency error/block 503; callers may explicitly handle GovernanceUnavailableException.",
+    "flowConstraints": "Sentinel validation, finite count; cluster mode unsupported and maxQueueingTimeMs <= 1000 in this client.",
+    "degradeConstraints": "Sentinel validation, finite thresholds.",
+    "readiness": "Include governanceRules in the application readiness health group.",
+    "heartbeat": "Use official Sentinel JVM properties before startup; simple HTTP command port binds all interfaces and is unauthenticated. Firewall or isolate it.",
+    "mavenCoordinate": "com.lx:knode-governance:1.0-SNAPSHOT",
+    "feignExample": "governedCall.execute(\"feign:catalog#get\", () -> catalogClient.get(id)); configure finite Feign connect/read timeouts.",
+    "sourceTemplates": [
+      "deploy/microservices/governance.env.example",
+      "deploy/microservices/nacos/service.flow.json",
+      "deploy/microservices/nacos/service.degrade.json"
+    ],
+    "feignFailureSemantics": "Any Exception escaping the wrapped call, including Feign non-2xx exceptions, is traced and translated to 503. Handle expected business responses inside the callable if they must retain their own semantics.",
+    "logging": "At most one invalid-update warning per Data ID until recovery; retry warnings are emitted at attempts 1, 2, 4, 8 and 16."
+  },
+  "localPorts": {
+    "gateway": "18089; GATEWAY_PORT override",
+    "user": "18090, owned by user",
+    "dashboard": "18091; DASHBOARD_PORT override"
+  }
 }

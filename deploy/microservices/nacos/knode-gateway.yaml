@@ -1,0 +1,8 @@
+# Non-secret sample for group KNODE_SERVICE; use a separate configuration namespace.
+knode:
+  gateway:
+    user-uri: lb://knode-user
+    content-uri: lb://knode-content
+    community-uri: lb://knode-community
+    search-uri: lb://knode-search
+    knowledge-uri: lb://knode-knowledge

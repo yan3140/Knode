@@ -1,5 +1,5 @@
 {
-  "version": "0.3-draft",
+  "version": "0.4-draft",
   "status": "unfrozen",
   "serviceName": "knode-gateway",
   "health": "/actuator/health",
@@ -15,8 +15,13 @@
       "NACOS_CONFIG_IMPORT",
       "NACOS_GROUP",
       "NACOS_USERNAME",
-      "NACOS_PASSWORD"
-    ]
+      "NACOS_PASSWORD",
+      "NACOS_DISCOVERY_NAMESPACE",
+      "NACOS_CONFIG_NAMESPACE"
+    ],
+    "namespaceBehavior": "Each explicit discovery/configuration namespace overrides NACOS_NAMESPACE; governance uses its own KNODE_GOV_NACOS_NAMESPACE.",
+    "configurationImport": "NACOS_CONFIG_IMPORT is resolved before Spring Config Data; explicit SPRING_CONFIG_IMPORT takes precedence.",
+    "routeRefresh": "Refresh scope and gateway route cache are refreshed on configuration change."
   },
   "auth": "Shared SDK v0.2 plus nonblocking authoritative session GET; no positive cache",
   "governanceEnvironment": [
@@ -37,5 +42,18 @@
     "KNODE_GATEWAY_AUTH_REDIS_PASSWORD",
     "KNODE_GATEWAY_AUTH_REDIS_DATABASE",
     "KNODE_GATEWAY_AUTH_TIMEOUT_MS"
-  ]
+  ],
+  "defaultPort": 18089,
+  "portEnvironment": "GATEWAY_PORT",
+  "sentinelTransport": {
+    "enabledBy": "csp.sentinel.dashboard.server JVM property before startup",
+    "app": "project.name=knode-gateway and csp.sentinel.app.type=1",
+    "commandPort": "csp.sentinel.api.port; official simple HTTP listener binds all interfaces and has no authentication; isolate/firewall it",
+    "heartbeatIp": "csp.sentinel.heartbeat.client.ip only advertises the IP; it does not bind the listener"
+  },
+  "localPorts": {
+    "gateway": 18089,
+    "user": 18090,
+    "dashboard": 18091
+  }
 }

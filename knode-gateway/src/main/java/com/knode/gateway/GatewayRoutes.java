@@ -5,10 +5,12 @@ import org.springframework.cloud.gateway.route.RouteLocator;
 import org.springframework.cloud.gateway.route.builder.RouteLocatorBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.cloud.context.config.annotation.RefreshScope;
 
 @Configuration
 public class GatewayRoutes {
     @Bean
+    @RefreshScope
     RouteLocator routes(RouteLocatorBuilder b,
             @Value("${knode.gateway.user-uri:lb://knode-user}") String user,
             @Value("${knode.gateway.content-uri:lb://knode-content}") String content,

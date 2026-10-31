@@ -10,16 +10,15 @@ const chain = {
   factory: (name, spec) => { factories[name] = spec; return chain; },
   service: (name, spec) => { services[name] = spec; return chain; },
   controller: (name, spec) => { controllers[name] = spec; return chain; },
-  config: () => chain
+  config: () => chain,
+  filter: () => chain
 };
 const alerts = [];
 const angular = {module: () => chain, copy: x => JSON.parse(JSON.stringify(x))};
 const context = {angular, alert: msg => alerts.push(msg), console};
-vm.runInNewContext(fs.readFileSync(path.join(project, 'overlay/webapp/resources/app/scripts/app.js'), 'utf8'), context);
+vm.runInNewContext(fs.readFileSync(path.join(project, 'target/upstream/Sentinel-d75a6687b82711f8611ef91f6a56e993d24f57c5/sentinel-dashboard/src/main/webapp/resources/dist/js/app.js'), 'utf8'), context);
 function load(name) { vm.runInNewContext(fs.readFileSync(path.join(upstream, name), 'utf8'), context); }
 [
- 'scripts/services/flow_service_v1.js', 'scripts/services/degrade_service.js',
- 'scripts/services/gateway/flow_service.js', 'scripts/services/gateway/api_service.js',
  'scripts/controllers/flow_v1.js', 'scripts/controllers/degrade.js',
  'scripts/controllers/gateway/flow.js', 'scripts/controllers/gateway/api.js'
 ].forEach(load);
@@ -43,7 +42,7 @@ const cases = [
 ];
 for (const item of cases) {
  const version = '0123456789abcdef0123456789abcdef';
- const interceptor = factories.NacosVersionInterceptor[2]({reject: x => x}, {alert: msg => alerts.push(msg)});
+ const interceptor = factories.NacosVersionInterceptor[factories.NacosVersionInterceptor.length - 1]({reject: x => x}, {alert: msg => alerts.push(msg)}, () => Promise.resolve(), {});
  let reject = false, requests = [], dialogs = [];
  function http(config) {
   config = interceptor.request(config); requests.push(config);

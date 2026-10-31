@@ -52,6 +52,25 @@ class NacosGatewayRulesTest {
         assertThat(rules.health().getStatus()).isEqualTo(Status.OUT_OF_SERVICE);
     }
 
+    @Test void invalidGatewayModesAndNonfiniteCountsRetainLastValidRules() {
+        when(config.getServerStatus()).thenReturn("UP");
+        rules.apply("knode-gateway.gw-flow.json", "[{\"resource\":\"r\",\"count\":2}]");
+        rules.apply("knode-gateway.gw-api-group.json", "[]");
+        for (String bad : java.util.List.of(
+                "[{\"resource\":\"r\",\"resourceMode\":3,\"count\":1}]",
+                "[{\"resource\":\"r\",\"grade\":4,\"count\":1}]",
+                "[{\"resource\":\"r\",\"count\":1e999}]",
+                "[{\"resource\":\"r\",\"count\":1,\"paramItem\":{\"parseStrategy\":9}}]")) {
+            rules.apply("knode-gateway.gw-flow.json", bad);
+            assertThat(rules.health().getStatus()).isEqualTo(Status.OUT_OF_SERVICE);
+            assertThat(GatewayRuleManager.getRulesForResource("r")).hasSize(1);
+            assertThat(GatewayRuleManager.getRulesForResource("r").iterator().next().getCount()).isEqualTo(2);
+        }
+        rules.apply("knode-gateway.gw-api-group.json",
+                "[{\"apiName\":\"a\",\"predicateItems\":[{\"pattern\":\"/x\",\"matchStrategy\":\"bad\"}]}]");
+        assertThat(rules.health().getStatus()).isEqualTo(Status.OUT_OF_SERVICE);
+    }
+
     @Test void retriesListenerWithoutLosingRulesAndReloadsOnRestart() throws Exception {
         ConfigService service = mock(ConfigService.class);
         when(service.getServerStatus()).thenReturn("UP");

@@ -26,6 +26,7 @@
         <module>yan-admin</module>
         <module>knode-auth</module>
         <module>knode-gateway</module>
+        <module>knode-governance</module>
         <module>knode-user</module>
     </modules>
 

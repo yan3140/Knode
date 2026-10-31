@@ -8,3 +8,5 @@ Build: mvn -f deploy/microservices/sentinel-dashboard/pom.xml package
 Set DASHBOARD_NACOS_ENABLED=true with an explicit isolated server address and namespace; see dashboard.env.example. Supply nonempty AUTH_USERNAME and AUTH_PASSWORD using a secret store.
 Initialize each required <app>.flow.json, <app>.degrade.json, <app>.gw-flow.json, and <app>.gw-api-group.json with a valid JSON array in the configured namespace/group. Missing or invalid data is not implicitly cleared.
 Dashboard pages remain machine-oriented but rules are stored by application. Flow V2 is disabled. Successful publishing confirms Nacos acceptance only; client loading is unverified.
+The official index loads dist/js/app.js. The build constructs that bundle from the tracked interceptor module and pinned upstream services; native-rule-requests.js checks that they remain synchronized.
+Default Dashboard port is 18091 in the default Spring profile; override with DASHBOARD_PORT (or server.port for another profile).

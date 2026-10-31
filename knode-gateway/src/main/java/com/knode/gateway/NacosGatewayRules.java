@@ -131,7 +131,7 @@ public class NacosGatewayRules implements ApplicationRunner, HealthIndicator {
             if (!root.isArray()) throw new IllegalArgumentException("rule data must be an array");
             if (FLOW.equals(id)) {
                 Set<GatewayFlowRule> rules = mapper.readValue(raw, new TypeReference<Set<GatewayFlowRule>>() {});
-                if (rules.stream().anyMatch(rule -> !GatewayRuleManager.isValidRule(rule)))
+                if (rules.stream().anyMatch(rule -> !validGatewayRule(rule)))
                     throw new IllegalArgumentException("invalid gateway rules");
                 GatewayRuleManager.loadRules(rules);
             } else if (API.equals(id)) {
@@ -145,7 +145,10 @@ public class NacosGatewayRules implements ApplicationRunner, HealthIndicator {
                     Set<ApiPredicateItem> predicates = new LinkedHashSet<>();
                     for (JsonNode item : items) {
                         String pattern = item.path("pattern").asText("");
-                        int strategy = item.path("matchStrategy").asInt(0);
+                        JsonNode strategyValue = item.get("matchStrategy");
+                        if (strategyValue != null && (!strategyValue.isIntegralNumber() || !strategyValue.canConvertToInt()))
+                            throw new IllegalArgumentException("invalid predicate strategy");
+                        int strategy = strategyValue == null ? 0 : strategyValue.intValue();
                         if (pattern.isBlank() || strategy < 0 || strategy > 2) throw new IllegalArgumentException("invalid predicate");
                         if (strategy == 2) java.util.regex.Pattern.compile(pattern);
                         predicates.add(new ApiPathPredicateItem().setPattern(pattern).setMatchStrategy(strategy));
@@ -161,6 +164,19 @@ public class NacosGatewayRules implements ApplicationRunner, HealthIndicator {
             loaded.put(id, false);
             LOG.warn("Governance rule update rejected for {}", id);
         }
+    }
+
+    private static boolean validGatewayRule(GatewayFlowRule rule) {
+        if (rule == null || !Double.isFinite(rule.getCount()) || !GatewayRuleManager.isValidRule(rule)
+                || rule.getResourceMode() > 1 || rule.getGrade() > 1 || rule.getControlBehavior() > 2) return false;
+        var item = rule.getParamItem();
+        if (item == null) return true;
+        if (item.getParseStrategy() > 4) return false;
+        if (item.getPattern() != null && !item.getPattern().isEmpty()) {
+            if (item.getMatchStrategy() > 2) return false;
+            if (item.getMatchStrategy() == 2) java.util.regex.Pattern.compile(item.getPattern());
+        }
+        return true;
     }
 
     @Override public Health health() {
