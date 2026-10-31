@@ -33,10 +33,13 @@ class ExternalRelayIT {
         String eventUser=env("KNODE_IT_EVENT_REDIS_USERNAME"),eventPassword=env("KNODE_IT_EVENT_REDIS_PASSWORD");
         String readUser=env("KNODE_IT_REDIS_READ_USERNAME"),writeUser=env("KNODE_IT_REDIS_WRITE_USERNAME");
         String prefix=env("KNODE_IT_EVENT_STREAM_PREFIX"),allowed="knode:"+environment+":v1:business:";
-        if (!prefix.startsWith(allowed) || !prefix.matches("[A-Za-z0-9:_-]{1,180}") || !prefix.endsWith(":"))
+        if (!prefix.startsWith(allowed) || !prefix.matches("[A-Za-z0-9:_-]{1,176}") || !prefix.endsWith(":"))
             throw new IllegalArgumentException("Explicit verify business prefix required");
         if (!tls.equals("true") && !tls.equals("false")) throw new IllegalArgumentException("Explicit Redis TLS flag required");
         String stream=prefix+"relay-"+UUID.randomUUID(),probe=prefix+"probe-"+UUID.randomUUID();
+        // Persist exact recovery information before creating a Redis connection or issuing any Redis command.
+        var manifest=ExternalRelayManifest.create(environment,stream,probe);
+        System.out.println("External Relay manifest: "+manifest);
         var ds=new DriverManagerDataSource(url,dbUser,dbPassword);
         try (Connection c=ds.getConnection();Statement statement=c.createStatement();
              ResultSet rs=statement.executeQuery("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()")) {

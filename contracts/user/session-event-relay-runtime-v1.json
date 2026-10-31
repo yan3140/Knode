@@ -59,8 +59,27 @@
       "KNODE_IT_EVENT_REDIS_PASSWORD",
       "KNODE_IT_EVENT_STREAM_PREFIX"
     ],
-    "cleanup": "The random test event stream is deleted by exact key; every unique probe is deleted by its own caller and otherwise expires after 10 seconds. No scans or ACL mutations."
+    "cleanup": "The random test event stream is deleted by exact key; every unique probe is deleted by its own caller and otherwise expires after 10 seconds. No scans or ACL mutations.",
+    "manifest": {
+      "directory": "knode-user/target/external-relay-manifests/",
+      "filename": "relay-<uuid>.json",
+      "fields": [
+        "schemaVersion",
+        "environment",
+        "streamKey",
+        "probePrefix",
+        "createdAt"
+      ],
+      "ordering": "Write and force the manifest before creating a Redis connection or issuing any Redis operation; no credentials, tokens or private keys are stored. Retained after normal or abnormal test termination.",
+      "recovery": "Before any Maven clean, read this manifest locally, verify environment and key prefixes against the authorized verify business prefix, then delete only the exact streamKey if cleanup is necessary. Never SCAN. Each probe uses a unique suffix and expires after 10 seconds; do not delete the prefix as if it were a key."
+    },
+    "execution": "With all documented KNODE_IT_* values explicitly set in the environment, invoke Maven through Python: subprocess.run([mvn_path, '-f', 'knode-user/pom.xml', 'test', '-Dtest=ExternalRelayIT', '-Dknode.it.real.relay.enabled=true', '-B', '-ntp'], check=True). Do not put credentials in arguments."
   },
   "legacyProbeConfiguration": "KNODE_SESSION_EVENTS_PROBE_KEY remains accepted as a deprecated prefix alias; set only one of PREFIX or KEY. ACL must allow the prefix plus :UUID.",
-  "retryPolicyRollout": "Apply the same maximum-attempts setting to all relay workers; during a mixed-configuration rollout, an older worker may still claim under its own higher limit."
+  "retryPolicyRollout": "Apply the same maximum-attempts setting to all relay workers; during a mixed-configuration rollout, an older worker may still claim under its own higher limit.",
+  "scheduling": {
+    "revocation": "Dedicated revocationScheduler with exactly one worker for bounded periodic session revocation recovery.",
+    "event": "Separate sessionEventScheduler with exactly one worker for bounded relay and retention cleanup; blocked event delivery cannot occupy the revocation scheduler.",
+    "tasks": "Only fixed-delay scheduled tasks are registered; relay processes at most 50 items per scheduled batch. No dynamically created thread pool."
+  }
 }

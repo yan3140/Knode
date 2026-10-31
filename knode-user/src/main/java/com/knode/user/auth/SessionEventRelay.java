@@ -152,11 +152,11 @@ public class SessionEventRelay {
         }
         return deleted;
     }
-    @Scheduled(fixedDelayString="${KNODE_SESSION_EVENTS_POLL_MS:5000}",initialDelayString="${KNODE_SESSION_EVENTS_INITIAL_MS:5000}")
+    @Scheduled(scheduler="sessionEventScheduler",fixedDelayString="${KNODE_SESSION_EVENTS_POLL_MS:5000}",initialDelayString="${KNODE_SESSION_EVENTS_INITIAL_MS:5000}")
     public void poll() {
         if (!enabled()) return;
         try {relay(50);} catch (RuntimeException ignored) { /* Persisted lease and due time enable later recovery. */ }
     }
-    @Scheduled(fixedDelayString="${KNODE_SESSION_EVENTS_CLEANUP_POLL_MS:86400000}",initialDelayString="${KNODE_SESSION_EVENTS_CLEANUP_INITIAL_MS:86400000}")
+    @Scheduled(scheduler="sessionEventScheduler",fixedDelayString="${KNODE_SESSION_EVENTS_CLEANUP_POLL_MS:86400000}",initialDelayString="${KNODE_SESSION_EVENTS_CLEANUP_INITIAL_MS:86400000}")
     public void cleanupPoll() {try {cleanup(100);} catch (RuntimeException ignored) { /* Retry next scheduled pass. */ }}
 }

@@ -13,10 +13,19 @@ import org.springframework.core.env.Environment;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 @Configuration
 public class UserConfiguration {
     @Bean Clock clock() { return Clock.systemUTC(); }
+    @Bean(name="revocationScheduler") ThreadPoolTaskScheduler revocationScheduler() {
+        var scheduler=new ThreadPoolTaskScheduler();scheduler.setPoolSize(1);scheduler.setThreadNamePrefix("auth-revocation-");
+        scheduler.setRemoveOnCancelPolicy(true);return scheduler;
+    }
+    @Bean(name="sessionEventScheduler") ThreadPoolTaskScheduler sessionEventScheduler() {
+        var scheduler=new ThreadPoolTaskScheduler();scheduler.setPoolSize(1);scheduler.setThreadNamePrefix("session-events-");
+        scheduler.setRemoveOnCancelPolicy(true);return scheduler;
+    }
     @Bean(destroyMethod="close") SessionEventTransport sessionEventTransport(Environment env) {
         String enabled=env.getProperty("KNODE_SESSION_EVENTS_ENABLED","false");
         if ("false".equals(enabled)) return new DisabledSessionEventTransport();

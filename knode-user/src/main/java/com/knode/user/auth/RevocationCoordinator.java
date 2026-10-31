@@ -131,7 +131,7 @@ public class RevocationCoordinator {
         }
         return completed;
     }
-    @Scheduled(fixedDelayString="${KNODE_AUTH_REVOCATION_POLL_MS:5000}",initialDelayString="${KNODE_AUTH_REVOCATION_INITIAL_MS:5000}")
+    @Scheduled(scheduler="revocationScheduler",fixedDelayString="${KNODE_AUTH_REVOCATION_POLL_MS:5000}",initialDelayString="${KNODE_AUTH_REVOCATION_INITIAL_MS:5000}")
     public void poll() {
         try { recoverPending(100); }
         catch (RuntimeException e) { failures.incrementAndGet(); LOG.warn("Revocation recovery scan unavailable; will retry"); }
