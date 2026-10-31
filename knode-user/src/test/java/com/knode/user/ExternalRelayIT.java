@@ -19,7 +19,7 @@ import org.springframework.mock.env.MockEnvironment;
 import org.springframework.transaction.support.TransactionTemplate;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Explicit opt-in; only an empty local test database and two new verify-prefix keys are touched. */
+/** Explicit opt-in; only an empty local test database and newly generated verify-prefix keys are touched. */
 @EnabledIfSystemProperty(named="knode.it.real.relay.enabled",matches="true")
 class ExternalRelayIT {
     private static String env(String name) {
@@ -48,7 +48,7 @@ class ExternalRelayIT {
                 .withProperty("KNODE_SESSION_EVENTS_REDIS_DATABASE",database).withProperty("KNODE_SESSION_EVENTS_REDIS_TLS",tls)
                 .withProperty("KNODE_SESSION_EVENTS_REDIS_USERNAME",eventUser).withProperty("KNODE_SESSION_EVENTS_REDIS_PASSWORD",eventPassword)
                 .withProperty("KNODE_AUTH_REDIS_READ_USERNAME",readUser).withProperty("KNODE_AUTH_REDIS_WRITE_USERNAME",writeUser)
-                .withProperty("KNODE_SESSION_EVENTS_STREAM_KEY",stream).withProperty("KNODE_SESSION_EVENTS_PROBE_KEY",probe);
+                .withProperty("KNODE_SESSION_EVENTS_STREAM_KEY",stream).withProperty("KNODE_SESSION_EVENTS_PROBE_PREFIX",probe);
         var cfg=new RedisStandaloneConfiguration(host,Integer.parseInt(port));
         cfg.setDatabase(Integer.parseInt(database));cfg.setUsername(eventUser);cfg.setPassword(RedisPassword.of(eventPassword));
         var builder=LettuceClientConfiguration.builder().commandTimeout(Duration.ofSeconds(2));if ("true".equals(tls)) builder.useSsl();
@@ -56,7 +56,13 @@ class ExternalRelayIT {
         var redis=new StringRedisTemplate(reader);RedisSessionEventTransport transport=null;
         try {
             transport=new RedisSessionEventTransport(e);
-            assertTrue(transport.probe());
+            var targetTransport=transport;
+            var pool=java.util.concurrent.Executors.newFixedThreadPool(2);
+            try {
+                var first=pool.submit(targetTransport::probe);var second=pool.submit(targetTransport::probe);
+                assertTrue(first.get(15,java.util.concurrent.TimeUnit.SECONDS));
+                assertTrue(second.get(15,java.util.concurrent.TimeUnit.SECONDS));
+            } finally {pool.shutdownNow();}
             var jdbc=new JdbcTemplate(ds);var tx=new TransactionTemplate(new DataSourceTransactionManager(ds));
             String sid=UUID.randomUUID().toString(),id=UUID.randomUUID().toString();Instant now=Instant.now();
             String payload=SessionEventEnvelope.encode(id,sid,42,"blog","LOGOUT",now);
@@ -68,7 +74,7 @@ class ExternalRelayIT {
             assertEquals(Map.of("event",payload),records.get(0).getValue());
             assertEquals("PUBLISHED",jdbc.queryForObject("SELECT state FROM auth_revocation_outbox WHERE event_id=?",String.class,id));
         } finally {
-            try {redis.delete(stream);redis.delete(probe);} finally {if (transport!=null) transport.close();reader.destroy();}
+            try {redis.delete(stream);} finally {if (transport!=null) transport.close();reader.destroy();}
         }
     }
 }

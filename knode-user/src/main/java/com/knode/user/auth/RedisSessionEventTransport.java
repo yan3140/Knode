@@ -3,6 +3,7 @@ package com.knode.user.auth;
 import java.time.Duration;
 import java.util.Map;
 import java.util.List;
+import java.util.UUID;
 import org.springframework.core.env.Environment;
 import org.springframework.data.redis.connection.RedisPassword;
 import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
@@ -15,7 +16,7 @@ import org.springframework.data.redis.core.SessionCallback;
 public final class RedisSessionEventTransport implements SessionEventTransport {
     private final LettuceConnectionFactory factory;
     private final StringRedisTemplate redis;
-    private final String stream,probe;
+    private final String stream,probePrefix;
     public RedisSessionEventTransport(Environment env) {
         String environment=required(env,"KNODE_AUTH_ENVIRONMENT");
         if (!environment.matches("[a-z0-9-]{1,32}")) throw new IllegalArgumentException("Invalid auth environment");
@@ -23,10 +24,14 @@ public final class RedisSessionEventTransport implements SessionEventTransport {
         if (user.equals(env.getProperty("KNODE_AUTH_REDIS_READ_USERNAME")) || user.equals(env.getProperty("KNODE_AUTH_REDIS_WRITE_USERNAME")))
             throw new IllegalArgumentException("Stream identity must differ from session identities");
         stream=env.getProperty("KNODE_SESSION_EVENTS_STREAM_KEY","knode:"+environment+":v1:events:session");
-        probe=required(env,"KNODE_SESSION_EVENTS_PROBE_KEY");
-        if (!validKey(stream) || !validKey(probe) || stream.equals(probe)
-                || stream.matches("knode:[a-z0-9-]+:v1:auth:.*") || probe.matches("knode:[a-z0-9-]+:v1:auth:.*"))
-            throw new IllegalArgumentException("Distinct non-auth stream and probe keys required");
+        String configuredPrefix=env.getProperty("KNODE_SESSION_EVENTS_PROBE_PREFIX");
+        String legacyPrefix=env.getProperty("KNODE_SESSION_EVENTS_PROBE_KEY");
+        if (configuredPrefix!=null && legacyPrefix!=null) throw new IllegalArgumentException("Set one probe prefix");
+        probePrefix=configuredPrefix!=null?configuredPrefix:legacyPrefix;
+        if (!validKey(stream) || !validKey(probePrefix) || probePrefix.length()>218
+                || stream.equals(probePrefix) || stream.startsWith(probePrefix+":")
+                || stream.matches("knode:[a-z0-9-]+:v1:auth:.*") || (probePrefix+":").matches("knode:[a-z0-9-]+:v1:auth:.*"))
+            throw new IllegalArgumentException("Distinct non-auth stream and probe prefixes required");
         int port=Integer.parseInt(required(env,"KNODE_SESSION_EVENTS_REDIS_PORT"));
         int db=Integer.parseInt(env.getProperty("KNODE_SESSION_EVENTS_REDIS_DATABASE","0"));
         if (port<1 || port>65535 || db<0) throw new IllegalArgumentException("Invalid event Redis configuration");
@@ -51,8 +56,9 @@ public final class RedisSessionEventTransport implements SessionEventTransport {
         if (redis.opsForStream().add(stream,Map.of("event",envelope))==null)
             throw new IllegalStateException("Stream append not confirmed");
     }
-    @Override public boolean probe() {return probe(redis,probe);}
-    static boolean probe(StringRedisTemplate redis,String probe) {
+    @Override public boolean probe() {return probe(redis,probePrefix);}
+    static boolean probe(StringRedisTemplate redis,String probePrefix) {
+        String probe=probePrefix+":"+UUID.randomUUID();
         try {
             // Queue XADD and EXPIRE on one connection so a crash cannot leave a persistent probe.
             List<Object> result=redis.execute(new SessionCallback<List<Object>>() {

@@ -11,7 +11,7 @@
   },
   "semantics": {
     "boundary": "Redis session deletion is confirmed first; intent REVOKED and outbox fact are committed together. PENDING or CLAIMED is not published. PUBLISHED means XADD accepted and DB acknowledgement committed; it does not mean any consumer processed the event.",
-    "delivery": "At least once. An XADD followed by failed DB acknowledgement can repeat the same immutable eventId and JSON. Consumers must persist deduplication atomically with their own effect.",
+    "delivery": "At least once. An XADD followed by failed DB acknowledgement can repeat the same immutable eventId and JSON. Consumers must persist deduplication atomically with their own effect. If the configured attempt limit is lowered, due pending or expired claimed entries already at the limit move to DEAD without another append; explicit replay resets attempts.",
     "scope": "Only aggregateId/payload.sid and its current executions are targeted. userId is descriptive and must never select other sessions.",
     "reasons": {
       "LOGOUT": "Direct session logout",
@@ -26,10 +26,10 @@
     "redaction": "Only constant delivery error codes retained; no token, credentials, or personal profile in envelope, operations, or logs."
   },
   "retention": {
-    "local": "Published facts and matching completed coordination/index rows only, or naturally expired session indexes with no intent/outbox, older than configured retention (minimum 7 days, default 30 days), bounded batches. Pending, claimed, DEAD, and unrepresented historical intents are preserved.",
+    "local": "Only published facts with a matching completed intent (same sid, eventId, userId and scope), with any existing session index matching and inactive, or naturally expired session indexes with no intent/outbox, older than configured retention (minimum 7 days, default 30 days), bounded batches. Missing or inconsistent facts, PENDING, CLAIMED, DEAD and unrepresented historical intents are preserved.",
     "stream": "No XTRIM by producer. Operators and consumers must agree retention and durable consumer watermarks before any independent trimming.",
     "historicalGap": "Existing G3 REVOKED intents without outbox remain absent; no automatic backfill."
   },
-  "readiness": "Disabled reports DISABLED. Enabled probes a separate stream with atomic MULTI/XADD/EXPIRE/EXEC and exact-key DEL. Target-key ACL may differ and is explicitly reported unverified; most recent successful publication is exposed, not a guarantee of current target ACL.",
+  "readiness": "Disabled reports DISABLED. Enabled probes a separate unique prefix:UUID stream with atomic MULTI/XADD/EXPIRE/EXEC and exact-key DEL. Target-key ACL may differ and is explicitly reported unverified; most recent successful publication is exposed, not a guarantee of current target ACL.",
   "notImplemented": "Agent consumption, deduplication, pause/checkpoint and downstream completion."
 }

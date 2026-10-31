@@ -12,7 +12,7 @@
     "KNODE_SESSION_EVENTS_REDIS_DATABASE (default 0)",
     "KNODE_SESSION_EVENTS_REDIS_TLS (default true)",
     "KNODE_SESSION_EVENTS_STREAM_KEY (optional; default knode:<environment>:v1:events:session)",
-    "KNODE_SESSION_EVENTS_PROBE_KEY (required when enabled; separate dedicated key)",
+    "KNODE_SESSION_EVENTS_PROBE_PREFIX (required when enabled; unique probe key is prefix:UUID, max prefix length 218)",
     "KNODE_SESSION_EVENTS_MAX_ATTEMPTS (1..100; default 5)",
     "KNODE_SESSION_EVENTS_RETENTION_DAYS (7..3650; default 30)",
     "KNODE_SESSION_EVENTS_POLL_MS",
@@ -21,18 +21,18 @@
     "KNODE_SESSION_EVENTS_CLEANUP_INITIAL_MS"
   ],
   "credentials": "Use a dedicated event identity distinct from session read and write identities. No production in-memory publisher. Redis credential and private values must be injected externally.",
-  "probe": "Dedicated key only: MULTI, XADD probe 1, EXPIRE 10, EXEC, then DEL. XADD and expiry commit atomically; no synthetic event is added to the business event stream. Probe-key ACL does not prove target-key ACL.",
+  "probe": "Every probe uses a unique <configured-prefix>:<UUID> key: MULTI, XADD probe 1, EXPIRE 10, EXEC, then DEL that exact key. Concurrent checks cannot delete one another. Expiry commits atomically with creation; no synthetic event is added to the business event stream. Probe-prefix ACL does not prove target-key ACL.",
   "minimumAcl": {
     "producerTarget": [
       "XADD <explicit-target> * event <json>"
     ],
     "producerProbe": [
       "MULTI",
-      "XADD <explicit-probe> * probe 1",
-      "EXPIRE <explicit-probe> 10",
+      "XADD <explicit-probe-prefix>:<uuid> * probe 1",
+      "EXPIRE <explicit-probe-prefix>:<uuid> 10",
       "EXEC",
       "DISCARD on transaction failure",
-      "DEL <explicit-probe>"
+      "DEL <explicit-probe-prefix>:<uuid>"
     ],
     "realTestOnly": [
       "XRANGE <new-test-stream> - +",
@@ -59,6 +59,8 @@
       "KNODE_IT_EVENT_REDIS_PASSWORD",
       "KNODE_IT_EVENT_STREAM_PREFIX"
     ],
-    "cleanup": "Only two newly random-named test keys are deleted; no scans or ACL mutations."
-  }
+    "cleanup": "The random test event stream is deleted by exact key; every unique probe is deleted by its own caller and otherwise expires after 10 seconds. No scans or ACL mutations."
+  },
+  "legacyProbeConfiguration": "KNODE_SESSION_EVENTS_PROBE_KEY remains accepted as a deprecated prefix alias; set only one of PREFIX or KEY. ACL must allow the prefix plus :UUID.",
+  "retryPolicyRollout": "Apply the same maximum-attempts setting to all relay workers; during a mixed-configuration rollout, an older worker may still claim under its own higher limit."
 }

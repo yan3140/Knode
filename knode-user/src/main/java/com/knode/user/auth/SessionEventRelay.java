@@ -37,10 +37,10 @@ public class SessionEventRelay {
         for (String id:ids) {
             String token=UUID.randomUUID().toString();
             try {
-                int exhausted=db.update("UPDATE auth_revocation_outbox SET state='DEAD',claim_token=NULL,claim_until=NULL,last_error='LEASE_EXPIRED' WHERE event_id=? AND state='CLAIMED' AND (claim_until IS NULL OR claim_until<=?) AND attempts>=?",id,now,maxAttempts);
+                int exhausted=db.update("UPDATE auth_revocation_outbox SET state='DEAD',next_attempt_at=NULL,claim_token=NULL,claim_until=NULL,last_error='ATTEMPTS_EXHAUSTED' WHERE event_id=? AND attempts>=? AND ((state='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=?)) OR (state='CLAIMED' AND (claim_until IS NULL OR claim_until<=?)))",id,maxAttempts,now,now);
                 if (exhausted==1) continue;
-                int claimed=db.update("UPDATE auth_revocation_outbox SET state='CLAIMED',claim_token=?,claim_until=?,attempts=attempts+1 WHERE event_id=? AND ((state='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=?)) OR (state='CLAIMED' AND (claim_until IS NULL OR claim_until<=?)))",
-                        token,Timestamp.from(clock.instant().plusSeconds(30)),id,now,now);
+                int claimed=db.update("UPDATE auth_revocation_outbox SET state='CLAIMED',claim_token=?,claim_until=?,attempts=attempts+1 WHERE event_id=? AND attempts<? AND ((state='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=?)) OR (state='CLAIMED' AND (claim_until IS NULL OR claim_until<=?)))",
+                        token,Timestamp.from(clock.instant().plusSeconds(30)),id,maxAttempts,now,now);
                 if (claimed!=1) continue;
                 String envelope=materialize(id,token);
                 if (envelope==null) continue;
@@ -115,11 +115,21 @@ public class SessionEventRelay {
         int deleted=0;
         for (String id:ids) {
             Boolean done=tx.execute(status -> {
-                var rows=db.queryForList("SELECT sid FROM auth_revocation_outbox WHERE event_id=? AND state='PUBLISHED' AND published_at<? FOR UPDATE",String.class,id,cutoff);
-                if (rows.isEmpty()) return false;
-                String sid=rows.get(0);
-                if (db.queryForObject("SELECT COUNT(*) FROM auth_login_session WHERE sid=? AND active<>0",Integer.class,sid)>0
-                        || db.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE sid=? AND (state<>'REVOKED' OR event_id<>?)",Integer.class,sid,id)>0) return false;
+                var rows=db.queryForList("SELECT sid,user_id,scope FROM auth_revocation_outbox WHERE event_id=? AND state='PUBLISHED' AND published_at<? FOR UPDATE",id,cutoff);
+                if (rows.size()!=1) return false;
+                var event=rows.get(0);String sid=(String)event.get("sid"),scope=(String)event.get("scope");
+                long userId=((Number)event.get("user_id")).longValue();
+                var intents=db.queryForList("SELECT sid,event_id,user_id,scope,state FROM auth_revocation_intent WHERE sid=? FOR UPDATE",sid);
+                if (intents.size()!=1) return false;
+                var intent=intents.get(0);
+                if (!sid.equals(intent.get("sid")) || !id.equals(intent.get("event_id")) || !"REVOKED".equals(intent.get("state"))
+                        || userId!=((Number)intent.get("user_id")).longValue() || !scope.equals(intent.get("scope"))) return false;
+                var sessions=db.queryForList("SELECT user_id,scope,active FROM auth_login_session WHERE sid=? FOR UPDATE",sid);
+                if (!sessions.isEmpty()) {
+                    var session=sessions.get(0);
+                    if (((Number)session.get("active")).intValue()!=0 || userId!=((Number)session.get("user_id")).longValue()
+                            || !scope.equals(session.get("scope"))) return false;
+                }
                 db.update("DELETE FROM auth_login_session WHERE sid=? AND active=0",sid);
                 db.update("DELETE FROM auth_revocation_intent WHERE sid=? AND event_id=? AND state='REVOKED'",sid,id);
                 db.update("DELETE FROM auth_revocation_outbox WHERE event_id=? AND state='PUBLISHED' AND published_at<?",id,cutoff);
