@@ -515,6 +515,42 @@ class UserHttpIntegrationTest {
              assertEquals(503,failed.getStatusCode().value());assertTrue(data(failed).has("error"));assertFalse(data(failed).has("items"));}
         finally {jdbc.execute("ALTER TABLE sys_user_temp RENAME TO sys_user");}
     }
+    @Test void adminProfileRevisionAdvancesForCollationEquivalentNames() throws Exception {
+        permission(900,"*:*:*");
+        String admin=login("admin","admin"), existingSession=login("alice","blog");
+        String machine=serviceToken("knode-content","users:public:read");
+        String batch="{\"userIds\":[\"42\"]}";
+        var initialResponse=internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch",batch,"Bearer "+machine);
+        assertEquals(200,initialResponse.getStatusCode().value());
+        var previous=data(initialResponse).path("items").get(0);
+        assertEquals("Alice",previous.path("nickName").asText());
+        java.time.Instant previousTime=java.time.Instant.parse(previous.path("updatedAt").asText());
+        for (String name:List.of("ALICE","ÁLICE")) {
+            String update=json.writeValueAsString(Map.of("id",42,"nickName",name,"status","0",
+                    "email","alice@example.invalid","sex","2","roleIds",List.of()));
+            var response=call(HttpMethod.PUT,"/api/admin/system/user",update,admin);
+            assertEquals(200,response.getStatusCode().value());
+            assertEquals(200,data(response).path("code").asInt());
+            var result=internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch",batch,"Bearer "+machine);
+            assertEquals(200,result.getStatusCode().value());
+            var current=data(result).path("items").get(0);
+            assertEquals("FOUND",current.path("status").asText());
+            assertNotEquals(previous.path("nickName").asText(),current.path("nickName").asText());
+            assertEquals(name,current.path("nickName").asText());
+            assertEquals(Long.parseLong(previous.path("profileRevision").asText())+1,
+                    Long.parseLong(current.path("profileRevision").asText()),"collation-equivalent display change advances revision");
+            var updatedAt=java.time.Instant.parse(current.path("updatedAt").asText());
+            assertTrue(current.path("updatedAt").asText().endsWith("Z"));
+            assertFalse(updatedAt.isBefore(previousTime));
+            previous=current;previousTime=updatedAt;
+        }
+        assertEquals(401,call(HttpMethod.GET,"/api/blog/user/userInfo",null,existingSession).getStatusCode().value());
+        if (System.getProperty("knode.test.mysql.url")!=null) {
+            assertEquals(1,jdbc.queryForObject("SELECT CASE WHEN _utf8mb4'Alice' COLLATE utf8mb4_unicode_ci = _utf8mb4'ALICE' COLLATE utf8mb4_unicode_ci THEN 1 ELSE 0 END",Integer.class));
+            assertEquals(1,jdbc.queryForObject("SELECT CASE WHEN _utf8mb4'ALICE' COLLATE utf8mb4_unicode_ci = _utf8mb4'ÁLICE' COLLATE utf8mb4_unicode_ci THEN 1 ELSE 0 END",Integer.class));
+        }
+    }
+
     @Test void publicProfileRevisionPersistsAndKeyOverlapIsVerifiable() throws Exception {
         String machine=serviceToken("knode-content","users:public:read","auth:keys:read");
         String user=login("alice","blog");
