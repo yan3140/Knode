@@ -1,0 +1,33 @@
+{
+  "ttlSeconds": 120,
+  "services": [
+    {
+      "id": "knode-content",
+      "credentialHash": "<bcrypt-hash-from-external-secret-store>",
+      "audiences": {
+        "knode-user": [
+          "users:public:read"
+        ]
+      }
+    },
+    {
+      "id": "knode-social",
+      "credentialHash": "<bcrypt-hash-from-external-secret-store>",
+      "audiences": {
+        "knode-user": [
+          "users:public:read",
+          "users:state:read"
+        ]
+      }
+    },
+    {
+      "id": "knode-key-reader",
+      "credentialHash": "<bcrypt-hash-from-external-secret-store>",
+      "audiences": {
+        "knode-user": [
+          "auth:keys:read"
+        ]
+      }
+    }
+  ]
+}

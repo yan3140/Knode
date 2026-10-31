@@ -14,8 +14,9 @@ public class HealthController {
     private final SessionStore.Reader sessions;
     private final SessionStore.Writer writer;
     private final TransactionTemplate tx;
-    public HealthController(JdbcTemplate jdbc,SessionStore.Reader sessions,SessionStore.Writer writer,TransactionTemplate tx) {
-        this.jdbc=jdbc;this.sessions=sessions;this.writer=writer;this.tx=tx;
+    private final com.knode.user.internal.ServiceTokens serviceTokens;
+    public HealthController(JdbcTemplate jdbc,SessionStore.Reader sessions,SessionStore.Writer writer,TransactionTemplate tx,com.knode.user.internal.ServiceTokens serviceTokens) {
+        this.jdbc=jdbc;this.sessions=sessions;this.writer=writer;this.tx=tx;this.serviceTokens=serviceTokens;
     }
     @GetMapping("/health/live") public Map<String,String> live() { return Map.of("status","UP"); }
     @GetMapping("/health/ready") public Map<String,String> ready() {
@@ -32,6 +33,6 @@ public class HealthController {
         });
         try { sessions.find(sid); writer.probe(); }
         catch (SessionStore.Unavailable e) { throw new AuthenticationFailure(503); }
-        return Map.of("status","UP");
+        return Map.of("status","UP","serviceIssuer",serviceTokens.enabled()?"ENABLED":"DISABLED");
     }
 }

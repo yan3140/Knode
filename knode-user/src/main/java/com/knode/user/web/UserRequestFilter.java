@@ -44,6 +44,12 @@ public class UserRequestFilter extends OncePerRequestFilter {
                     || lower.contains("%3b") || lower.contains("%2f") || lower.contains("%5c") || lower.contains("%25"))
                 throw new AuthenticationFailure(401);
             String path=req.getServletPath();
+            if (path.startsWith("/internal/")) {
+                var auth=Collections.list(req.getHeaders("Authorization"));
+                if (!values.isEmpty() || auth.size()!=1 || auth.get(0).contains(",")) throw new AuthenticationFailure(401);
+                chain.doFilter(req,res);
+                return;
+            }
             boolean pub="POST".equals(req.getMethod()) && (path.equals("/api/blog/auth/login")
                     || path.equals("/api/admin/auth/login") || path.equals("/api/blog/user/register"));
             boolean health="GET".equals(req.getMethod()) && (path.equals("/health/live") || path.equals("/health/ready"));
@@ -65,11 +71,17 @@ public class UserRequestFilter extends OncePerRequestFilter {
                 req.setAttribute(PRINCIPAL,principal);
             }
         } catch (AuthenticationFailure e) {
-            send(res,e.status()); return;
+            if (req.getServletPath().startsWith("/internal/")) sendInternal(res,e.status()); else send(res,e.status());
+            return;
         } catch (DataAccessException | TransactionException e) {
-            send(res,503); return;
+            if (req.getServletPath().startsWith("/internal/")) sendInternal(res,503); else send(res,503);
+            return;
         }
         chain.doFilter(req,res);
+    }
+    private void sendInternal(HttpServletResponse res,int status) throws IOException {
+        res.setStatus(status);res.setContentType("application/json");res.setCharacterEncoding("UTF-8");
+        json.writeValue(res.getWriter(),java.util.Map.of("error",java.util.Map.of("code",status==503?"DEPENDENCY_UNAVAILABLE":"INVALID_SERVICE_TOKEN","message","Request rejected","retryable",status==503)));
     }
     private void send(HttpServletResponse res,int status) throws IOException {
         res.setStatus(status);res.setContentType("application/json");res.setCharacterEncoding("UTF-8");

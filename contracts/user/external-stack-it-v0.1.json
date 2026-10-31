@@ -1,0 +1,67 @@
+{
+  "name": "external-stack-opt-in-test",
+  "status": "Prepared only; no shared Redis connection or ACL changes performed.",
+  "test": "knode-user/src/test/java/com/knode/user/ExternalStackIT.java",
+  "execution": "Build the user JAR first. From knode-user run Maven test with -Dtest=ExternalStackIT -Dknode.it.real.enabled=true -Dknode.it.gateway.jar=<absolute-built-gateway-jar>; invoke Maven through Python. Never place credentials in Maven arguments.",
+  "safety_guards": [
+    "Environment must match verify-[a-z0-9-]{1,25}.",
+    "JDBC URL must be jdbc:mysql://127.0.0.1:<explicit non-3306 port>/<schema> with no query, and the schema must initially contain no tables.",
+    "All three Redis identities are explicitly supplied through environment variables. No account creation or ACL mutation is performed.",
+    "Only this run's random test keys and newly created session IDs are touched. No SCAN, KEYS, old business keys, other processes, or real credentials.",
+    "Subprocess stdout and stderr are discarded to avoid credential, token, or key disclosure; exact process handles are stopped."
+  ],
+  "environment": [
+    "KNODE_IT_AUTH_ENVIRONMENT",
+    "KNODE_IT_DB_URL",
+    "KNODE_IT_DB_USERNAME",
+    "KNODE_IT_DB_PASSWORD",
+    "KNODE_IT_REDIS_HOST",
+    "KNODE_IT_REDIS_PORT",
+    "KNODE_IT_REDIS_DATABASE",
+    "KNODE_IT_REDIS_TLS=true|false",
+    "KNODE_IT_REDIS_READ_USERNAME",
+    "KNODE_IT_REDIS_READ_PASSWORD",
+    "KNODE_IT_REDIS_WRITE_USERNAME",
+    "KNODE_IT_REDIS_WRITE_PASSWORD",
+    "KNODE_IT_REDIS_BUSINESS_USERNAME",
+    "KNODE_IT_REDIS_BUSINESS_PASSWORD",
+    "KNODE_IT_REDIS_BUSINESS_PREFIX"
+  ],
+  "acl_handshake": {
+    "note": "Review and provision dedicated accounts separately. The test itself never executes ACL SETUSER, ACL DELUSER, or inspects existing ACLs. Handshake commands below are the exact synthetic operations; placeholders are substituted locally, and secrets must not appear in command lines or logs.",
+    "read_identity": [
+      "AUTH <read-username> <read-secret>",
+      "SELECT <test-db-index> when nonzero",
+      "GET <auth-prefix><fresh-probe-id> -> fixture",
+      "SET <auth-prefix><fresh-probe-id> changed -> NOPERM",
+      "DEL <auth-prefix><fresh-probe-id> -> NOPERM"
+    ],
+    "write_identity": [
+      "AUTH <write-username> <write-secret>",
+      "SELECT <test-db-index> when nonzero",
+      "SET <auth-prefix><fresh-probe-id> fixture NX PX 60000 -> OK",
+      "SET <fresh-other-verify-prefix><random-id> fixture PX 60000 -> NOPERM",
+      "DEL <auth-prefix><fresh-probe-id> -> 1",
+      "For each newly issued test session: SET <auth-prefix><sid> <session> NX PX <ttl>; DEL <auth-prefix><sid>"
+    ],
+    "business_identity": [
+      "AUTH <business-username> <business-secret>",
+      "SELECT <test-db-index> when nonzero",
+      "SET <business-prefix><random-id> fixture NX PX 60000 -> OK",
+      "GET <business-prefix><random-id> -> fixture",
+      "DEL <business-prefix><random-id> -> 1",
+      "SET <auth-prefix><fresh-probe-id> changed -> NOPERM",
+      "DEL <auth-prefix><fresh-probe-id> -> NOPERM"
+    ],
+    "prefixes": {
+      "auth-prefix": "knode:<verify-environment>:v1:auth:session:",
+      "business-prefix": "knode:<verify-environment>:v1:business:<test-specific-suffix>"
+    },
+    "client_handshake": "The Redis client may also issue HELLO, CLIENT SETINFO and connection setup commands depending on server and driver version; verify necessary connection commands separately without widening key access."
+  },
+  "limitations": [
+    "This file is an opt-in test specification, not evidence of shared Redis or Gateway integration.",
+    "Gateway routing, TLS settings and ACL compatibility remain unverified until the controller supplies and executes the approved stack.",
+    "Only locally built User and controller-provided Gateway JARs are launched."
+  ]
+}

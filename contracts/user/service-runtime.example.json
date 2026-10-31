@@ -1,0 +1,24 @@
+{
+  "description": "External runtime configuration names and public-key file structure; values are placeholders, not credentials.",
+  "properties": {
+    "USER_PORT": "18090 by default",
+    "KNODE_AUTH_SIGNING_KID": "<active-kid>",
+    "KNODE_AUTH_SIGNING_PRIVATE_FILE": "<external-PKCS8-private-PEM-file>",
+    "KNODE_AUTH_SIGNING_PRIVATE_ENV": "<name-of-external-environment-variable-containing-private-PEM; alternative to private file>",
+    "KNODE_AUTH_SIGNING_PUBLIC_FILE": "<external-public-PEM-file; fallback only when trusted map not set>",
+    "KNODE_AUTH_TRUSTED_PUBLIC_KEYS_FILE": "<external-JSON-file mapping kid to external RSA public PEM file path; include current and previous key during overlap>",
+    "KNODE_AUTH_SERVICE_POLICY_FILE": "<external-JSON-policy-file; omit to disable service issuance>",
+    "KNODE_AUTH_SERVICE_POLICY_ENV": "<name-of-external-environment-variable-containing-JSON-policy; alternative to policy file>"
+  },
+  "trustedPublicKeysFileExample": {
+    "<active-kid>": "<path-to-active-public-PEM-file>",
+    "<previous-kid>": "<path-to-previous-public-PEM-file>"
+  },
+  "rotation": "Restart to load changed trust configuration. Private key must match active public key. Configure verifier overlap everywhere before changing active signer; retire old key after expiry.",
+  "endpoints": {
+    "POST /internal/v1/auth/service-tokens": "Basic service-id:bootstrap-secret; only configured identity and requested audience/permission intersection",
+    "POST /internal/v1/users/public-profiles:batch": "Bearer service token, aud knode-user, users:public:read",
+    "POST /internal/v1/users/validity:batch": "Bearer service token, aud knode-user, users:state:read",
+    "GET /internal/v1/auth/keys": "Bearer service token, aud knode-user, auth:keys:read; public JWK only"
+  }
+}

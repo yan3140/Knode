@@ -41,7 +41,7 @@ public class UserRepository {
         jdbc.update("INSERT INTO sys_user(user_name,nick_name,password,email,type,status,sex,del_flag,create_time) VALUES (?,?,?,?,'0','0','2',0,CURRENT_TIMESTAMP)",username,nickname,password,email);
     }
     public int updateProfile(long id,String nickname,String avatar,String sex) {
-        return jdbc.update("UPDATE sys_user SET nick_name=?,avatar=?,sex=?,update_by=?,update_time=CURRENT_TIMESTAMP WHERE id=? AND status='0' AND del_flag=0",nickname,avatar,sex,id,id);
+        return jdbc.update("UPDATE sys_user SET profile_revision=profile_revision+1,profile_updated_at=CURRENT_TIMESTAMP,nick_name=?,avatar=?,sex=?,update_by=?,update_time=CURRENT_TIMESTAMP WHERE id=? AND status='0' AND del_flag=0",nickname,avatar,sex,id,id);
     }
     public List<String> roles(long id) {
         return jdbc.queryForList("SELECT DISTINCT r.role_key FROM sys_role r JOIN sys_user_role ur ON ur.role_id=r.id WHERE ur.user_id=? AND r.status='0' AND r.del_flag='0' ORDER BY r.role_key",String.class,id);

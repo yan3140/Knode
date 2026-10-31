@@ -47,7 +47,9 @@ public class AdminRoleService {
                 || !StringUtils.hasText(r.roleKey()) || r.roleKey().length()>128 || r.roleSort()==null
                 || (r.remark()!=null && r.remark().length()>500)) throw AdminSupport.invalid();
         AdminSupport.status(r.status());
-        if (Set.of("admin","super_admin","superadmin").contains(r.roleKey().toLowerCase(Locale.ROOT)))
+        // Permit only canonical ASCII identifiers so collation cannot fold accents, case or padding into a core role.
+        if (!r.roleKey().matches("[a-z][a-z0-9:_-]{0,127}")) throw AdminSupport.invalid();
+        if (Set.of("admin","superadmin").contains(r.roleKey().replaceAll("[-_:]","")))
             throw new com.knode.user.auth.AuthenticationFailure(403);
     }
     private void replaceMenus(long id,List<Long> menuIds) {

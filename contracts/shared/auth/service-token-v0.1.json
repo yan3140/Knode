@@ -1,0 +1,44 @@
+{
+  "name": "AUTH-SERVICE",
+  "version": "0.1",
+  "status": "G5 implementation; consumer integration pending",
+  "sdk": {
+    "class": "com.knode.auth.ServiceTokenVerifier",
+    "constructor": "trusted kid-to-RSA-public-key map and Clock",
+    "operation": "verify(compactJwt, expectedAudience, requiredPermissions) returns Principal",
+    "dependencies": "CPU-only; no private key, network, Redis, or web framework",
+    "compatibility": "Existing AUTH-USER-SESSION v0.2 user verifier APIs remain unchanged; user and service tokens are separate."
+  },
+  "jwt": {
+    "algorithm": "RS256",
+    "issuer": "knode-user",
+    "token_use": "service",
+    "subject": "authenticated configured service id",
+    "audience": "one explicitly allowed service",
+    "claims": [
+      "iss",
+      "sub",
+      "aud",
+      "token_use",
+      "permissions",
+      "jti",
+      "iat",
+      "exp"
+    ],
+    "forbidden_claims": [
+      "sid",
+      "scope",
+      "user_scope"
+    ],
+    "ttl_seconds": {
+      "default": 120,
+      "maximum": 300
+    },
+    "kid": "locally configured trusted public-key map; active signing key only on issuer; no remote key retrieval"
+  },
+  "errors": {
+    "401": "bad signature, type, audience, token structure, kid or time",
+    "403": "valid service token lacks a required permission"
+  },
+  "rotation": "Configure overlapping public keys with one matching active private key; retire old kid only after tokens expire and all consumers reload."
+}

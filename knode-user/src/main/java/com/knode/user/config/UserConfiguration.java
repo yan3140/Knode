@@ -40,13 +40,30 @@ public class UserConfiguration {
     @Bean SessionStore.Writer sessionWriter(@Qualifier("authWriteConnection") LettuceConnectionFactory connection, Environment env, Clock clock) {
         return new RedisSessionWriter(new StringRedisTemplate(connection),env.getRequiredProperty("KNODE_AUTH_ENVIRONMENT"),clock);
     }
-    @Bean UserTokens userTokens(Environment env, Clock clock, SessionStore.Reader reader, SessionStore.Writer writer) {
+    @Bean SigningKeyRing signingKeys(Environment env) {
         String kid=env.getRequiredProperty("KNODE_AUTH_SIGNING_KID");
         String privateFile=env.getProperty("KNODE_AUTH_SIGNING_PRIVATE_FILE");
         String privateEnvironment=env.getProperty("KNODE_AUTH_SIGNING_PRIVATE_ENV");
         if ((privateFile==null)==(privateEnvironment==null)) throw new IllegalStateException("Set exactly one private key source");
         RSAPrivateKey privateKey=privateFile!=null ? KeyMaterial.privateFromFile(Path.of(privateFile)) : KeyMaterial.privateFromEnvironment(privateEnvironment);
-        var publicKey=KeyMaterial.publicFromFile(Path.of(env.getRequiredProperty("KNODE_AUTH_SIGNING_PUBLIC_FILE")));
-        return new UserTokens(privateKey,kid,Map.of(kid,publicKey),clock,reader,writer);
+        String trustFile=env.getProperty("KNODE_AUTH_TRUSTED_PUBLIC_KEYS_FILE");
+        var trusted=trustFile==null ? Map.of(kid,KeyMaterial.publicFromFile(Path.of(env.getRequiredProperty("KNODE_AUTH_SIGNING_PUBLIC_FILE")))) : SigningKeyRing.readTrustedFile(Path.of(trustFile));
+        return new SigningKeyRing(kid,privateKey,trusted);
+    }
+    @Bean UserTokens userTokens(SigningKeyRing keys,Clock clock,SessionStore.Reader reader,SessionStore.Writer writer) {
+        return new UserTokens(keys.privateKey(),keys.activeKid(),keys.publicKeys(),clock,reader,writer);
+    }
+    @Bean com.knode.user.internal.ServicePolicy servicePolicy(Environment env,BCryptPasswordEncoder bcrypt) {
+        String file=env.getProperty("KNODE_AUTH_SERVICE_POLICY_FILE"), variable=env.getProperty("KNODE_AUTH_SERVICE_POLICY_ENV");
+        if (file!=null && variable!=null) throw new IllegalStateException("Set only one service policy source");
+        if (file==null && variable==null) return com.knode.user.internal.ServicePolicy.disabled(bcrypt);
+        try {
+            String content=file!=null ? java.nio.file.Files.readString(Path.of(file)) : System.getenv(variable);
+            if (content==null) throw new IllegalStateException("Service policy environment variable missing");
+            return com.knode.user.internal.ServicePolicy.load(content,bcrypt);
+        } catch (java.io.IOException e) { throw new IllegalStateException("Cannot read service policy"); }
+    }
+    @Bean com.knode.user.internal.ServiceTokens serviceTokens(SigningKeyRing keys,com.knode.user.internal.ServicePolicy policy,Clock clock) {
+        return new com.knode.user.internal.ServiceTokens(keys,policy,clock);
     }
 }

@@ -78,8 +78,8 @@ public class AdminUserService {
         tx.executeWithoutResult(status -> {
             a.lock();a.require(actor,"system:user:edit");validate(u,false);a.allowTarget(actor,id);a.allowRoles(actor,u.roleIds());
             int before=a.manageable();revocations.enqueueUser(id);
-            a.db.update("UPDATE sys_user SET nick_name=?,status=?,email=?,phonenumber=?,sex=?,update_by=?,update_time=CURRENT_TIMESTAMP WHERE id=?",
-                    u.nickName(),u.status(),u.email(),u.phonenumber(),u.sex(),actor,id);
+            a.db.update("UPDATE sys_user SET profile_revision=CASE WHEN nick_name<>? THEN profile_revision+1 ELSE profile_revision END,profile_updated_at=CASE WHEN nick_name<>? THEN CURRENT_TIMESTAMP ELSE profile_updated_at END,nick_name=?,status=?,email=?,phonenumber=?,sex=?,update_by=?,update_time=CURRENT_TIMESTAMP WHERE id=?",
+                    u.nickName(),u.nickName(),u.nickName(),u.status(),u.email(),u.phonenumber(),u.sex(),actor,id);
             replaceRoles(id,u.roleIds());a.preserveManager(before);
         });
         revocations.finishUser(id);

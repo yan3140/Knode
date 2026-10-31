@@ -40,17 +40,33 @@ class UserHttpIntegrationTest {
     @MockitoBean SessionStore.Writer writer;
     @MockitoBean(name="authReadConnection") LettuceConnectionFactory readConnection;
     @MockitoBean(name="authWriteConnection") LettuceConnectionFactory writeConnection;
+    static java.security.KeyPair oldMachineKey;
+    @Autowired com.knode.user.auth.SigningKeyRing signingKeys;
     final Map<String,SessionStore.Session> sessions=new ConcurrentHashMap<>();
     final AtomicBoolean failRead=new AtomicBoolean(), failWrite=new AtomicBoolean(), failMark=new AtomicBoolean();
 
     @DynamicPropertySource static void properties(DynamicPropertyRegistry registry) throws Exception {
         var generator=KeyPairGenerator.getInstance("RSA"); generator.initialize(2048); var pair=generator.generateKeyPair();
+        oldMachineKey=generator.generateKeyPair();
+        Path oldPublic=Files.createTempFile("knode-test-old-", ".pem");oldPublic.toFile().deleteOnExit();
+        Files.writeString(oldPublic,"-----BEGIN PUBLIC KEY-----\n"+Base64.getMimeEncoder().encodeToString(oldMachineKey.getPublic().getEncoded())+"\n-----END PUBLIC KEY-----");
         Path privateKey=Files.createTempFile("knode-test-private-", ".pem"), publicKey=Files.createTempFile("knode-test-public-", ".pem");
         privateKey.toFile().deleteOnExit();publicKey.toFile().deleteOnExit();
         Files.writeString(privateKey,"-----BEGIN PRIVATE KEY-----\n"+Base64.getMimeEncoder().encodeToString(pair.getPrivate().getEncoded())+"\n-----END PRIVATE KEY-----");
         Files.writeString(publicKey,"-----BEGIN PUBLIC KEY-----\n"+Base64.getMimeEncoder().encodeToString(pair.getPublic().getEncoded())+"\n-----END PUBLIC KEY-----");
-        registry.add("spring.datasource.url",() -> "jdbc:h2:mem:knode_user_http;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
-        registry.add("spring.datasource.username",() -> "sa");registry.add("spring.datasource.password",() -> "");
+        Path trusted=Files.createTempFile("knode-trusted-", ".json"), policy=Files.createTempFile("knode-policy-", ".json");
+        trusted.toFile().deleteOnExit();policy.toFile().deleteOnExit();
+        var mapper=new ObjectMapper();
+        Files.writeString(trusted,mapper.writeValueAsString(Map.of("test-key",publicKey.toString(),"old-key",oldPublic.toString())));
+        String hash=new BCryptPasswordEncoder().encode("test-only-service-secret");
+        var policies=Map.of("ttlSeconds",120,"services",List.of(
+            Map.of("id","knode-content","credentialHash",hash,"audiences",Map.of("knode-user",List.of("users:public:read","auth:keys:read"))),
+            Map.of("id","knode-community","credentialHash",hash,"audiences",Map.of("knode-user",List.of("users:state:read")))));
+        Files.writeString(policy,mapper.writeValueAsString(policies));
+        registry.add("KNODE_AUTH_TRUSTED_PUBLIC_KEYS_FILE",() -> trusted.toString());
+        registry.add("KNODE_AUTH_SERVICE_POLICY_FILE",() -> policy.toString());
+        registry.add("spring.datasource.url",() -> System.getProperty("knode.test.mysql.url","jdbc:h2:mem:knode_user_http;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1"));
+        registry.add("spring.datasource.username",() -> System.getProperty("knode.test.mysql.user","sa"));registry.add("spring.datasource.password",() -> "");
         registry.add("KNODE_AUTH_ENVIRONMENT",() -> "test");
         registry.add("KNODE_AUTH_REVOCATION_INITIAL_MS",() -> "600000");
         registry.add("KNODE_AUTH_SIGNING_KID",() -> "test-key");
@@ -416,5 +432,107 @@ class UserHttpIntegrationTest {
         jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES(?,42,'blog',?,'BROKEN')",sid,UUID.randomUUID().toString());
         assertEquals(503,call(HttpMethod.POST,"/api/blog/auth/logout","{}",token).getStatusCode().value());
         assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox WHERE sid=?",Integer.class,sid));
+    }
+
+    @Test void restrictedRoleManagerCannotWriteCollationEquivalentCoreKeys() throws Exception {
+        permission(901,"system:role:add");permission(902,"system:role:edit");
+        String token=login("admin","admin");
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM sys_role WHERE role_key='admin'",Integer.class));
+        for (String key:List.of("admin ","ádmin","ADMIN","super_admin ","ad-min","super:admin")) {
+            var create=call(HttpMethod.POST,"/api/admin/system/role",json.writeValueAsString(Map.of("roleName","Attempt","roleKey",key,"roleSort",1,"status","0","menuIds",List.of())),token);
+            assertNotEquals(200,data(create).path("code").asInt(),"create "+key);
+            var update=call(HttpMethod.PUT,"/api/admin/system/role",json.writeValueAsString(Map.of("id",10,"roleName","Editors","roleKey",key,"roleSort",1,"status","0","menuIds",List.of(101,102,901,902))),token);
+            assertNotEquals(200,data(update).path("code").asInt(),"update "+key);
+        }
+        assertEquals("editor",jdbc.queryForObject("SELECT role_key FROM sys_role WHERE id=10",String.class));
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM sys_role",Integer.class));
+        if (System.getProperty("knode.test.mysql.url")!=null) {
+            assertEquals(1,jdbc.queryForObject("SELECT CASE WHEN _utf8mb4'ádmin' COLLATE utf8mb4_unicode_ci = _utf8mb4'admin' COLLATE utf8mb4_unicode_ci THEN 1 ELSE 0 END",Integer.class));
+            assertEquals(1,jdbc.queryForObject("SELECT CASE WHEN _utf8mb4'admin ' COLLATE utf8mb4_unicode_ci = _utf8mb4'admin' COLLATE utf8mb4_unicode_ci THEN 1 ELSE 0 END",Integer.class));
+        }
+    }
+
+    ResponseEntity<String> internal(HttpMethod method,String path,String body,String authorization) {
+        var headers=new HttpHeaders();headers.setContentType(MediaType.APPLICATION_JSON);
+        if (authorization!=null) headers.add("Authorization",authorization);
+        return http.exchange(path,method,new HttpEntity<>(body,headers),String.class);
+    }
+    String basic(String name,String secret) {
+        return "Basic "+Base64.getEncoder().encodeToString((name+":"+secret).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+    String serviceToken(String service,String... permissions) throws Exception {
+        String request=json.writeValueAsString(Map.of("audience","knode-user","permissions",List.of(permissions)));
+        var response=internal(HttpMethod.POST,"/internal/v1/auth/service-tokens",request,basic(service,"test-only-service-secret"));
+        assertEquals(200,response.getStatusCode().value(),response.getBody());
+        assertFalse(data(response).has("data"));assertTrue(data(response).path("expiresIn").isInt());
+        return data(response).path("accessToken").asText();
+    }
+    @Test void serviceIssuanceEnforcesCredentialIdentityGrantAndStrictRequests() throws Exception {
+        String request="{\"audience\":\"knode-user\",\"permissions\":[\"users:public:read\",\"users:state:read\"]}";
+        var empty=internal(HttpMethod.POST,"/internal/v1/auth/service-tokens","",basic("knode-content","test-only-service-secret"));
+        assertEquals(400,empty.getStatusCode().value());assertEquals("INVALID_ARGUMENT",data(empty).path("error").path("code").asText());
+        var granted=internal(HttpMethod.POST,"/internal/v1/auth/service-tokens",request,basic("knode-content","test-only-service-secret"));
+        assertEquals(200,granted.getStatusCode().value());assertEquals("Bearer",data(granted).path("tokenType").asText());
+        assertEquals(120,data(granted).path("expiresIn").asInt());assertEquals(1,data(granted).path("permissions").size());
+        assertEquals("users:public:read",data(granted).path("permissions").get(0).asText());
+        var verifier=new com.knode.auth.ServiceTokenVerifier(signingKeys.publicKeys(),java.time.Clock.systemUTC());
+        var principal=verifier.verify(data(granted).path("accessToken").asText(),"knode-user",Set.of("users:public:read"));
+        assertEquals("knode-content",principal.service());
+        assertEquals(401,internal(HttpMethod.POST,"/internal/v1/auth/service-tokens",request,basic("knode-content","bad-secret")).getStatusCode().value());
+        assertEquals(403,internal(HttpMethod.POST,"/internal/v1/auth/service-tokens","{\"audience\":\"other-service\",\"permissions\":[\"users:public:read\"]}",basic("knode-content","test-only-service-secret")).getStatusCode().value());
+        assertEquals(403,internal(HttpMethod.POST,"/internal/v1/auth/service-tokens","{\"audience\":\"knode-user\",\"permissions\":[\"users:state:read\"]}",basic("knode-content","test-only-service-secret")).getStatusCode().value());
+        assertEquals(400,internal(HttpMethod.POST,"/internal/v1/auth/service-tokens","{\"audience\":\"knode-user\",\"permissions\":[\"users:public:read\"],\"sub\":\"fake\"}",basic("knode-content","test-only-service-secret")).getStatusCode().value());
+        assertEquals(400,internal(HttpMethod.POST,"/internal/v1/auth/service-tokens","{\"audience\":\"knode-user\",\"audience\":\"knode-user\",\"permissions\":[\"users:public:read\"]}",basic("knode-content","test-only-service-secret")).getStatusCode().value());
+        var headers=new HttpHeaders();headers.add("Authorization",basic("knode-content","test-only-service-secret"));headers.add("Authorization","Bearer fake");headers.setContentType(MediaType.APPLICATION_JSON);
+        var ambiguous=http.exchange("/internal/v1/auth/service-tokens",HttpMethod.POST,new HttpEntity<>(request,headers),String.class);
+        assertEquals(401,ambiguous.getStatusCode().value());assertTrue(data(ambiguous).has("error"));assertFalse(data(ambiguous).has("code"));
+    }
+    @Test void batchesAreOrderedPrivateAndDistinguishMissingInvalidAndUnavailable() throws Exception {
+        String publicToken=serviceToken("knode-content","users:public:read"),stateToken=serviceToken("knode-community","users:state:read");
+        String input="{\"userIds\":[\"42\",\"999\",\"42\",\"45\",\"46\"]}";
+        var response=internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch",input,"Bearer "+publicToken);
+        assertEquals(200,response.getStatusCode().value());var items=data(response).path("items");assertEquals(4,items.size());
+        assertEquals("42",items.get(0).path("userId").asText());assertEquals("1",items.get(0).path("profileRevision").asText());
+        assertEquals("MISSING",items.get(1).path("status").asText());assertEquals("FOUND",items.get(2).path("status").asText());
+        assertEquals("MISSING",items.get(3).path("status").asText());
+        assertTrue(items.get(0).path("updatedAt").asText().endsWith("Z"));
+        assertFalse(response.getBody().contains("email"));assertFalse(response.getBody().contains("password"));assertFalse(response.getBody().contains("roles"));
+        var validity=internal(HttpMethod.POST,"/internal/v1/users/validity:batch","{\"userIds\":[\"45\",\"46\",\"999\"],\"purpose\":\"FOLLOW_TARGET\"}","Bearer "+stateToken);
+        assertEquals(200,validity.getStatusCode().value());var states=data(validity).path("items");
+        assertTrue(states.get(0).path("exists").asBoolean());assertFalse(states.get(0).path("active").asBoolean());
+        assertFalse(states.get(1).path("exists").asBoolean());assertFalse(states.get(2).path("exists").asBoolean());
+        assertEquals(403,internal(HttpMethod.POST,"/internal/v1/users/validity:batch","{\"userIds\":[\"42\"],\"purpose\":\"FOLLOW_TARGET\"}","Bearer "+publicToken).getStatusCode().value());
+        for(String invalid:List.of("{\"userIds\":[]}", "{\"userIds\":[42]}", "{\"userIds\":[\"9223372036854775808\"]}", "{\"userIds\":[\"42\"],\"extra\":true}"))
+            assertEquals(400,internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch",invalid,"Bearer "+publicToken).getStatusCode().value());
+        String tooMany=json.writeValueAsString(Map.of("userIds",java.util.Collections.nCopies(101,"42")));
+        assertEquals(400,internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch",tooMany,"Bearer "+publicToken).getStatusCode().value());
+        assertEquals(400,internal(HttpMethod.POST,"/internal/v1/users/validity:batch","{\"userIds\":[\"42\"],\"purpose\":\"ADMIN\"}","Bearer "+stateToken).getStatusCode().value());
+        String user=login("alice","blog");
+        assertEquals(401,internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch",input,"Bearer "+user).getStatusCode().value());
+        assertEquals(401,call(HttpMethod.GET,"/api/blog/user/userInfo",null,publicToken).getStatusCode().value());
+        jdbc.execute("ALTER TABLE sys_user RENAME TO sys_user_temp");
+        try {var failed=internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch",input,"Bearer "+publicToken);
+             assertEquals(503,failed.getStatusCode().value());assertTrue(data(failed).has("error"));assertFalse(data(failed).has("items"));}
+        finally {jdbc.execute("ALTER TABLE sys_user_temp RENAME TO sys_user");}
+    }
+    @Test void publicProfileRevisionPersistsAndKeyOverlapIsVerifiable() throws Exception {
+        String machine=serviceToken("knode-content","users:public:read","auth:keys:read");
+        String user=login("alice","blog");
+        var keys=internal(HttpMethod.GET,"/internal/v1/auth/keys",null,"Bearer "+machine);
+        assertEquals(2,data(keys).path("keys").size());assertFalse(keys.getBody().contains("\"d\":"));
+        var before=data(internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch","{\"userIds\":[\"42\"]}","Bearer "+machine)).path("items").get(0);
+        assertEquals(200,call(HttpMethod.PUT,"/api/blog/user/userInfo","{\"nickName\":\"Changed Alice\",\"avatar\":\"/changed.png\",\"sex\":\"1\"}",user).getStatusCode().value());
+        var after=data(internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch","{\"userIds\":[\"42\"]}","Bearer "+machine)).path("items").get(0);
+        assertEquals(Long.parseLong(before.path("profileRevision").asText())+1,Long.parseLong(after.path("profileRevision").asText()));
+        assertEquals("Changed Alice",after.path("nickName").asText());
+        var now=java.time.Instant.now();
+        String old=io.jsonwebtoken.Jwts.builder().header().keyId("old-key").and().issuer("knode-user").subject("knode-content")
+            .audience().add("knode-user").and().claim("token_use","service").claim("permissions",List.of("users:public:read"))
+            .id(UUID.randomUUID().toString()).issuedAt(Date.from(now)).expiration(Date.from(now.plusSeconds(120)))
+            .signWith((java.security.interfaces.RSAPrivateKey)oldMachineKey.getPrivate(),io.jsonwebtoken.Jwts.SIG.RS256).compact();
+        assertEquals(200,internal(HttpMethod.POST,"/internal/v1/users/public-profiles:batch","{\"userIds\":[\"42\"]}","Bearer "+old).getStatusCode().value());
+        var retired=new com.knode.auth.ServiceTokenVerifier(Map.of("test-key",signingKeys.publicKeys().get("test-key")),java.time.Clock.systemUTC());
+        assertEquals(401,assertThrows(com.knode.auth.AuthFailure.class,() -> retired.verify(old,"knode-user",Set.of("users:public:read"))).status());
+        assertThrows(IllegalArgumentException.class,() -> new SigningKeyRing("test-key",null,signingKeys.publicKeys()));
     }
 }

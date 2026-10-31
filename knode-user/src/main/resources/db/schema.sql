@@ -7,6 +7,7 @@ CREATE TABLE sys_user (
  phonenumber VARCHAR(32), sex CHAR(1) NOT NULL DEFAULT '2', avatar VARCHAR(512),
  create_by BIGINT, create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  update_by BIGINT, update_time TIMESTAMP NULL, del_flag INT NOT NULL DEFAULT 0,
+ profile_revision BIGINT NOT NULL DEFAULT 1, profile_updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  CONSTRAINT uq_user_name UNIQUE (user_name), CONSTRAINT uq_user_nick UNIQUE (nick_name),
  CONSTRAINT uq_user_email UNIQUE (email)
 );
