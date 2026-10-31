@@ -66,4 +66,19 @@ class RedisSessionAdapterTest {
         assertEquals(503,assertThrows(AuthenticationFailure.class,() -> verifier.authenticate(token,"admin")).status());
         assertEquals(401,assertThrows(AuthenticationFailure.class,() -> verifier.authenticate(token,"admin")).status());
     }
+
+    @Test @SuppressWarnings("unchecked") void writeProbeUsesExpiringIsolatedKeyAndFailsClosed() {
+        var redis=mock(StringRedisTemplate.class);ValueOperations<String,String> ops=mock(ValueOperations.class);
+        when(redis.opsForValue()).thenReturn(ops);
+        when(ops.setIfAbsent(anyString(),eq("probe"),eq(Duration.ofSeconds(10)))).thenReturn(true,true,false);
+        when(redis.delete(anyString())).thenReturn(true,false);
+        var writer=new RedisSessionWriter(redis,"test",Clock.systemUTC());
+        writer.probe();
+        assertThrows(SessionStore.Unavailable.class,writer::probe);
+        assertThrows(SessionStore.Unavailable.class,writer::probe);
+        var key=org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(ops,times(3)).setIfAbsent(key.capture(),eq("probe"),eq(Duration.ofSeconds(10)));
+        assertTrue(key.getAllValues().stream().allMatch(k -> k.startsWith("knode:test:v1:auth:session:probe-")));
+        verify(redis,times(2)).delete(anyString());
+    }
 }

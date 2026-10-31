@@ -35,6 +35,7 @@ class UserHttpIntegrationTest {
     @Autowired BCryptPasswordEncoder encoder;
     @Autowired ObjectMapper json;
     @Autowired RevocationCoordinator coordinator;
+    @Autowired UserTokens tokens;
     @MockitoBean SessionStore.Reader reader;
     @MockitoBean SessionStore.Writer writer;
     @MockitoBean(name="authReadConnection") LettuceConnectionFactory readConnection;
@@ -51,13 +52,14 @@ class UserHttpIntegrationTest {
         registry.add("spring.datasource.url",() -> "jdbc:h2:mem:knode_user_http;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
         registry.add("spring.datasource.username",() -> "sa");registry.add("spring.datasource.password",() -> "");
         registry.add("KNODE_AUTH_ENVIRONMENT",() -> "test");
+        registry.add("KNODE_AUTH_REVOCATION_INITIAL_MS",() -> "600000");
         registry.add("KNODE_AUTH_SIGNING_KID",() -> "test-key");
         registry.add("KNODE_AUTH_SIGNING_PRIVATE_FILE",() -> privateKey.toString());
         registry.add("KNODE_AUTH_SIGNING_PUBLIC_FILE",() -> publicKey.toString());
     }
     @BeforeAll void schema() { new ResourceDatabasePopulator(new ClassPathResource("db/schema.sql")).execute(dataSource); }
     @BeforeEach void setup() {
-        for (String table:new String[]{"auth_revocation_intent","sys_role_menu","sys_user_role","yan_menu","sys_role","sys_user"})
+        for (String table:new String[]{"auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_role_menu","sys_user_role","yan_menu","sys_role","sys_user"})
             jdbc.update("DELETE FROM "+table);
         sessions.clear(); failRead.set(false);failWrite.set(false);failMark.set(false);
         reset(reader,writer);
@@ -151,8 +153,10 @@ class UserHttpIntegrationTest {
         assertEquals(503,call(HttpMethod.POST,"/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"test-password\"}",null).getStatusCode().value());
         assertEquals(503,call(HttpMethod.POST,"/api/blog/auth/logout","{}",c).getStatusCode().value());
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE state='PENDING'",Integer.class));
-        assertEquals(401,call(HttpMethod.GET,"/api/blog/user/userInfo",null,c).getStatusCode().value());
-        failWrite.set(false);assertEquals(1,coordinator.recoverPending(10));
+        assertEquals(503,call(HttpMethod.GET,"/api/blog/user/userInfo",null,c).getStatusCode().value());
+        assertEquals(503,call(HttpMethod.POST,"/api/blog/auth/logout","{}",c).getStatusCode().value());
+        failWrite.set(false);
+        assertEquals(200,call(HttpMethod.POST,"/api/blog/auth/logout","{}",c).getStatusCode().value());
         assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE state='PENDING'",Integer.class));
         assertEquals(401,call(HttpMethod.GET,"/api/blog/user/userInfo",null,c).getStatusCode().value());
         failRead.set(true);
@@ -206,5 +210,211 @@ class UserHttpIntegrationTest {
         failRead.set(true);
         var unavailable=call(HttpMethod.GET,"/api/blog/user/userInfo",null,token);
         assertEquals(503,unavailable.getStatusCode().value());assertEquals(500,data(unavailable).path("code").asInt());
+    }
+
+    void permission(long menuId,String permission) {
+        jdbc.update("INSERT INTO yan_menu(id,parent_id,menu_name,order_num,menu_type,status,visible,del_flag,perms) VALUES(?,100,?,9,'F','0','0','0',?)",menuId,"permission-"+menuId,permission);
+        jdbc.update("INSERT INTO sys_role_menu(role_id,menu_id) VALUES(10,?)",menuId);
+    }
+    @Test void adminUserCrudProtectsCredentialsAndRevokesSessions() throws Exception {
+        permission(900,"*:*:*");
+        String admin=login("admin","admin");
+        assertTrue(data(call(HttpMethod.GET,"/api/admin/ops/revocations/metrics",null,admin)).path("data").path("retryAttempts").isTextual());
+        var list=call(HttpMethod.GET,"/api/admin/system/user/list?pageNum=1&pageSize=10",null,admin);
+        assertEquals(200,data(list).path("code").asInt());assertTrue(data(list).path("data").path("total").isTextual());
+        assertFalse(list.getBody().contains("password"));assertTrue(data(list).path("data").path("rows").get(0).path("id").isTextual());
+        var detail=call(HttpMethod.GET,"/api/admin/system/user/43",null,admin);
+        assertFalse(detail.getBody().contains("password"));assertTrue(data(detail).path("data").has("roleIds"));
+        var add=call(HttpMethod.POST,"/api/admin/system/user","{\"id\":1,\"type\":\"0\",\"userName\":\"newadmin\",\"nickName\":\"New Admin\",\"password\":\"test-password\",\"status\":\"0\",\"email\":\"newadmin@example.invalid\",\"sex\":\"2\",\"roleIds\":[10],\"createBy\":1}",admin);
+        assertEquals(200,data(add).path("code").asInt());
+        long id=jdbc.queryForObject("SELECT id FROM sys_user WHERE user_name='newadmin'",Long.class);
+        assertNotEquals(1,id);assertEquals("1",jdbc.queryForObject("SELECT type FROM sys_user WHERE id=?",String.class,id));
+        String blog=login("newadmin","blog"), adminSession=login("newadmin","admin");
+        var reset=call(HttpMethod.PUT,"/api/admin/system/user/resetPwd","{\"userId\":"+id+",\"password\":\"changed-password\"}",admin);
+        assertEquals(200,data(reset).path("code").asInt());
+        assertEquals(401,call(HttpMethod.GET,"/api/blog/user/userInfo",null,blog).getStatusCode().value());
+        assertEquals(401,call(HttpMethod.GET,"/api/admin/auth/me",null,adminSession).getStatusCode().value());
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox WHERE user_id=? AND state='PENDING'",Integer.class,id));
+        var update=call(HttpMethod.PUT,"/api/admin/system/user","{\"id\":"+id+",\"userName\":\"hijack\",\"password\":\"sneak-password\",\"type\":\"0\",\"nickName\":\"Changed\",\"status\":\"0\",\"email\":\"newadmin@example.invalid\",\"sex\":\"1\",\"roleIds\":[10]}",admin);
+        assertEquals(200,data(update).path("code").asInt());
+        assertEquals("newadmin",jdbc.queryForObject("SELECT user_name FROM sys_user WHERE id=?",String.class,id));
+        assertEquals("1",jdbc.queryForObject("SELECT type FROM sys_user WHERE id=?",String.class,id));
+        assertTrue(encoder.matches("changed-password",jdbc.queryForObject("SELECT password FROM sys_user WHERE id=?",String.class,id)));
+        assertEquals(200,data(call(HttpMethod.PUT,"/api/admin/system/user/changeStatus","{\"userId\":"+id+",\"status\":\"1\"}",admin)).path("code").asInt());
+        assertEquals(200,data(call(HttpMethod.DELETE,"/api/admin/system/user/"+id,null,admin)).path("code").asInt());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM sys_user WHERE id=?",Integer.class,id));
+    }
+    @Test void adminRoleAndMenuCrudAndTreesUseRealPermissions() throws Exception {
+        permission(900,"*:*:*");String admin=login("admin","admin");
+        var menu=call(HttpMethod.POST,"/api/admin/system/menu","{\"id\":1,\"menuName\":\"Feature\",\"parentId\":100,\"orderNum\":4,\"menuType\":\"C\",\"visible\":\"0\",\"status\":\"0\",\"perms\":\"feature:read\"}",admin);
+        assertEquals(200,data(menu).path("code").asInt());
+        long menuId=jdbc.queryForObject("SELECT id FROM yan_menu WHERE menu_name='Feature'",Long.class);
+        var role=call(HttpMethod.POST,"/api/admin/system/role","{\"roleName\":\"Feature Role\",\"roleKey\":\"feature\",\"roleSort\":5,\"status\":\"0\",\"menuIds\":["+menuId+"]}",admin);
+        assertEquals(200,data(role).path("code").asInt());
+        assertEquals(200,data(call(HttpMethod.GET,"/api/admin/system/menu/list",null,admin)).path("code").asInt());
+        assertTrue(data(call(HttpMethod.GET,"/api/admin/system/menu/treeselect",null,admin)).path("data").isArray());
+        assertTrue(data(call(HttpMethod.GET,"/api/admin/system/role/listAllRole",null,admin)).path("data").isArray());
+        long roleId=jdbc.queryForObject("SELECT id FROM sys_role WHERE role_key='feature'",Long.class);
+        assertTrue(data(call(HttpMethod.GET,"/api/admin/system/role/list?pageNum=1&pageSize=1",null,admin)).path("data").path("total").isTextual());
+        assertEquals(Long.toString(menuId),data(call(HttpMethod.GET,"/api/admin/system/role/"+roleId,null,admin)).path("data").path("menuIds").get(0).asText());
+        assertEquals(Long.toString(menuId),data(call(HttpMethod.GET,"/api/admin/system/menu/"+menuId,null,admin)).path("data").path("id").asText());
+        var roleUpdate=call(HttpMethod.PUT,"/api/admin/system/role","{\"id\":"+roleId+",\"roleName\":\"Feature Updated\",\"roleKey\":\"feature\",\"roleSort\":5,\"status\":\"0\",\"menuIds\":["+menuId+"]}",admin);
+        assertEquals(200,data(roleUpdate).path("code").asInt());
+        var tree=data(call(HttpMethod.GET,"/api/admin/system/menu/roleMenuTreeselect/"+roleId,null,admin)).path("data");
+        assertTrue(tree.has("menus"));assertEquals(Long.toString(menuId),tree.path("checkedKeys").get(0).asText());
+        assertEquals(200,data(call(HttpMethod.PUT,"/api/admin/system/menu","{\"id\":"+menuId+",\"menuName\":\"Feature 2\",\"parentId\":100,\"orderNum\":4,\"menuType\":\"C\",\"visible\":\"0\",\"status\":\"0\",\"perms\":\"feature:read\"}",admin)).path("code").asInt());
+        var cycle=call(HttpMethod.PUT,"/api/admin/system/menu","{\"id\":100,\"menuName\":\"Root\",\"parentId\":101,\"orderNum\":1,\"menuType\":\"M\",\"visible\":\"0\",\"status\":\"0\"}",admin);
+        assertEquals(515,data(cycle).path("code").asInt());
+        assertEquals(0L,jdbc.queryForObject("SELECT parent_id FROM yan_menu WHERE id=100",Long.class));
+        assertEquals(200,data(call(HttpMethod.PUT,"/api/admin/system/role/changeStatus","{\"roleId\":"+roleId+",\"status\":\"1\"}",admin)).path("code").asInt());
+        assertEquals(200,data(call(HttpMethod.DELETE,"/api/admin/system/role/"+roleId,null,admin)).path("code").asInt());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM sys_role_menu WHERE role_id=?",Integer.class,roleId));
+        assertEquals(200,data(call(HttpMethod.DELETE,"/api/admin/system/menu/"+menuId,null,admin)).path("code").asInt());
+    }
+    @Test void restrictedAdminCannotEscalateAndCriticalChangesRollBack() throws Exception {
+        permission(901,"system:user:add");permission(902,"system:role:edit");permission(903,"system:role:query");
+        jdbc.update("INSERT INTO sys_role(id,role_name,role_key,role_sort,status,del_flag) VALUES (20,'Privileged','privileged',2,'0','0')");
+        jdbc.update("INSERT INTO yan_menu(id,parent_id,menu_name,order_num,menu_type,status,visible,del_flag,perms) VALUES (920,100,'Danger',9,'F','0','0','0','system:root:danger')");
+        jdbc.update("INSERT INTO sys_role_menu(role_id,menu_id) VALUES(20,920)");
+        String admin=login("admin","admin");
+        assertEquals(403,call(HttpMethod.DELETE,"/api/admin/system/user/43",null,admin).getStatusCode().value());
+        assertEquals(403,call(HttpMethod.GET,"/api/admin/ops/revocations/metrics",null,admin).getStatusCode().value());
+        String escalate="{\"userName\":\"evil\",\"nickName\":\"Evil\",\"password\":\"example\",\"email\":\"evil@example.invalid\",\"status\":\"0\",\"sex\":\"2\",\"roleIds\":[20]}";
+        assertEquals(403,call(HttpMethod.POST,"/api/admin/system/user",escalate,admin).getStatusCode().value());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM sys_user WHERE user_name='evil'",Integer.class));
+        String roleEdit="{\"id\":10,\"roleName\":\"Editors\",\"roleKey\":\"editor\",\"roleSort\":1,\"status\":\"0\",\"menuIds\":[920]}";
+        assertEquals(403,call(HttpMethod.PUT,"/api/admin/system/role",roleEdit,admin).getStatusCode().value());
+        assertTrue(jdbc.queryForObject("SELECT COUNT(*) FROM sys_role_menu WHERE role_id=10",Integer.class)>0);
+        var disable=call(HttpMethod.PUT,"/api/admin/system/role/changeStatus","{\"id\":10,\"status\":\"1\"}",admin);
+        assertEquals(516,data(disable).path("code").asInt());
+        assertEquals("0",jdbc.queryForObject("SELECT status FROM sys_role WHERE id=10",String.class));
+    }
+
+    @Test void retryBatchContinuesAfterOneSidFailure() throws Exception {
+        String first=login("alice","blog"), second=login("bob","blog");
+        String sidA=tokens.authenticateAnyScope(first).sid(), sidB=tokens.authenticateAnyScope(second).sid();
+        failWrite.set(true);
+        assertEquals(503,call(HttpMethod.POST,"/api/blog/auth/logout","{}",first).getStatusCode().value());
+        assertEquals(503,call(HttpMethod.POST,"/api/blog/auth/logout","{}",second).getStatusCode().value());
+        jdbc.update("UPDATE auth_revocation_intent SET next_attempt_at=NULL");
+        failWrite.set(false);
+        doAnswer(inv -> {
+            String sid=inv.getArgument(0);
+            if (sid.equals(sidA)) throw new SessionStore.Unavailable("sid A unavailable");
+            sessions.remove(sid);return null;
+        }).when(writer).revoke(anyString());
+        assertEquals(1,coordinator.recoverPending(10));
+        assertEquals("PENDING",jdbc.queryForObject("SELECT state FROM auth_revocation_intent WHERE sid=?",String.class,sidA));
+        assertEquals("REVOKED",jdbc.queryForObject("SELECT state FROM auth_revocation_intent WHERE sid=?",String.class,sidB));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox WHERE sid=? AND state='PENDING'",Integer.class,sidB));
+        doAnswer(inv -> {sessions.remove((String)inv.getArgument(0));return null;}).when(writer).revoke(anyString());
+        jdbc.update("UPDATE auth_revocation_intent SET next_attempt_at=NULL,claim_token=?,claim_until=? WHERE sid=?",UUID.randomUUID().toString(),java.sql.Timestamp.from(java.time.Instant.now().minusSeconds(1)),sidA);
+        coordinator.poll();
+        assertEquals("REVOKED",jdbc.queryForObject("SELECT state FROM auth_revocation_intent WHERE sid=?",String.class,sidA));
+        assertTrue(coordinator.failures()>0);assertTrue(coordinator.successes()>0);
+    }
+    @Test void concurrentLogoutKeepsOneIntentAndOneEvent() throws Exception {
+        String token=login("alice","blog"),sid=tokens.authenticateAnyScope(token).sid();
+        var bothEntered=new java.util.concurrent.CountDownLatch(2);
+        doAnswer(inv -> {
+            bothEntered.countDown();
+            if (!bothEntered.await(5,java.util.concurrent.TimeUnit.SECONDS)) throw new IllegalStateException("Concurrent revoke did not reach barrier");
+            sessions.remove((String)inv.getArgument(0));return null;
+        }).when(writer).revoke(anyString());
+        var executor=java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var start=new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.Callable<Integer> action=() -> {start.await();return call(HttpMethod.POST,"/api/blog/auth/logout","{}",token).getStatusCode().value();};
+            var one=executor.submit(action);var two=executor.submit(action);start.countDown();
+            int a=one.get(),b=two.get();
+            assertEquals(200,a);assertEquals(200,b);
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE sid=?",Integer.class,sid));
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox WHERE sid=?",Integer.class,sid));
+        } finally {executor.shutdownNow();}
+    }
+    @Test void rolePermissionChangesTakeEffectWithoutSessionRefresh() throws Exception {
+        permission(900,"*:*:*");String admin=login("admin","admin");
+        assertEquals(200,call(HttpMethod.GET,"/api/admin/system/menu/list",null,admin).getStatusCode().value());
+        jdbc.update("DELETE FROM sys_role_menu WHERE role_id=10 AND menu_id=900");
+        assertEquals(403,call(HttpMethod.GET,"/api/admin/system/menu/list",null,admin).getStatusCode().value());
+    }
+
+    @Test void cannotChangeCoreAccountsOrUpgradeTypeByOrdinaryEdit() throws Exception {
+        permission(900,"*:*:*");String admin=login("admin","admin");
+        jdbc.update("INSERT INTO sys_user(id,user_name,nick_name,password,email,type,status,sex,del_flag) VALUES(1,'root','Root',?,'root@example.invalid','1','0','2',0)",encoder.encode("example"));
+        jdbc.update("INSERT INTO sys_role(id,role_name,role_key,role_sort,status,del_flag) VALUES(1,'Core','core',0,'0','0')");
+        assertEquals(403,call(HttpMethod.PUT,"/api/admin/system/user/changeStatus","{\"userId\":1,\"status\":\"1\"}",admin).getStatusCode().value());
+        assertEquals(403,call(HttpMethod.DELETE,"/api/admin/system/role/1",null,admin).getStatusCode().value());
+        var update=call(HttpMethod.PUT,"/api/admin/system/user","{\"id\":43,\"userName\":\"bob\",\"type\":\"1\",\"nickName\":\"Bob\",\"status\":\"0\",\"email\":\"bob@example.invalid\",\"sex\":\"2\",\"roleIds\":[10]}",admin);
+        assertEquals(200,data(update).path("code").asInt());
+        assertEquals("0",jdbc.queryForObject("SELECT type FROM sys_user WHERE id=43",String.class));
+        assertEquals(403,call(HttpMethod.POST,"/api/admin/auth/login","{\"userName\":\"bob\",\"password\":\"test-password\"}",null).getStatusCode().value());
+    }
+
+    @Test void failedRelationInsertRollsBackRoleAndAllItsOldRelations() throws Exception {
+        permission(900,"*:*:*");String admin=login("admin","admin");
+        jdbc.update("INSERT INTO yan_menu(id,parent_id,menu_name,order_num,menu_type,status,visible,del_flag,perms) VALUES(950,100,'Rejected',9,'C','0','0','0','test:rejected')");
+        int before=jdbc.queryForObject("SELECT COUNT(*) FROM sys_role_menu WHERE role_id=10",Integer.class);
+        jdbc.execute("ALTER TABLE sys_role_menu ADD CONSTRAINT check_test_menu CHECK (menu_id <> 950)");
+        try {
+            var response=call(HttpMethod.PUT,"/api/admin/system/role","{\"id\":10,\"roleName\":\"Must Roll Back\",\"roleKey\":\"editor\",\"roleSort\":1,\"status\":\"0\",\"menuIds\":[101,950]}",admin);
+            assertEquals(515,data(response).path("code").asInt());
+        } finally {jdbc.execute("ALTER TABLE sys_role_menu DROP CONSTRAINT check_test_menu");}
+        assertEquals("Editors",jdbc.queryForObject("SELECT role_name FROM sys_role WHERE id=10",String.class));
+        assertEquals(before,jdbc.queryForObject("SELECT COUNT(*) FROM sys_role_menu WHERE role_id=10",Integer.class));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM sys_role_menu WHERE role_id=10 AND menu_id=102",Integer.class));
+    }
+    @Test void simultaneousAdministratorDisablesCannotRemoveEveryManager() throws Exception {
+        permission(900,"*:*:*");
+        jdbc.update("UPDATE sys_user SET type='1' WHERE id=43");
+        jdbc.update("INSERT INTO sys_user_role(user_id,role_id) VALUES(43,10)");
+        String first=login("admin","admin"),second=login("bob","admin");
+        var start=new java.util.concurrent.CountDownLatch(1);var pool=java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var one=pool.submit(() -> {start.await();return call(HttpMethod.PUT,"/api/admin/system/user/changeStatus","{\"id\":43,\"status\":\"1\"}",first);});
+            var two=pool.submit(() -> {start.await();return call(HttpMethod.PUT,"/api/admin/system/user/changeStatus","{\"id\":44,\"status\":\"1\"}",second);});
+            start.countDown();var a=one.get();var b=two.get();
+            assertTrue(a.getStatusCode().value()==200 || b.getStatusCode().value()==200);
+            assertTrue(jdbc.queryForObject("SELECT COUNT(*) FROM sys_user WHERE type='1' AND status='0' AND del_flag=0",Integer.class)>=1);
+        } finally {pool.shutdownNow();}
+    }
+
+    @Test void readinessChecksWriteCapabilityAndDoesNotKeepProbeRows() throws Exception {
+        assertEquals(200,call(HttpMethod.GET,"/health/ready",null,null).getStatusCode().value());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent",Integer.class));
+        doThrow(new SessionStore.Unavailable("write denied")).when(writer).probe();
+        assertEquals(503,call(HttpMethod.GET,"/health/ready",null,null).getStatusCode().value());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent",Integer.class));
+    }
+    @Test void reservedRoleKeysAndUnownedMenuPermissionsCannotEscalate() throws Exception {
+        permission(901,"system:role:add");permission(902,"system:menu:add");String admin=login("admin","admin");
+        String reserved="{\"roleName\":\"Forged\",\"roleKey\":\"admin\",\"roleSort\":1,\"status\":\"0\",\"menuIds\":[]}";
+        assertEquals(403,call(HttpMethod.POST,"/api/admin/system/role",reserved,admin).getStatusCode().value());
+        String newMenu="{\"menuName\":\"Forged\",\"parentId\":100,\"orderNum\":1,\"menuType\":\"F\",\"visible\":\"0\",\"status\":\"0\",\"perms\":\"system:secret:admin\"}";
+        assertEquals(403,call(HttpMethod.POST,"/api/admin/system/menu",newMenu,admin).getStatusCode().value());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM yan_menu WHERE menu_name='Forged'",Integer.class));
+    }
+
+    @Test void ambiguousPathCannotTurnBlogScopeIntoAdminScope() throws Exception {
+        permission(900,"*:*:*");String blog=login("admin","blog");
+        assertEquals(403,call(HttpMethod.GET,"/api/admin/system/user/list",null,blog).getStatusCode().value());
+        assertNotEquals(200,call(HttpMethod.GET,"/api/admin;v=1/system/user/list",null,blog).getStatusCode().value());
+    }
+
+    @Test void reservedCoreRoleAndItsMembersAreProtectedRegardlessOfId() throws Exception {
+        permission(900,"*:*:*");String admin=login("admin","admin");
+        jdbc.update("INSERT INTO sys_role(id,role_name,role_key,role_sort,status,del_flag) VALUES(50,'Legacy Admin','admin',0,'0','0')");
+        jdbc.update("INSERT INTO sys_user_role(user_id,role_id) VALUES(43,50)");
+        jdbc.update("INSERT INTO sys_role_menu(role_id,menu_id) VALUES(50,101)");
+        assertEquals(403,call(HttpMethod.PUT,"/api/admin/system/user/changeStatus","{\"id\":43,\"status\":\"1\"}",admin).getStatusCode().value());
+        assertEquals(403,call(HttpMethod.PUT,"/api/admin/system/role/changeStatus","{\"id\":50,\"status\":\"1\"}",admin).getStatusCode().value());
+        assertEquals(403,call(HttpMethod.DELETE,"/api/admin/system/menu/101",null,admin).getStatusCode().value());
+    }
+
+    @Test void malformedIntentCannotBeReportedAsCompleted() throws Exception {
+        String token=login("alice","blog"),sid=tokens.authenticateAnyScope(token).sid();
+        jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES(?,42,'blog',?,'BROKEN')",sid,UUID.randomUUID().toString());
+        assertEquals(503,call(HttpMethod.POST,"/api/blog/auth/logout","{}",token).getStatusCode().value());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_outbox WHERE sid=?",Integer.class,sid));
     }
 }

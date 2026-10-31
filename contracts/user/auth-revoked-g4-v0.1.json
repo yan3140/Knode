@@ -1,0 +1,20 @@
+{
+  "name": "AUTH-REVOKED-OUTBOX",
+  "version": "0.1",
+  "status": "candidate; no Stream relay or consumer implemented",
+  "event": {
+    "eventId": "stable UUID generated with sid intent",
+    "sid": "UUID string",
+    "userId": "decimal string",
+    "scope": "blog or admin",
+    "occurredAt": "instant of confirmed Redis deletion",
+    "executionScope": "SID_CURRENT_EXECUTIONS"
+  },
+  "state": "intent PENDING -> REVOKED and separate outbox PENDING inserted atomically after Redis deletion; PENDING does not mean delivered",
+  "retry": "bounded scan, per-sid expiring lease, retry counter and exponential delay capped at 300 seconds; one failure does not prevent remaining batch",
+  "revocation": "same sid logout retry allowed while session remains valid; non-logout PENDING requests return 503; delete is idempotent",
+  "metrics": "protected GET /api/admin/ops/revocations/metrics; persisted counts plus process-local success/failure counters",
+  "rollout": "G3 tokens without SQL sid records must be invalidated by a separately approved key retirement or allowed to expire before cutover",
+  "integration": "future relay must use original eventId on redelivery and establish its own lease/retry/ACK; no claim of downstream Agent pause",
+  "historical_gap": "G3 intents already marked REVOKED are not automatically copied into the new outbox; a separately approved backfill/replay plan is required."
+}

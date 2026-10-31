@@ -11,12 +11,12 @@ CREATE TABLE sys_user (
  CONSTRAINT uq_user_email UNIQUE (email)
 );
 CREATE TABLE sys_role (
- id BIGINT NOT NULL PRIMARY KEY, role_name VARCHAR(128) NOT NULL, role_key VARCHAR(128) NOT NULL,
+ id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, role_name VARCHAR(128) NOT NULL, role_key VARCHAR(128) NOT NULL,
  role_sort INT NOT NULL DEFAULT 0, status CHAR(1) NOT NULL DEFAULT '0', del_flag CHAR(1) NOT NULL DEFAULT '0',
  create_by BIGINT, create_time TIMESTAMP NULL, update_by BIGINT, update_time TIMESTAMP NULL, remark VARCHAR(500)
 );
 CREATE TABLE yan_menu (
- id BIGINT NOT NULL PRIMARY KEY, parent_id BIGINT NOT NULL DEFAULT 0, menu_name VARCHAR(128) NOT NULL,
+ id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, parent_id BIGINT NOT NULL DEFAULT 0, menu_name VARCHAR(128) NOT NULL,
  order_num INT NOT NULL DEFAULT 0, path VARCHAR(255), component VARCHAR(255), is_frame INT,
  menu_type CHAR(1) NOT NULL, visible CHAR(1) NOT NULL DEFAULT '0', status CHAR(1) NOT NULL DEFAULT '0',
  perms VARCHAR(255), icon VARCHAR(255), create_by BIGINT, create_time TIMESTAMP NULL,
@@ -27,5 +27,23 @@ CREATE TABLE sys_role_menu (role_id BIGINT NOT NULL, menu_id BIGINT NOT NULL, PR
 CREATE TABLE auth_revocation_intent (
  sid VARCHAR(36) NOT NULL PRIMARY KEY, user_id BIGINT NOT NULL, scope VARCHAR(5) NOT NULL,
  event_id VARCHAR(36) NOT NULL UNIQUE, state VARCHAR(16) NOT NULL,
- created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, revoked_at TIMESTAMP NULL
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, revoked_at TIMESTAMP NULL,
+ attempts INT NOT NULL DEFAULT 0, next_attempt_at TIMESTAMP NULL, claim_token VARCHAR(36), claim_until TIMESTAMP NULL, last_error VARCHAR(128)
 );
+
+CREATE TABLE auth_revocation_outbox (
+ event_id VARCHAR(36) NOT NULL PRIMARY KEY, sid VARCHAR(36) NOT NULL UNIQUE,
+ user_id BIGINT NOT NULL, scope VARCHAR(5) NOT NULL, occurred_at TIMESTAMP NOT NULL,
+ execution_scope VARCHAR(32) NOT NULL, state VARCHAR(16) NOT NULL
+);
+CREATE TABLE user_security_lock (id INT NOT NULL PRIMARY KEY);
+INSERT INTO user_security_lock(id) VALUES (1);
+
+CREATE TABLE auth_login_session (
+ sid VARCHAR(36) NOT NULL PRIMARY KEY, user_id BIGINT NOT NULL, scope VARCHAR(5) NOT NULL,
+ expires_at TIMESTAMP NOT NULL, active INT NOT NULL DEFAULT 1
+);
+CREATE INDEX idx_auth_login_user ON auth_login_session(user_id,active);
+
+CREATE INDEX idx_auth_revoke_due ON auth_revocation_intent(state,next_attempt_at,claim_until);
+CREATE INDEX idx_auth_outbox_state ON auth_revocation_outbox(state,occurred_at);

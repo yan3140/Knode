@@ -1,0 +1,146 @@
+{
+  "name": "USER-ADMIN-G4",
+  "version": "0.1",
+  "status": "candidate; pending controller and consumer review",
+  "scope": "admin user JWT plus live server-side operation permissions",
+  "envelope": "code/msg/data; null data omitted; Java Long values and pagination total are decimal strings; dates yyyy-MM-dd HH:mm:ss",
+  "routes": [
+    {
+      "path": "/api/admin/system/user/list",
+      "method": "GET",
+      "permission": "system:user:list"
+    },
+    {
+      "path": "/api/admin/system/user/{id}",
+      "method": "GET",
+      "permission": "system:user:query"
+    },
+    {
+      "path": "/api/admin/system/user",
+      "method": "POST",
+      "permission": "system:user:add"
+    },
+    {
+      "path": "/api/admin/system/user",
+      "method": "PUT",
+      "permission": "system:user:edit"
+    },
+    {
+      "path": "/api/admin/system/user/{ids}",
+      "method": "DELETE",
+      "permission": "system:user:remove"
+    },
+    {
+      "path": "/api/admin/system/user/changeStatus",
+      "method": "PUT",
+      "permission": "system:user:edit",
+      "aliases": [
+        "id",
+        "userId"
+      ]
+    },
+    {
+      "path": "/api/admin/system/user/resetPwd",
+      "method": "PUT",
+      "permission": "system:user:resetPwd"
+    },
+    {
+      "path": "/api/admin/system/role/list",
+      "method": "GET",
+      "permission": "system:role:list"
+    },
+    {
+      "path": "/api/admin/system/role/listAllRole",
+      "method": "GET",
+      "permission": "any of system:role:list/system:user:query/system:user:add/system:user:edit"
+    },
+    {
+      "path": "/api/admin/system/role/{id}",
+      "method": "GET",
+      "permission": "system:role:query"
+    },
+    {
+      "path": "/api/admin/system/role",
+      "method": "POST",
+      "permission": "system:role:add"
+    },
+    {
+      "path": "/api/admin/system/role",
+      "method": "PUT",
+      "permission": "system:role:edit"
+    },
+    {
+      "path": "/api/admin/system/role/{ids}",
+      "method": "DELETE",
+      "permission": "system:role:remove"
+    },
+    {
+      "path": "/api/admin/system/role/changeStatus",
+      "method": "PUT",
+      "permission": "system:role:edit",
+      "aliases": [
+        "id",
+        "roleId"
+      ]
+    },
+    {
+      "path": "/api/admin/system/menu/list",
+      "method": "GET",
+      "permission": "system:menu:list"
+    },
+    {
+      "path": "/api/admin/system/menu/treeselect",
+      "method": "GET",
+      "permission": "any of system:menu:list/system:role:query/system:role:add/system:role:edit"
+    },
+    {
+      "path": "/api/admin/system/menu/roleMenuTreeselect/{id}",
+      "method": "GET",
+      "permission": "any of system:role:query/system:role:edit/system:menu:list"
+    },
+    {
+      "path": "/api/admin/system/menu/{id}",
+      "method": "GET",
+      "permission": "system:menu:query"
+    },
+    {
+      "path": "/api/admin/system/menu",
+      "method": "POST",
+      "permission": "system:menu:add"
+    },
+    {
+      "path": "/api/admin/system/menu",
+      "method": "PUT",
+      "permission": "system:menu:edit"
+    },
+    {
+      "path": "/api/admin/system/menu/{id}",
+      "method": "DELETE",
+      "permission": "system:menu:remove"
+    },
+    {
+      "path": "/api/admin/ops/revocations/metrics",
+      "method": "GET",
+      "permission": "system:revocation:monitor"
+    }
+  ],
+  "semantics": [
+    "permissions and account status re-read from user database on each operation; *:*:* is honored only when granted by active DB role/menu",
+    "non-wildcard actor can grant only owned active roles and menus; core role grant restricted to actor user 1",
+    "user 1, role 1, roles with reserved core keys admin/super_admin/superadmin and their assigned users/menus are immutable via management endpoints; actor cannot modify own account via admin endpoints",
+    "reserved role keys admin, super_admin, superadmin cannot be created or assigned by role edits",
+    "changes are serialized by a database lock and rolled back if the last active administrator with system:user:edit or *:*:* would lose that ability",
+    "user creation creates type 1 server-side; ordinary update never changes userName, type or password",
+    "password reset, account changes and deletion invalidate all known target sid sessions; Redis failure returns 503 after durable intent",
+    "user 1 and role 1 protection, last-manager invariant and restricted grants are intentional changes versus the monolith",
+    "old Redis sessions issued before G4 lack SQL session records and require controlled key retirement or expiry during cutover"
+  ],
+  "errors": {
+    "401": "invalid account or session",
+    "403": "missing authority or attempted privilege escalation",
+    "503": "database or authority unavailable; mutation may have committed and is recoverable",
+    "200/code515": "invalid parameters or uniqueness conflict",
+    "200/code516": "last manageable account protection"
+  },
+  "validation": "H2 MySQL-mode and session-port stubs only; actual MySQL/Redis ACL and gateway unverified"
+}

@@ -29,6 +29,7 @@ class ProductionWiringTest {
         registry.add("spring.datasource.url",() -> "jdbc:h2:mem:wiring;MODE=MySQL");
         registry.add("spring.datasource.username",() -> "sa");registry.add("spring.datasource.password",() -> "");
         registry.add("KNODE_AUTH_ENVIRONMENT",() -> "test");
+        registry.add("KNODE_AUTH_REVOCATION_INITIAL_MS",() -> "600000");
         registry.add("KNODE_AUTH_SIGNING_KID",() -> "test-key");
         registry.add("KNODE_AUTH_SIGNING_PRIVATE_FILE",() -> priv.toString());
         registry.add("KNODE_AUTH_SIGNING_PUBLIC_FILE",() -> pub.toString());

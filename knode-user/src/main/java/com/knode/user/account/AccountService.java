@@ -13,16 +13,29 @@ public class AccountService {
     private final UserRepository users;
     private final BCryptPasswordEncoder encoder;
     private final UserTokens tokens;
-    public AccountService(UserRepository users,BCryptPasswordEncoder encoder,UserTokens tokens) {
-        this.users=users;this.encoder=encoder;this.tokens=tokens;
+    private final org.springframework.jdbc.core.JdbcTemplate db;
+    private final com.knode.user.auth.SessionStore.Writer sessionWriter;
+    public AccountService(UserRepository users,BCryptPasswordEncoder encoder,UserTokens tokens,
+                          org.springframework.jdbc.core.JdbcTemplate db,com.knode.user.auth.SessionStore.Writer sessionWriter) {
+        this.users=users;this.encoder=encoder;this.tokens=tokens;this.db=db;this.sessionWriter=sessionWriter;
     }
     public record LoginResult(String token,UserRepository.UserInfo userInfo) {}
+    @org.springframework.transaction.annotation.Transactional
     public LoginResult login(String username,String password,String scope) {
         if (!StringUtils.hasText(username) || !StringUtils.hasText(password)) throw new BusinessFailure(505,"用户名或密码错误");
-        var user=users.byUsername(username).orElseThrow(() -> new BusinessFailure(505,"用户名或密码错误"));
+        var user=users.byUsernameForUpdate(username).orElseThrow(() -> new BusinessFailure(505,"用户名或密码错误"));
         if (!user.active() || !encoder.matches(password,user.password())) throw new BusinessFailure(505,"用户名或密码错误");
         if ("admin".equals(scope) && !"1".equals(user.type())) throw new AuthenticationFailure(403);
-        return new LoginResult(tokens.issue(Long.toString(user.id()),scope),user.info());
+        var issued=tokens.issueDetailed(Long.toString(user.id()),scope);
+        try {
+            db.update("INSERT INTO auth_login_session(sid,user_id,scope,expires_at,active) VALUES (?,?,?,?,1)",
+                    issued.principal().sid(),user.id(),scope,java.sql.Timestamp.from(java.time.Instant.ofEpochSecond(issued.expiresAt())));
+        } catch (RuntimeException e) {
+            try { sessionWriter.revoke(issued.principal().sid()); }
+            catch (RuntimeException ignored) { /* Token has not left the server. */ }
+            throw e;
+        }
+        return new LoginResult(issued.token(),user.info());
     }
     public void register(String username,String nickname,String password,String email) {
         if (!StringUtils.hasText(username)) throw new BusinessFailure(508,"用户名不能为空");
@@ -44,6 +57,9 @@ public class AccountService {
         var user=users.byId(id).filter(UserRepository.Account::active).orElseThrow(() -> new AuthenticationFailure(401));
         if ("admin".equals(scope) && !"1".equals(user.type())) throw new AuthenticationFailure(403);
         return user;
+    }
+    public boolean sessionActive(String sid,long userId,String scope) {
+        return db.queryForObject("SELECT COUNT(*) FROM auth_login_session WHERE sid=? AND user_id=? AND scope=? AND active=1 AND expires_at>CURRENT_TIMESTAMP",Integer.class,sid,userId,scope)>0;
     }
     public void update(long id,String nickname,String avatar,String sex) {
         if (!StringUtils.hasText(nickname) || nickname.length()>64 || (avatar!=null && avatar.length()>512)

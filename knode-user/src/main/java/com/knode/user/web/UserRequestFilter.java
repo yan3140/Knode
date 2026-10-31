@@ -38,7 +38,12 @@ public class UserRequestFilter extends OncePerRequestFilter {
             }
             var values=Collections.list(req.getHeaders("token"));
             if (values.size()>1 || (values.size()==1 && values.get(0).contains(","))) throw new AuthenticationFailure(401);
-            String path=req.getRequestURI().substring(req.getContextPath().length());
+            String rawPath=req.getRequestURI().substring(req.getContextPath().length());
+            String lower=rawPath.toLowerCase(Locale.ROOT);
+            if (rawPath.indexOf(';')>=0 || rawPath.indexOf('\\')>=0 || rawPath.contains("//")
+                    || lower.contains("%3b") || lower.contains("%2f") || lower.contains("%5c") || lower.contains("%25"))
+                throw new AuthenticationFailure(401);
+            String path=req.getServletPath();
             boolean pub="POST".equals(req.getMethod()) && (path.equals("/api/blog/auth/login")
                     || path.equals("/api/admin/auth/login") || path.equals("/api/blog/user/register"));
             boolean health="GET".equals(req.getMethod()) && (path.equals("/health/live") || path.equals("/health/ready"));
@@ -49,8 +54,13 @@ public class UserRequestFilter extends OncePerRequestFilter {
                 long id;
                 try { id=Long.parseLong(principal.userId()); }
                 catch (NumberFormatException e) { throw new AuthenticationFailure(401); }
-                if (revocations.pending(principal.sid())) throw new AuthenticationFailure(401);
-                accounts.active(id,principal.scope());
+                boolean pending=revocations.pending(principal.sid());
+                boolean logout="POST".equals(req.getMethod()) && (path.equals("/api/blog/auth/logout") || path.equals("/api/admin/auth/logout"));
+                if (pending && !logout) throw new AuthenticationFailure(503);
+                if (!pending) {
+                    accounts.active(id,principal.scope());
+                    if (!accounts.sessionActive(principal.sid(),id,principal.scope())) throw new AuthenticationFailure(401);
+                }
                 if (!scope.equals(principal.scope())) throw new AuthenticationFailure(403);
                 req.setAttribute(PRINCIPAL,principal);
             }

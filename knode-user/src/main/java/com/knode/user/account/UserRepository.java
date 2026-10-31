@@ -27,6 +27,9 @@ public class UserRepository {
     public Optional<Account> byUsername(String name) {
         return jdbc.query("SELECT * FROM sys_user WHERE user_name=?",this::account,name).stream().findFirst();
     }
+    public Optional<Account> byUsernameForUpdate(String name) {
+        return jdbc.query("SELECT * FROM sys_user WHERE user_name=? FOR UPDATE",this::account,name).stream().findFirst();
+    }
     public Optional<Account> byId(long id) {
         return jdbc.query("SELECT * FROM sys_user WHERE id=?",this::account,id).stream().findFirst();
     }

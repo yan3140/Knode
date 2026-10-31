@@ -23,6 +23,7 @@ public final class UserTokens {
     private final SessionStore.Writer writer;
     private final UserTokenVerifier verifier;
     public record Principal(String userId, String sid, String scope) {}
+    public record Issued(String token,Principal principal,long expiresAt) {}
     public UserTokens(RSAPrivateKey privateKey, String signingKid, Map<String, RSAPublicKey> keys,
                       Clock clock, SessionStore.Reader reader, SessionStore.Writer writer) {
         this.privateKey = privateKey; this.signingKid = signingKid;
@@ -34,6 +35,9 @@ public final class UserTokens {
             throw new IllegalArgumentException("Signing key and session writer required");
     }
     public String issue(String authenticatedUserId, String scope) {
+        return issueDetailed(authenticatedUserId,scope).token();
+    }
+    public Issued issueDetailed(String authenticatedUserId, String scope) {
         if (privateKey == null || writer == null) throw new IllegalStateException("Signing not configured");
         if (!UserTokenVerifier.validUserId(authenticatedUserId) || !UserTokenVerifier.validScope(scope))
             throw new IllegalArgumentException("Invalid principal");
@@ -46,7 +50,7 @@ public final class UserTokens {
                 .expiration(Date.from(Instant.ofEpochSecond(now + TTL))).signWith(privateKey, Jwts.SIG.RS256).compact();
         try { writer.create(new SessionStore.Session(1,sid,authenticatedUserId,scope,"ACTIVE",now+TTL)); }
         catch (SessionStore.Unavailable e) { throw new AuthenticationFailure(503); }
-        return token;
+        return new Issued(token,new Principal(authenticatedUserId,sid,scope),now+TTL);
     }
     public Principal authenticate(String token, String requiredScope) {
         if (!UserTokenVerifier.validScope(requiredScope)) throw new IllegalArgumentException("scope");

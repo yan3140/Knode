@@ -45,4 +45,15 @@ public final class RedisSessionWriter implements SessionStore.Writer {
         } catch (SessionStore.Unavailable e) { throw e; }
         catch (RuntimeException e) { throw new SessionStore.Unavailable("Authentication revoke unavailable",e); }
     }
+
+    /** Temporary key under the auth prefix exercises the configured write ACL; it always has a TTL. */
+    @Override public void probe() {
+        String key=prefix+"probe-"+java.util.UUID.randomUUID();
+        try {
+            if (!Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key,"probe",Duration.ofSeconds(10))))
+                throw new SessionStore.Unavailable("Write probe not confirmed");
+            if (!Boolean.TRUE.equals(redis.delete(key))) throw new SessionStore.Unavailable("Write probe cleanup not confirmed");
+        } catch (SessionStore.Unavailable e) { throw e; }
+        catch (RuntimeException e) { throw new SessionStore.Unavailable("Write probe unavailable",e); }
+    }
 }

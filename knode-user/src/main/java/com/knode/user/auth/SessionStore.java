@@ -13,6 +13,7 @@ public final class SessionStore {
     public interface Writer {
         void create(Session session) throws Unavailable;
         void revoke(String sid) throws Unavailable;
+        default void probe() throws Unavailable { throw new Unavailable("Write probe unavailable"); }
     }
     public static class Unavailable extends RuntimeException {
         public Unavailable(String message) { super(message); }
