@@ -1,0 +1,10 @@
+Official Sentinel Dashboard 1.8.9
+Source commit d75a6687b82711f8611ef91f6a56e993d24f57c5
+Source archive https://codeload.github.com/alibaba/Sentinel/zip/d75a6687b82711f8611ef91f6a56e993d24f57c5
+SHA-256 6380e273d4e3c9f72a77f91c8aae7ffc5466a1a462a5ebdf9740fb577f50ca6f
+Source remains in target and is not committed. The build applies tracked overlays.
+
+Build: mvn -f deploy/microservices/sentinel-dashboard/pom.xml package
+Set DASHBOARD_NACOS_ENABLED=true with an explicit isolated server address and namespace; see dashboard.env.example. Supply nonempty AUTH_USERNAME and AUTH_PASSWORD using a secret store.
+Initialize each required <app>.flow.json, <app>.degrade.json, <app>.gw-flow.json, and <app>.gw-api-group.json with a valid JSON array in the configured namespace/group. Missing or invalid data is not implicitly cleared.
+Dashboard pages remain machine-oriented but rules are stored by application. Flow V2 is disabled. Successful publishing confirms Nacos acceptance only; client loading is unverified.

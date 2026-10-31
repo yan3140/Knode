@@ -37,6 +37,8 @@ knode:
   governance:
     nacos:
       enabled: ${KNODE_GOV_NACOS_ENABLED:false}
+      retry-min-ms: ${KNODE_GOV_NACOS_RETRY_MIN_MS:1000}
+      retry-max-ms: ${KNODE_GOV_NACOS_RETRY_MAX_MS:30000}
       server-addr: ${KNODE_GOV_NACOS_SERVER_ADDR:}
       namespace: ${KNODE_GOV_NACOS_NAMESPACE:}
       group: ${KNODE_GOV_NACOS_GROUP:KNODE_SENTINEL}

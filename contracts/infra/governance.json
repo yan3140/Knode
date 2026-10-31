@@ -1,5 +1,5 @@
 {
-  "version": "0.1-draft",
+  "version": "0.2-draft",
   "status": "unfrozen",
   "namespace": "explicit isolated namespace required",
   "group": "KNODE_SENTINEL",
@@ -34,9 +34,13 @@
     "missingOrInvalid": "retain last valid rules and mark unavailable",
     "clientDisconnected": "readiness unavailable",
     "initialFailure": "readiness unavailable",
-    "publisher": "dashboard publishing not implemented",
-    "listenerRegistrationException": "unready; recovery may require restart if listener was not registered",
-    "unchangedRule": "accepted; Sentinel may report no change"
+    "publisher": "official Sentinel Dashboard 1.8.9 native pages publish through Nacos CAS; successful persistence does not confirm client loading",
+    "listenerRegistrationException": "unready; background retry with bounded exponential delay; latest valid rules retained",
+    "unchangedRule": "accepted; Sentinel may report no change",
+    "apiPredicateSemantics": "official matchStrategy 1 accepts non-wildcard expressions; actual matcher behavior follows Sentinel",
+    "version": "raw UTF-8 Nacos content MD5; stale or rejected compare-and-set does not report success",
+    "missingData": "publisher refuses missing or invalid data; initialize each Data ID with an explicit array",
+    "dashboardClientState": "unverified until independently observed at each client"
   },
   "blockHttpStatus": 429,
   "apiPredicateSemantics": "matchStrategy 0 exact, 1 Ant path pattern (use /** for descendants), 2 regex"

@@ -52,6 +52,46 @@ class NacosGatewayRulesTest {
         assertThat(rules.health().getStatus()).isEqualTo(Status.OUT_OF_SERVICE);
     }
 
+    @Test void retriesListenerWithoutLosingRulesAndReloadsOnRestart() throws Exception {
+        ConfigService service = mock(ConfigService.class);
+        when(service.getServerStatus()).thenReturn("UP");
+        java.util.concurrent.atomic.AtomicInteger flowAttempts = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.CountDownLatch failed = new java.util.concurrent.CountDownLatch(1);
+        String flow = "[{\"resource\":\"profile-content\",\"count\":2}]";
+        when(service.getConfigAndSignListener(anyString(), anyString(), anyLong(), any(Listener.class)))
+                .thenAnswer(call -> {
+                    if (call.getArgument(0).equals("knode-gateway.gw-flow.json") && flowAttempts.getAndIncrement() == 0) {
+                        failed.countDown();
+                        throw new IllegalStateException("temporary failure");
+                    }
+                    return call.getArgument(0).equals("knode-gateway.gw-flow.json") ? flow : "[]";
+                });
+        NacosGatewayRules recovering = new NacosGatewayRules(service, new ObjectMapper(), "KNODE_SENTINEL", 300, 300);
+        recovering.apply("knode-gateway.gw-flow.json", flow);
+        recovering.run(null);
+        assertThat(failed.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        assertThat(GatewayRuleManager.getRulesForResource("profile-content")).hasSize(1);
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(3)).untilAsserted(
+                () -> assertThat(recovering.health().getStatus()).isEqualTo(Status.UP));
+        assertThat(flowAttempts.get()).isGreaterThanOrEqualTo(2);
+        recovering.close();
+
+        GatewayRuleManager.loadRules(java.util.Set.of());
+        NacosGatewayRules restarted = new NacosGatewayRules(service, new ObjectMapper(), "KNODE_SENTINEL", 20, 100);
+        restarted.run(null);
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(3)).untilAsserted(() -> {
+            assertThat(restarted.health().getStatus()).isEqualTo(Status.UP);
+            assertThat(GatewayRuleManager.getRulesForResource("profile-content")).hasSize(1);
+        });
+        restarted.close();
+    }
+
+    @Test void officialAntStrategyWithoutWildcardIsAccepted() {
+        rules.apply("knode-gateway.gw-api-group.json",
+                "[{\"apiName\":\"plain-ant\",\"predicateItems\":[{\"pattern\":\"/api/blog/plain\",\"matchStrategy\":1}]}]");
+        assertThat(GatewayApiDefinitionManager.getApiDefinition("plain-ant")).isNotNull();
+    }
+
     @Test void missingIsolatedNamespaceFailsBeforeClientCreation() {
         org.assertj.core.api.Assertions.assertThatThrownBy(
                 () -> new NacosRuleConfiguration().governanceConfigService("127.0.0.1:8848", "", "", ""))
@@ -65,9 +105,10 @@ class NacosGatewayRulesTest {
         rules.run(null);
         assertThat(rules.health().getStatus()).isEqualTo(Status.OUT_OF_SERVICE);
         ArgumentCaptor<Listener> listener = ArgumentCaptor.forClass(Listener.class);
-        verify(config).getConfigAndSignListener(eq("knode-gateway.gw-flow.json"), eq("KNODE_SENTINEL"), eq(3000L), listener.capture());
+        verify(config, timeout(2000)).getConfigAndSignListener(eq("knode-gateway.gw-flow.json"), eq("KNODE_SENTINEL"), eq(3000L), listener.capture());
         listener.getValue().receiveConfigInfo("[]");
-        assertThat(rules.health().getStatus()).isEqualTo(Status.UP);
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(2)).untilAsserted(
+                () -> assertThat(rules.health().getStatus()).isEqualTo(Status.UP));
         rules.close();
         verify(config).shutDown();
     }

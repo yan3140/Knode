@@ -12,12 +12,15 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
@@ -35,43 +38,88 @@ public class NacosGatewayRules implements ApplicationRunner, HealthIndicator {
     private final ConfigService config;
     private final ObjectMapper mapper;
     private final String group;
-    private final Map<String, Listener> listeners = new LinkedHashMap<>();
+    private final Map<String, Listener> listeners = new ConcurrentHashMap<>();
     private final Map<String, Boolean> loaded = new ConcurrentHashMap<>();
+    private final Map<String, Integer> attempts = new ConcurrentHashMap<>();
+    private final AtomicBoolean started = new AtomicBoolean();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final ScheduledThreadPoolExecutor scheduler;
+    private final long retryMinMs;
+    private final long retryMaxMs;
     private static final String FLOW = "knode-gateway.gw-flow.json";
     private static final String API = "knode-gateway.gw-api-group.json";
 
+    @Autowired
     public NacosGatewayRules(@org.springframework.beans.factory.annotation.Qualifier("governanceConfigService") ConfigService config, ObjectMapper mapper,
-            @Value("${knode.governance.nacos.group:KNODE_SENTINEL}") String group) {
+            @Value("${knode.governance.nacos.group:KNODE_SENTINEL}") String group,
+            @Value("${knode.governance.nacos.retry-min-ms:1000}") long retryMinMs,
+            @Value("${knode.governance.nacos.retry-max-ms:30000}") long retryMaxMs) {
+        if (retryMinMs < 1 || retryMaxMs < retryMinMs || retryMaxMs > 300000)
+            throw new IllegalArgumentException("Invalid governance retry bounds");
         this.config = config;
         this.mapper = mapper;
         this.group = group;
+        this.retryMinMs = retryMinMs;
+        this.retryMaxMs = retryMaxMs;
+        this.scheduler = new ScheduledThreadPoolExecutor(2, task -> {
+            Thread thread = new Thread(task, "nacos-rule-retry");
+            thread.setDaemon(true);
+            return thread;
+        });
+        this.scheduler.setRemoveOnCancelPolicy(true);
         loaded.put(FLOW, false);
         loaded.put(API, false);
     }
 
+    NacosGatewayRules(ConfigService config, ObjectMapper mapper, String group) {
+        this(config, mapper, group, 20, 100);
+    }
+
     @Override public void run(ApplicationArguments args) {
-        for (String id : loaded.keySet()) {
-            java.util.concurrent.atomic.AtomicBoolean received = new java.util.concurrent.atomic.AtomicBoolean();
-            Listener listener = new Listener() {
-                @Override public Executor getExecutor() { return null; }
-                @Override public void receiveConfigInfo(String value) {
-                    synchronized (NacosGatewayRules.this) {
-                        received.set(true);
-                        apply(id, value);
-                    }
+        if (started.compareAndSet(false, true)) {
+            for (String id : loaded.keySet()) scheduler.execute(() -> register(id, 0));
+        }
+    }
+
+    private void register(String id, int attempt) {
+        if (closed.get()) return;
+        AtomicBoolean received = new AtomicBoolean();
+        Listener listener = new Listener() {
+            @Override public Executor getExecutor() { return null; }
+            @Override public void receiveConfigInfo(String value) {
+                synchronized (NacosGatewayRules.this) {
+                    if (closed.get() || listeners.get(id) != this) return;
+                    received.set(true);
+                    apply(id, value);
                 }
-            };
-            try {
-                listeners.put(id, listener);
-                String value = config.getConfigAndSignListener(id, group, 3000, listener);
-                synchronized (this) {
-                    if (!received.get()) apply(id, value);
+            }
+        };
+        listeners.put(id, listener);
+        try {
+            String value = config.getConfigAndSignListener(id, group, 3000, listener);
+            synchronized (this) {
+                if (closed.get()) {
+                    config.removeListener(id, group, listener);
+                    return;
                 }
-            } catch (Exception failure) {
-                synchronized (this) {
-                    if (!received.get()) loaded.put(id, false);
+                if (!received.get()) apply(id, value);
+                attempts.put(id, 0);
+            }
+        } catch (Exception failure) {
+            synchronized (this) {
+                loaded.put(id, false);
+                listeners.remove(id, listener);
+            }
+            try { config.removeListener(id, group, listener); } catch (RuntimeException ignored) { }
+            int next = Math.min(attempt + 1, 30);
+            attempts.put(id, next);
+            long delay = Math.min(retryMaxMs, retryMinMs * (1L << Math.min(attempt, 16)));
+            LOG.warn("Governance listener registration failed for {}; retry in {} ms (attempt {})", id, delay, next);
+            if (!closed.get()) {
+                try { scheduler.schedule(() -> register(id, next), delay, TimeUnit.MILLISECONDS); }
+                catch (java.util.concurrent.RejectedExecutionException shutdownRace) {
+                    if (!closed.get()) throw shutdownRace;
                 }
-                LOG.warn("Governance rule loading failed for {}", id);
             }
         }
     }
@@ -100,8 +148,6 @@ public class NacosGatewayRules implements ApplicationRunner, HealthIndicator {
                         int strategy = item.path("matchStrategy").asInt(0);
                         if (pattern.isBlank() || strategy < 0 || strategy > 2) throw new IllegalArgumentException("invalid predicate");
                         if (strategy == 2) java.util.regex.Pattern.compile(pattern);
-                        if (strategy == 1 && !new org.springframework.util.AntPathMatcher().isPattern(pattern))
-                            throw new IllegalArgumentException("Ant path pattern must contain a wildcard");
                         predicates.add(new ApiPathPredicateItem().setPattern(pattern).setMatchStrategy(strategy));
                     }
                     ApiDefinition definition = new ApiDefinition(name).setPredicateItems(predicates);
@@ -120,10 +166,13 @@ public class NacosGatewayRules implements ApplicationRunner, HealthIndicator {
     @Override public Health health() {
         if (loaded.values().stream().allMatch(Boolean::booleanValue) && "UP".equals(config.getServerStatus()))
             return Health.up().build();
-        return Health.outOfService().withDetail("reason", "Nacos rule state unavailable").build();
+        return Health.outOfService().withDetail("reason", "Nacos rule state unavailable")
+                .withDetail("retryAttempts", Map.copyOf(attempts)).build();
     }
 
     @PreDestroy public void close() {
+        if (!closed.compareAndSet(false, true)) return;
+        scheduler.shutdownNow();
         listeners.forEach((id, listener) -> config.removeListener(id, group, listener));
         try { config.shutDown(); } catch (Exception failure) { LOG.warn("Nacos rule client shutdown failed"); }
     }
