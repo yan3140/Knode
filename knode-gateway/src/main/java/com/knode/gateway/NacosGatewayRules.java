@@ -9,8 +9,11 @@ import com.alibaba.csp.sentinel.adapter.gateway.common.rule.GatewayRuleManager;
 import com.alibaba.nacos.api.config.ConfigService;
 import com.alibaba.nacos.api.config.listener.Listener;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import jakarta.annotation.PreDestroy;
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -37,6 +40,7 @@ public class NacosGatewayRules implements ApplicationRunner, HealthIndicator {
     private static final Logger LOG = LoggerFactory.getLogger(NacosGatewayRules.class);
     private final ConfigService config;
     private final ObjectMapper mapper;
+    private final ObjectReader strictJson;
     private final String group;
     private final Map<String, Listener> listeners = new ConcurrentHashMap<>();
     private final Map<String, Boolean> loaded = new ConcurrentHashMap<>();
@@ -58,6 +62,8 @@ public class NacosGatewayRules implements ApplicationRunner, HealthIndicator {
             throw new IllegalArgumentException("Invalid governance retry bounds");
         this.config = config;
         this.mapper = mapper;
+        this.strictJson = mapper.reader().with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.group = group;
         this.retryMinMs = retryMinMs;
         this.retryMaxMs = retryMaxMs;
@@ -127,7 +133,7 @@ public class NacosGatewayRules implements ApplicationRunner, HealthIndicator {
     synchronized void apply(String id, String raw) {
         try {
             if (raw == null || raw.isBlank()) throw new IllegalArgumentException("missing rule data");
-            JsonNode root = mapper.readTree(raw);
+            JsonNode root = strictJson.readTree(raw);
             if (!root.isArray()) throw new IllegalArgumentException("rule data must be an array");
             if (FLOW.equals(id)) {
                 Set<GatewayFlowRule> rules = mapper.readValue(raw, new TypeReference<Set<GatewayFlowRule>>() {});

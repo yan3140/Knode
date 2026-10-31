@@ -40,7 +40,8 @@
     "apiPredicateSemantics": "official matchStrategy 1 accepts non-wildcard expressions; actual matcher behavior follows Sentinel",
     "version": "raw UTF-8 Nacos content MD5; stale or rejected compare-and-set does not report success",
     "missingData": "publisher refuses missing or invalid data; initialize each Data ID with an explicit array",
-    "dashboardClientState": "unverified until independently observed at each client"
+    "dashboardClientState": "unverified until independently observed at each client",
+    "jsonSyntax": "One complete JSON value only; duplicate object fields, additional root values, and trailing non-whitespace are rejected by the Dashboard and clients."
   },
   "blockHttpStatus": 429,
   "apiPredicateSemantics": "matchStrategy 0 exact, 1 Ant path pattern (use /** for descendants), 2 regex",

@@ -201,6 +201,47 @@ class NacosRuleBridgeTest {
         assertNotEquals(0, content(perform(get("/gateway/api/list.json").param("app","demo"))).path("code").asInt());
     }
 
+
+    @Test void rejectsAmbiguousPersistedAndRequestJsonWithoutPublishing() throws Exception {
+        String flow = "[{\"resource\":\"r\",\"grade\":1,\"count\":2}]";
+        for (String raw : new String[] {flow + " []", flow + " garbage",
+                "[{\"resource\":\"r\",\"grade\":1,\"count\":2,\"count\":9}]"}) {
+            store.put("demo.flow.json", raw);
+            assertNotEquals(0, content(perform(get("/v1/flow/rules").param("app","demo"))).path("code").asInt(), raw);
+            assertEquals(raw, store.get("demo.flow.json"));
+        }
+        store.put("demo.flow.json", flow + " \n");
+        assertEquals(0, content(perform(get("/v1/flow/rules").param("app","demo"))).path("code").asInt());
+        String[][] otherKinds = {
+            {"degrade", "/degrade/rules.json", "[{\"resource\":\"r\",\"grade\":2,\"count\":1,\"timeWindow\":1}]", "[{\"resource\":\"r\",\"grade\":2,\"count\":1,\"count\":9,\"timeWindow\":1}]"},
+            {"gw-flow", "/gateway/flow/list.json", "[{\"resource\":\"r\",\"count\":2}]", "[{\"resource\":\"r\",\"count\":2,\"count\":9}]"},
+            {"gw-api-group", "/gateway/api/list.json", "[{\"apiName\":\"a\",\"predicateItems\":[{\"pattern\":\"/a\"}]}]", "[{\"apiName\":\"a\",\"predicateItems\":[{\"pattern\":\"/a\",\"pattern\":\"/b\"}]}]"}
+        };
+        for (String[] item : otherKinds) {
+            for (String raw : new String[] {item[2] + " {}", item[2] + " garbage", item[3]}) {
+                store.put("demo." + item[0] + ".json", raw);
+                assertNotEquals(0, content(perform(get(item[1]).param("app","demo"))).path("code").asInt(), raw);
+                assertEquals(raw, store.get("demo." + item[0] + ".json"));
+            }
+            store.put("demo." + item[0] + ".json", item[2] + " \n");
+            assertEquals(0, content(perform(get(item[1]).param("app","demo"))).path("code").asInt());
+        }
+        assertFalse(json.isEnabled(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION));
+        assertFalse(json.isEnabled(DeserializationFeature.FAIL_ON_TRAILING_TOKENS));
+        store.put("demo.flow.json", "[]");
+        String body = "{\"app\":\"demo\",\"resource\":\"r\",\"grade\":1,\"count\":2}";
+        for (String raw : new String[] {body + " {}", body + " garbage",
+                "{\"app\":\"demo\",\"resource\":\"r\",\"grade\":1,\"count\":2,\"count\":9}"}) {
+            assertEquals(400, content(perform(post("/v1/flow/rule").param("app","demo")
+                    .header("X-Nacos-Version",md5("[]")).contentType(MediaType.APPLICATION_JSON)
+                    .content(raw))).path("code").asInt(), raw);
+            assertEquals("[]", store.get("demo.flow.json"));
+        }
+        assertEquals(0, content(perform(post("/v1/flow/rule").param("app","demo")
+                .header("X-Nacos-Version",md5("[]")).contentType(MediaType.APPLICATION_JSON)
+                .content(body + " \n"))).path("code").asInt());
+    }
+
     private MvcResult perform(MockHttpServletRequestBuilder request) throws Exception { return mvc.perform(request).andReturn(); }
     private JsonNode content(MvcResult result) throws Exception { return json.readTree(result.getResponse().getContentAsString()); }
     private static String md5(String value) throws Exception {

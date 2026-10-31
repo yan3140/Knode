@@ -7,8 +7,11 @@ import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleManager;
 import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleUtil;
 import com.alibaba.nacos.api.config.ConfigService;
 import com.alibaba.nacos.api.config.listener.Listener;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import jakarta.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,6 +37,7 @@ public class GovernanceRules implements ApplicationRunner, HealthIndicator {
     private static final int MAX_QUEUE_MS = 1000;
     private final ConfigService config;
     private final ObjectMapper mapper;
+    private final ObjectReader strictJson;
     private final String group;
     private final String flowId;
     private final String degradeId;
@@ -50,6 +54,8 @@ public class GovernanceRules implements ApplicationRunner, HealthIndicator {
         if (app == null || !app.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,127}") || group == null || group.isBlank()
                 || min < 1 || max < min || max > 300000) throw new IllegalArgumentException("Invalid governance configuration");
         this.config = config; this.mapper = mapper; this.group = group; this.retryMin = min; this.retryMax = max;
+        this.strictJson = mapper.reader().with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.flowId = app + ".flow.json"; this.degradeId = app + ".degrade.json";
         loaded.put(flowId, false); loaded.put(degradeId, false);
         scheduler = new ScheduledThreadPoolExecutor(2, job -> {
@@ -98,7 +104,7 @@ public class GovernanceRules implements ApplicationRunner, HealthIndicator {
         try {
             if (raw == null || raw.isBlank() || raw.length() > MAX_CONTENT)
                 throw new IllegalArgumentException("Missing or oversized rules");
-            JsonNode array = mapper.readTree(raw);
+            JsonNode array = strictJson.readTree(raw);
             if (!array.isArray() || array.size() > MAX_RULES) throw new IllegalArgumentException("Invalid rule array");
             if (flowId.equals(id)) {
                 List<FlowRule> rules = new ArrayList<>();

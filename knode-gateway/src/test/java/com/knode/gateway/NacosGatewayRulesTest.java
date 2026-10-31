@@ -15,7 +15,8 @@ import static org.mockito.Mockito.*;
 
 class NacosGatewayRulesTest {
     private final ConfigService config = mock(ConfigService.class);
-    private final NacosGatewayRules rules = new NacosGatewayRules(config, new ObjectMapper(), "KNODE_SENTINEL");
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final NacosGatewayRules rules = new NacosGatewayRules(config, mapper, "KNODE_SENTINEL");
 
     @AfterEach void cleanup() {
         GatewayRuleManager.loadRules(java.util.Set.of());
@@ -69,6 +70,34 @@ class NacosGatewayRulesTest {
         rules.apply("knode-gateway.gw-api-group.json",
                 "[{\"apiName\":\"a\",\"predicateItems\":[{\"pattern\":\"/x\",\"matchStrategy\":\"bad\"}]}]");
         assertThat(rules.health().getStatus()).isEqualTo(Status.OUT_OF_SERVICE);
+    }
+
+
+    @Test void rejectsAmbiguousJsonForBothRuleKindsWithoutLosingLastGood() {
+        assertThat(mapper.isEnabled(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)).isFalse();
+        assertThat(mapper.isEnabled(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)).isFalse();
+        when(config.getServerStatus()).thenReturn("UP");
+        String flow = "[{\"resource\":\"r\",\"count\":2}]";
+        String api = "[{\"apiName\":\"api\",\"predicateItems\":[{\"pattern\":\"/a\"}]}]";
+        rules.apply("knode-gateway.gw-flow.json", flow);
+        rules.apply("knode-gateway.gw-api-group.json", api);
+        assertThat(rules.health().getStatus()).isEqualTo(Status.UP);
+        for (String bad : java.util.List.of(flow + " []", flow + " garbage",
+                "[{\"resource\":\"r\",\"count\":2,\"count\":9}]")) {
+            rules.apply("knode-gateway.gw-flow.json", bad);
+            assertThat(rules.health().getStatus()).as(bad).isEqualTo(Status.OUT_OF_SERVICE);
+            assertThat(GatewayRuleManager.getRulesForResource("r").iterator().next().getCount()).isEqualTo(2);
+        }
+        rules.apply("knode-gateway.gw-flow.json", flow + " \n");
+        assertThat(rules.health().getStatus()).isEqualTo(Status.UP);
+        for (String bad : java.util.List.of(api + " {}", api + " garbage",
+                "[{\"apiName\":\"api\",\"predicateItems\":[{\"pattern\":\"/a\",\"pattern\":\"/b\"}]}]")) {
+            rules.apply("knode-gateway.gw-api-group.json", bad);
+            assertThat(rules.health().getStatus()).as(bad).isEqualTo(Status.OUT_OF_SERVICE);
+            assertThat(GatewayApiDefinitionManager.getApiDefinition("api")).isNotNull();
+        }
+        rules.apply("knode-gateway.gw-api-group.json", api + " \n");
+        assertThat(rules.health().getStatus()).isEqualTo(Status.UP);
     }
 
     @Test void retriesListenerWithoutLosingRulesAndReloadsOnRestart() throws Exception {

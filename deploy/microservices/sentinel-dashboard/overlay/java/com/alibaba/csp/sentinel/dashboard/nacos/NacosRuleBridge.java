@@ -14,8 +14,11 @@ import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRuleManager;
 import com.alibaba.csp.sentinel.slots.block.flow.FlowRule;
 import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleUtil;
 import com.alibaba.nacos.api.config.ConfigService;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.ByteArrayOutputStream;
@@ -42,11 +45,14 @@ import org.springframework.web.util.UrlPathHelper;
 public class NacosRuleBridge implements HandlerInterceptor {
     private final ObjectProvider<ConfigService> configs;
     private final ObjectMapper mapper;
+    private final ObjectReader strictJson;
     private final String group;
 
     public NacosRuleBridge(@Qualifier("dashboardNacosConfig") ObjectProvider<ConfigService> configs,
             ObjectMapper mapper, @Value("${dashboard.nacos.group:KNODE_SENTINEL}") String group) {
         this.configs = configs; this.mapper = mapper; this.group = group;
+        this.strictJson = mapper.reader().with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     }
 
     @Override public boolean preHandle(HttpServletRequest req, HttpServletResponse res, Object handler) throws Exception {
@@ -67,7 +73,7 @@ public class NacosRuleBridge implements HandlerInterceptor {
             String dataId = app + "." + kind + ".json";
             String raw = config.getConfig(dataId, group, 3000);
             if (raw == null || raw.trim().isEmpty()) throw new IllegalStateException("Rule data missing; initialize explicitly");
-            JsonNode parsed = mapper.readTree(raw);
+            JsonNode parsed = strictJson.readTree(raw);
             if (!parsed.isArray()) throw new IllegalArgumentException("Nacos rule data must be an array");
             ArrayNode current = (ArrayNode) parsed;
             validateAll(kind, current);
@@ -179,7 +185,11 @@ public class NacosRuleBridge implements HandlerInterceptor {
                 out.write(bytes, 0, n);
             }
             if (out.size() > 0) {
-                JsonNode body = mapper.readTree(out.toByteArray());
+                JsonNode body;
+                try { body = strictJson.readTree(out.toByteArray()); }
+                catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+                    throw new IllegalArgumentException("Invalid JSON body", failure);
+                }
                 if (!body.isObject()) throw new IllegalArgumentException("Body must be an object");
                 input.setAll((ObjectNode) body);
             }
