@@ -15,6 +15,7 @@ import java.util.*;
 /** Test-only durable inbox. It stores digests, never the event payload. */
 final class FixtureInbox implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
     private static final Set<String> BASE=Set.of("eventId","eventType","schemaVersion","producer","aggregateType",
             "aggregateId","sourceRevision","occurredAt","visibility","payload");
@@ -96,7 +97,9 @@ final class FixtureInbox implements AutoCloseable {
             String time=text(root,"occurredAt");if(!time.endsWith("Z"))throw new IllegalArgumentException();Instant.parse(time);
             JsonNode p=root.path("payload"); if(!p.isObject())throw new IllegalArgumentException();
             Set<String> pk=new HashSet<>();p.fieldNames().forEachRemaining(pk::add);if(!pk.equals(PAYLOAD))throw new IllegalArgumentException();
-            if(!aggregate.equals(text(p,"sid")) || !text(p,"userId").matches("[1-9][0-9]{0,18}"))throw new IllegalArgumentException();
+            String userId=text(p,"userId");
+            if(!aggregate.equals(text(p,"sid")) || !userId.matches("[1-9][0-9]{0,18}"))throw new IllegalArgumentException();
+            Long.parseLong(userId); // Reject positive decimal values beyond the signed int64 range.
             if(!Set.of("blog","admin").contains(text(p,"scope")) ||
                     !Set.of("LOGOUT","ACCOUNT_SECURITY_CHANGED","UNSPECIFIED").contains(text(p,"reason"))) throw new IllegalArgumentException();
             require(p,"executionScope","SID_CURRENT_EXECUTIONS");

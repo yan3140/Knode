@@ -83,4 +83,61 @@ class FixtureInboxTest {
             assertThatThrownBy(()->StreamFixture.Config.from(bad)).isInstanceOf(IllegalArgumentException.class);
         }
     }
+    @Test void rejectsSecondJsonRootWithoutEffectOrAck() throws Exception {
+        assertUnsupportedAcrossRestart(event(1,"LOGOUT",null)+" {}");
+    }
+    @Test void rejectsTrailingGarbageWithoutEffectOrAck() throws Exception {
+        assertUnsupportedAcrossRestart(event(1,"LOGOUT",null)+" garbage");
+    }
+    @Test void rejectsDuplicateFieldWithoutEffectOrAck() throws Exception {
+        assertUnsupportedAcrossRestart(event(1,"LOGOUT",null).replace(
+                "\"eventType\":\"SessionRevoked\"",
+                "\"eventType\":\"SessionRevoked\",\"eventType\":\"SessionRevoked\""));
+    }
+    @Test void rejectsUserIdJustAboveInt64Maximum() throws Exception {
+        assertUnsupportedAcrossRestart(event(1,"LOGOUT",null).replace(
+                "\"userId\":\"42\"","\"userId\":\"9223372036854775808\""));
+    }
+    @Test void rejectsNineteenDigitUserIdAboveInt64Maximum() throws Exception {
+        assertUnsupportedAcrossRestart(event(1,"LOGOUT",null).replace(
+                "\"userId\":\"42\"","\"userId\":\"9999999999999999999\""));
+    }
+    @Test void acceptsInt64MaximumAndTrailingWhitespace() throws Exception {
+        String jdbc="jdbc:h2:file:"+temp.resolve("maximum").toString().replace('\\','/');
+        String valid=event(1,"LOGOUT",null).replace("\"userId\":\"42\"",
+                "\"userId\":\"9223372036854775807\"")+" \n\t\r";
+        try(FixtureInbox inbox=new FixtureInbox(jdbc,OpenTelemetrySdk.builder().build())) {
+            var result=inbox.process("1-0",Map.of("event",valid));
+            assertThat(result.status()).isEqualTo("APPLIED");
+            assertThat(result.acknowledge()).isTrue();
+            assertThat(inbox.count("inbox")).isEqualTo(1);
+        }
+    }
+    private void assertUnsupportedAcrossRestart(String value) throws Exception {
+        String jdbc="jdbc:h2:file:"+temp.resolve("invalid").toString().replace('\\','/');
+        try(FixtureInbox inbox=new FixtureInbox(jdbc,OpenTelemetrySdk.builder().build())) {
+            var result=inbox.process("1-0",Map.of("event",value));
+            assertThat(result.status()).isEqualTo("UNSUPPORTED");
+            assertThat(result.acknowledge()).isFalse();
+            assertThat(inbox.count("inbox")).isZero();
+            assertThat(inbox.count("delivery")).isEqualTo(1);
+        }
+        try(FixtureInbox restarted=new FixtureInbox(jdbc,OpenTelemetrySdk.builder().build())) {
+            try(var connection=java.sql.DriverManager.getConnection(jdbc);
+                var statement=connection.createStatement();
+                var rows=statement.executeQuery("SELECT status,attempts FROM delivery")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString("status")).isEqualTo("UNSUPPORTED");
+                assertThat(rows.getInt("attempts")).isEqualTo(1);
+                assertThat(rows.next()).isFalse();
+            }
+            var retry=restarted.process("1-0",Map.of("event",value));
+            assertThat(retry.status()).isEqualTo("UNSUPPORTED");
+            assertThat(retry.acknowledge()).isFalse();
+            assertThat(retry.attempt()).isEqualTo(2);
+            assertThat(restarted.count("inbox")).isZero();
+            assertThat(restarted.count("delivery")).isEqualTo(1);
+        }
+    }
+
 }
