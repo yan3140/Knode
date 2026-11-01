@@ -10,7 +10,8 @@
     "maxJwtBytes": 8192,
     "normalMaximumSeconds": 60,
     "safeCheckpointMaximumSeconds": 300,
-    "liveAuthorizationRequired": true
+    "liveAuthorizationRequired": true,
+    "checkpointExpiry": "After verification of a still-live normal parent and active subject at issuance, a checkpoint expires no later than 300 seconds and the original authorization, original session, authenticated issuing machine, knowledge proof, and Agent step/lease proof deadlines. It may outlive its normal parent transport token; expired parents and grantId-only issuance are rejected."
   },
   "issue": {
     "method": "POST",
@@ -120,7 +121,9 @@
       "delegationToken",
       "resource"
     ],
-    "behavior": "Distinct checkpoint token and permission; current independent domain proof and persisted lineage remain mandatory after logout. Receiver must atomically check current run/epoch/worker and deduplicate jti plus checkpointOperationId and result digest in the same transaction as the checkpoint effect."
+    "behavior": "Distinct checkpoint token and permission; current independent domain proof and persisted lineage remain mandatory after logout. Receiver must atomically check current run/epoch/worker and deduplicate jti plus checkpointOperationId and result digest in the same transaction as the checkpoint effect.",
+    "authorityObligation": "Agent must establish from durable independent state that the specified step has actually started, remains eligible for safe saving and matches the current run, epoch, worker, step and operation. An active current lease is required; validUntil must be at or before both the step save-window deadline and lease deadline. Missing, future, expired, revoked or mismatched facts must not be approved.",
+    "issuanceRetry": "One checkpoint grant is issued per checkpointOperationId. If the issuance response is lost, repeating issuance is denied and does not mint a new grant or jti or extend its deadline. An already-held capability can be retried only under the receiver atomic idempotency and digest rules."
   },
   "paths": [
     {
@@ -202,7 +205,8 @@
       "expectedResource"
     ],
     "responseSchema": "delegation-proof-v1.schema.json",
-    "forbidden": "Never treat caller-supplied resource or proof reference as authority; resolve durable independent facts and current epoch/lease/started step."
+    "forbidden": "Never treat caller-supplied resource or proof reference as authority; resolve durable independent facts and current epoch/lease/started step.",
+    "checkpoint": "AGENT_SAFE_CHECKPOINT must be resolved from current durable step-start and lease facts, not from caller-supplied IDs or a self-asserted future validUntil. Return validUntil bounded by both actual safety windows and deny stale or revoked state."
   },
   "errors": {
     "400": "Malformed, unknown or oversized request; or token budget exceeded.",

@@ -90,13 +90,18 @@ public final class DelegationService {
         long authorizedUntil=Math.min(parent==null?parentTokenUntil:parent.authorizedUntil(),knowledge.authorizationExpiresAt());
         if (agent!=null) authorizedUntil=Math.min(authorizedUntil,agent.authorizationExpiresAt());
         long now=clock.instant().getEpochSecond();
-        long expiry=Math.min(now+("SAFE_CHECKPOINT".equals(purpose)?300:60),Math.min(caller.expiresAt(),Math.min(parentTokenUntil,Math.min(authorizedUntil,Math.min(identity.sessionExpiry(),knowledge.validUntil())))));
+        boolean checkpoint="SAFE_CHECKPOINT".equals(purpose);
+        // The parent transport token must be live at issuance, but an already-issued
+        // checkpoint may outlive it within the independently proven safety window.
+        long expiry=Math.min(now+(checkpoint?300:60),Math.min(caller.expiresAt(),Math.min(authorizedUntil,Math.min(identity.sessionExpiry(),knowledge.validUntil()))));
+        if (!checkpoint) expiry=Math.min(expiry,parentTokenUntil);
         if (agent!=null) expiry=Math.min(expiry,agent.validUntil());
         if (expiry<=now) throw invalid();
         // Re-read current authority after remote calls; no cached positive session state.
         var latest=live(identity.userId(),identity.sid(),identity.scope());
         expiry=Math.min(expiry,latest.sessionExpiry());
-        if (expiry<=clock.instant().getEpochSecond()) throw invalid();
+        long signingTime=clock.instant().getEpochSecond();
+        if (expiry<=signingTime || parentTokenUntil<=signingTime || caller.expiresAt()<=signingTime) throw invalid();
         String id=UUID.randomUUID().toString(),root=parent==null?id:parent.rootId(),jti=UUID.randomUUID().toString();
         String use="SAFE_CHECKPOINT".equals(purpose)?"SAFE_CHECKPOINT":"NORMAL";
         String jwt=Jwts.builder().header().keyId(keys.activeKid()).and().issuer("knode-user").subject(identity.userId())
@@ -105,7 +110,8 @@ public final class DelegationService {
                 .claim("permissions",List.copyOf(requested)).claim("resource",knowledge.resource()).id(jti)
                 .issuedAt(Date.from(Instant.ofEpochSecond(now))).expiration(Date.from(Instant.ofEpochSecond(expiry))).signWith(keys.privateKey(),Jwts.SIG.RS256).compact();
         if (jwt.length()>DelegationTokenVerifier.MAX_TOKEN_LENGTH) throw new InternalFailure(400,"TOKEN_BUDGET_EXCEEDED");
-        if ("SAFE_CHECKPOINT".equals(purpose)) verifier.verifyCheckpoint(jwt,audience); else verifier.verifyNormal(jwt,audience);
+        if (parentTokenUntil<=clock.instant().getEpochSecond() || caller.expiresAt()<=clock.instant().getEpochSecond()) throw invalid();
+        if (checkpoint) verifier.verifyCheckpoint(jwt,audience); else verifier.verifyNormal(jwt,audience);
         var versions=new LinkedHashMap<String,String>();versions.put("knowledge",knowledge.sourceRevision());if (agent!=null) versions.put("agent",agent.sourceRevision());
         grants.insert(new DelegationGrantStore.Grant(id,root,parentId,identity.userId(),identity.sid(),identity.scope(),caller.service(),audience,purpose,
                 requested,knowledge.resource(),envelope,refs,versions,authorizedUntil));

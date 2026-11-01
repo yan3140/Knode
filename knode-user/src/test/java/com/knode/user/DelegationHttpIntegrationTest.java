@@ -13,6 +13,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
@@ -29,9 +33,14 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
+@Import(DelegationHttpIntegrationTest.TimeConfig.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @DirtiesContext(classMode=DirtiesContext.ClassMode.AFTER_CLASS)
 class DelegationHttpIntegrationTest {
+    static final MutableTestClock TIME=new MutableTestClock();
+    @TestConfiguration static class TimeConfig {
+        @Bean @Primary Clock testClock() {return TIME;}
+    }
     static final String SECRET="synthetic-machine-secret";
     static final List<String> HEAVY=java.util.stream.IntStream.range(0,100).mapToObj(i -> String.format("p%03d",i)+"a".repeat(120)).toList();
     static KeyPair keys;static LocalDelegationAuthorityFixture fixture;
@@ -45,7 +54,7 @@ class DelegationHttpIntegrationTest {
     final Map<String,SessionStore.Session> sessions=new ConcurrentHashMap<>();
     @DynamicPropertySource static void properties(DynamicPropertyRegistry registry) throws Exception {
         var generator=KeyPairGenerator.getInstance("RSA");generator.initialize(2048);keys=generator.generateKeyPair();
-        fixture=new LocalDelegationAuthorityFixture((RSAPublicKey)keys.getPublic());
+        fixture=new LocalDelegationAuthorityFixture((RSAPublicKey)keys.getPublic(),TIME);
         Path privateFile=Files.createTempFile("g7-test-private-",".pem"),publicFile=Files.createTempFile("g7-test-public-",".pem");
         Path serviceFile=Files.createTempFile("g7-test-services-",".json"),policyFile=Files.createTempFile("g7-test-policy-",".json"),secretFile=Files.createTempFile("g7-test-secret-",".txt");
         for (Path p:List.of(privateFile,publicFile,serviceFile,policyFile,secretFile)) p.toFile().deleteOnExit();
@@ -58,7 +67,7 @@ class DelegationHttpIntegrationTest {
                 Map.of("id","knode-agent","credentialHash",hash,"audiences",Map.of("knode-user",List.of("auth:delegations:issue","auth:delegations:validate","auth:delegations:validate-checkpoint"),"knode-agent",List.of("agent:runs:execute","agent:checkpoint:write"),"knode-knowledge",List.of("knowledge:rag:search"))),
                 Map.of("id","knode-other","credentialHash",hash,"audiences",Map.of("knode-user",List.of("auth:delegations:issue"),"knode-agent",List.of("agent:runs:create"))),
                 Map.of("id","knode-heavy","credentialHash",hash,"audiences",Map.of("knode-agent",HEAVY)));
-        Files.writeString(serviceFile,m.writeValueAsString(Map.of("ttlSeconds",120,"services",services)));
+        Files.writeString(serviceFile,m.writeValueAsString(Map.of("ttlSeconds",300,"services",services)));
         var rules=List.of(
                 Map.of("actor","knode-knowledge","audience","knode-agent","purpose","CREATE","permissions",List.of("agent:runs:create")),
                 Map.of("actor","knode-knowledge","audience","knode-agent","purpose","CONTINUE","permissions",List.of("agent:runs:execute")),
@@ -78,6 +87,7 @@ class DelegationHttpIntegrationTest {
     @BeforeAll void schema(){new ResourceDatabasePopulator(new ClassPathResource("db/schema.sql")).execute(dataSource);}
     @AfterAll void close(){fixture.close();}
     @BeforeEach void setup() {
+        TIME.reset();
         for (String table:List.of("auth_delegation_grant_audit","auth_delegation_grant","auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_user")) db.update("DELETE FROM "+table);
         fixture.clear();sessions.clear();reset(reader,writer);
         when(reader.find(anyString())).thenAnswer(inv -> Optional.ofNullable(sessions.get(inv.getArgument(0))));
@@ -104,9 +114,9 @@ class DelegationHttpIntegrationTest {
         var response=call(HttpMethod.POST,"/internal/v1/auth/service-tokens",Map.of("audience",audience,"permissions",List.of(permissions)),basic);
         assertEquals(200,response.getStatusCode().value());return read(response).path("accessToken").asText();
     }
-    String sid(String token) {return new UserTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),Clock.systemUTC()).verifyToken(token).sid();}
+    String sid(String token) {return new UserTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),TIME).verifyToken(token).sid();}
     void proof(String ref,String authority,String purpose,String actor,String sid,Map<String,String> resource,String parent,String root,String revision) throws Exception {
-        fixture.put(ref,authority,("knode-knowledge".equals(authority)?"KNOWLEDGE_":"AGENT_")+purpose,"42",sid,"blog",actor,resource,ENVELOPE,parent,root,revision,Instant.now().plusSeconds(300),Instant.now().plusSeconds(600));
+        fixture.put(ref,authority,("knode-knowledge".equals(authority)?"KNOWLEDGE_":"AGENT_")+purpose,"42",sid,"blog",actor,resource,ENVELOPE,parent,root,revision,TIME.instant().plusSeconds(500),TIME.instant().plusSeconds(600));
     }
     ResponseEntity<String> issue(String caller,Object body) throws Exception {return call(HttpMethod.POST,"/internal/v1/auth/delegations",body,"Bearer "+caller);}
     Map<String,Object> issueBody(String sourceName,String source,String purpose,String audience,String permission,Map<String,String> refs,Map<String,String> resource) {
@@ -117,7 +127,7 @@ class DelegationHttpIntegrationTest {
         assertEquals(200,response.getStatusCode().value());assertTrue(read(response).path("expiresIn").isInt());
         return read(response).path("accessToken").asText();
     }
-    String grant(String token) {return new DelegationTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),Clock.systemUTC()).verifyNormal(token,"knode-agent").grantId();}
+    String grant(String token) {return new DelegationTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),TIME).verifyNormal(token,"knode-agent").grantId();}
     Map<String,Object> validation(String actorToken,String delegationToken,String permission,Map<String,String> resource) {
         return Map.of("actorToken",actorToken,"delegationToken",delegationToken,"permission",permission,"resource",resource);
     }
@@ -172,9 +182,9 @@ class DelegationHttpIntegrationTest {
         assertEquals(200,raw(HttpMethod.POST,"/api/blog/auth/logout",null,user).getStatusCode().value());
         assertEquals(401,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate",validation(agentToAgent,execution,"agent:runs:execute",run),"Bearer "+agentIssue).getStatusCode().value());
         assertEquals(200,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",cpInput,"Bearer "+agentIssue).getStatusCode().value());
-        var verifier=new DelegationTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),Clock.systemUTC());
+        var verifier=new DelegationTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),TIME);
         var checked=verifier.verifyCheckpoint(checkpoint,"knode-agent");
-        var actor=new ServiceTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),Clock.systemUTC())
+        var actor=new ServiceTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),TIME)
                 .verify(agentToAgent,"knode-agent",Set.of("agent:checkpoint:write"));
         var current=new DelegationTokenVerifier.CurrentProof(checked.grantId(),"42",sid,"blog","knode-agent","knode-agent",
                 step,Set.of("agent:checkpoint:write"),checked.expiresAt()+1,checked.expiresAt()+1,true);
@@ -204,6 +214,164 @@ class DelegationHttpIntegrationTest {
         assertEquals(200,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate",validation(knowledgeToAgent,continueToken,"agent:runs:execute",continued),"Bearer "+agentIssue).getStatusCode().value());
         assertTrue(fixture.authenticatedRequests.get()>=10);
     }
+    private record Scenario(String user,String sid,String knowledge,String agent,String actor,String root,String execution,
+                            String executionGrant,Map<String,String> run,Map<String,String> step,Instant issuedAt) {}
+
+    private Scenario checkpointScenario(long oldMachineAge,long rootAuthorizationSeconds) throws Exception {
+        String user=user(),sid=sid(user);
+        String agent=machine("knode-agent","knode-user","auth:delegations:issue","auth:delegations:validate","auth:delegations:validate-checkpoint");
+        if (oldMachineAge>0) TIME.set(TIME.instant().plusSeconds(oldMachineAge));
+        String knowledge=machine("knode-knowledge","knode-user","auth:delegations:issue");
+        String actor=machine("knode-agent","knode-agent","agent:runs:execute","agent:checkpoint:write");
+        var creation=Map.of("knowledgeBaseId","42","clientRequestId","time-request");
+        proof("k-time-root","knode-knowledge","CREATE","knode-knowledge",sid,creation,null,null,"1");
+        fixture.updateWindow("k-time-root","knode-knowledge",TIME.instant().plusSeconds(500),TIME.instant().plusSeconds(rootAuthorizationSeconds));
+        String rootToken=issueToken(issue(knowledge,issueBody("subjectToken",user,"CREATE","knode-agent","agent:runs:create",Map.of("knowledge","k-time-root"),creation)));
+        String root=grant(rootToken);
+        var run=new LinkedHashMap<>(creation);run.put("runId","run-time");run.put("controlEpoch","1");run.put("workerId","worker-time");
+        fixture.registerRun("run-time",root,"1","worker-time");
+        proof("k-time-exec","knode-knowledge","EXECUTE","knode-agent",sid,run,root,root,"2");
+        proof("a-time-exec","knode-agent","EXECUTE","knode-agent",sid,run,root,root,"2");
+        String execution=issueToken(issue(agent,issueBody("parentToken",rootToken,"EXECUTE","knode-agent","agent:runs:execute",Map.of("knowledge","k-time-exec","agent","a-time-exec"),run)));
+        String executionGrant=grant(execution);
+        var step=new LinkedHashMap<>(run);step.put("stepId","step-time");step.put("checkpointOperationId","op-time");
+        proof("k-time-check","knode-knowledge","SAFE_CHECKPOINT","knode-agent",sid,step,executionGrant,root,"3");
+        proof("a-time-check","knode-agent","SAFE_CHECKPOINT","knode-agent",sid,step,executionGrant,root,"3");
+        return new Scenario(user,sid,knowledge,agent,actor,root,execution,executionGrant,run,step,TIME.instant());
+    }
+    private Map<String,Object> checkpointBody(Scenario c) {
+        return issueBody("parentToken",c.execution(),"SAFE_CHECKPOINT","knode-agent","agent:checkpoint:write",
+                Map.of("knowledge","k-time-check","agent","a-time-check"),c.step());
+    }
+    private Map<String,Object> checkpointValidation(Scenario c,String token) {
+        return Map.of("actorToken",c.actor(),"delegationToken",token,"resource",c.step());
+    }
+    private DelegationTokenVerifier verifier() {
+        return new DelegationTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),TIME);
+    }
+    private void registerCheckpoint(Scenario c,long stepSeconds,long leaseSeconds) {
+        fixture.registerCheckpoint("run-time","step-time","op-time",c.issuedAt().minusSeconds(1),
+                c.issuedAt().plusSeconds(stepSeconds),c.issuedAt().plusSeconds(leaseSeconds));
+    }
+
+    @Test void checkpointOutlivesParentButRequiresStartedStepCurrentLeaseAndAtomicReceiver() throws Exception {
+        Scenario c=checkpointScenario(0,600);
+        var body=checkpointBody(c);
+        assertEquals(403,issue(c.agent(),body).getStatusCode().value()); // no started step
+        fixture.registerCheckpoint("run-time","step-time","op-time",c.issuedAt().plusSeconds(1),c.issuedAt().plusSeconds(240),c.issuedAt().plusSeconds(230));
+        assertEquals(403,issue(c.agent(),body).getStatusCode().value());
+        fixture.registerCheckpoint("run-time","step-time","op-time",c.issuedAt().minusSeconds(1),c.issuedAt().plusSeconds(240),c.issuedAt());
+        assertEquals(403,issue(c.agent(),body).getStatusCode().value());
+        registerCheckpoint(c,240,230);fixture.revokeLease("run-time");
+        assertEquals(403,issue(c.agent(),body).getStatusCode().value());
+        registerCheckpoint(c,240,230);fixture.revokeStep("run-time");
+        assertEquals(403,issue(c.agent(),body).getStatusCode().value());
+        registerCheckpoint(c,240,230);
+        var wrongResource=new LinkedHashMap<>(c.step());wrongResource.put("workerId","wrong-worker");
+        var wrongBody=new LinkedHashMap<>(body);wrongBody.put("expectedResource",wrongResource);
+        assertEquals(403,issue(c.agent(),wrongBody).getStatusCode().value());
+        var fromGrant=issueBody("grantId",c.executionGrant(),"SAFE_CHECKPOINT","knode-agent","agent:checkpoint:write",Map.of("knowledge","k-time-check","agent","a-time-check"),c.step());
+        assertEquals(403,issue(c.agent(),fromGrant).getStatusCode().value());
+        assertEquals(401,issue(c.knowledge(),body).getStatusCode().value());
+        var unauthorized=new LinkedHashMap<>(body);unauthorized.put("permissions",List.of("agent:runs:execute"));
+        assertEquals(400,issue(c.agent(),unauthorized).getStatusCode().value());
+        assertEquals(403,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate",
+                validation(c.actor(),c.execution(),"agent:checkpoint:write",c.run()),"Bearer "+c.agent()).getStatusCode().value());
+        when(reader.find(anyString())).thenThrow(new SessionStore.Unavailable("synthetic"));
+        assertEquals(503,issue(c.agent(),body).getStatusCode().value());
+        assertEquals(503,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate",
+                validation(c.actor(),c.execution(),"agent:runs:execute",c.run()),"Bearer "+c.agent()).getStatusCode().value());
+        doAnswer(inv -> Optional.ofNullable(sessions.get(inv.getArgument(0)))).when(reader).find(anyString());
+        var parent=verifier().verifyNormal(c.execution(),"knode-agent");
+        String checkpoint=issueToken(issue(c.agent(),body));
+        var checked=verifier().verifyCheckpoint(checkpoint,"knode-agent");
+        assertEquals(c.issuedAt().plusSeconds(230).getEpochSecond(),checked.expiresAt());
+        assertTrue(checked.expiresAt()>parent.expiresAt());
+        assertEquals(403,issue(c.agent(),body).getStatusCode().value());
+        assertEquals(200,raw(HttpMethod.POST,"/api/blog/auth/logout",null,c.user()).getStatusCode().value());
+        assertEquals(401,issue(c.agent(),body).getStatusCode().value());
+        TIME.set(Instant.ofEpochSecond(parent.expiresAt()+1));
+        assertEquals(401,assertThrows(AuthFailure.class,() -> verifier().verifyNormal(c.execution(),"knode-agent")).status());
+        assertEquals(401,issue(c.agent(),body).getStatusCode().value());
+        assertEquals(401,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate",validation(c.actor(),c.execution(),"agent:runs:execute",c.run()),"Bearer "+c.agent()).getStatusCode().value());
+        assertEquals(401,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate",validation(c.actor(),checkpoint,"agent:checkpoint:write",c.step()),"Bearer "+c.agent()).getStatusCode().value());
+        var cpInput=checkpointValidation(c,checkpoint);
+        assertEquals(200,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",cpInput,"Bearer "+c.agent()).getStatusCode().value());
+        var wrong=new LinkedHashMap<>(c.step());wrong.put("knowledgeBaseId","43");
+        assertEquals(403,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",Map.of("actorToken",c.actor(),"delegationToken",checkpoint,"resource",wrong),"Bearer "+c.agent()).getStatusCode().value());
+        fixture.mode.set("UNKNOWN_SCHEMA");
+        assertEquals(503,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",cpInput,"Bearer "+c.agent()).getStatusCode().value());
+        fixture.mode.set("NORMAL");
+        var actorPrincipal=new ServiceTokenVerifier(Map.of("test-key",(RSAPublicKey)keys.getPublic()),TIME)
+                .verify(c.actor(),"knode-agent",Set.of("agent:checkpoint:write"));
+        var currentProof=new DelegationTokenVerifier.CurrentProof(checked.grantId(),"42",c.sid(),"blog","knode-agent","knode-agent",
+                c.step(),Set.of("agent:checkpoint:write"),checked.expiresAt(),checked.expiresAt(),true);
+        var capability=verifier().authorizeCheckpoint(checked,actorPrincipal,currentProof,c.step());
+        var receiver=new LocalCheckpointReceiverFixture("run-time","1","worker-time");
+        assertEquals(CheckpointCommitGuard.Outcome.APPLIED,receiver.commit(capability,"a".repeat(64)));
+        assertEquals(CheckpointCommitGuard.Outcome.ALREADY_APPLIED,receiver.commit(capability,"a".repeat(64)));
+        assertEquals(403,assertThrows(AuthFailure.class,() -> receiver.commit(capability,"b".repeat(64))).status());
+        assertEquals(1,receiver.db.queryForObject("SELECT effects FROM receiver_run WHERE run_id='run-time'",Integer.class));
+        registerCheckpoint(c,240,70);
+        TIME.set(c.issuedAt().plusSeconds(69));
+        assertEquals(200,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",cpInput,"Bearer "+c.agent()).getStatusCode().value());
+        TIME.set(c.issuedAt().plusSeconds(70));
+        assertEquals(403,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",cpInput,"Bearer "+c.agent()).getStatusCode().value());
+        registerCheckpoint(c,240,230);
+        fixture.revokeLease("run-time");
+        assertEquals(403,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",cpInput,"Bearer "+c.agent()).getStatusCode().value());
+        registerCheckpoint(c,240,230);fixture.revokeStep("run-time");
+        assertEquals(403,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",cpInput,"Bearer "+c.agent()).getStatusCode().value());
+        registerCheckpoint(c,240,230);fixture.advanceRun("run-time","1","worker-new");
+        assertEquals(403,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",cpInput,"Bearer "+c.agent()).getStatusCode().value());
+        fixture.advanceRun("run-time","2","worker-time");
+        assertEquals(403,call(HttpMethod.POST,"/internal/v1/auth/delegations:validate-checkpoint",cpInput,"Bearer "+c.agent()).getStatusCode().value());
+        TIME.set(c.issuedAt().plusSeconds(230));
+        assertEquals(401,assertThrows(AuthFailure.class,() -> verifier().verifyCheckpoint(checkpoint,"knode-agent")).status());
+    }
+
+    @Test void checkpointCannotBeIssuedIfParentExpiresDuringProofResolution() throws Exception {
+        Scenario c=checkpointScenario(0,600);
+        registerCheckpoint(c,500,500);
+        long parentExpiry=verifier().verifyNormal(c.execution(),"knode-agent").expiresAt();
+        fixture.afterSafeProof.set(() -> TIME.set(Instant.ofEpochSecond(parentExpiry)));
+        assertEquals(401,issue(c.agent(),checkpointBody(c)).getStatusCode().value());
+        assertEquals(0,db.queryForObject("SELECT COUNT(*) FROM auth_delegation_grant WHERE purpose='SAFE_CHECKPOINT'",Integer.class));
+        assertEquals(401,issue(c.agent(),checkpointBody(c)).getStatusCode().value());
+    }
+
+    @Test void checkpointExpiryIsTheEarliestActualSafetyDeadline() throws Exception {
+        for (String limit:List.of("maximum","root-authorization","session","knowledge-proof","knowledge-authorization","agent-proof","started-step","lease","caller-machine")) {
+            setup();
+            long age="caller-machine".equals(limit)?200:0;
+            Scenario c=checkpointScenario(age,"root-authorization".equals(limit)?90:600);
+            long bound=switch (limit) {
+                case "root-authorization" -> 90;
+                case "session" -> 95;
+                case "knowledge-proof" -> 100;
+                case "knowledge-authorization" -> 105;
+                case "agent-proof" -> 110;
+                case "started-step" -> 115;
+                case "lease" -> 120;
+                case "caller-machine" -> 100;
+                default -> 300;
+            };
+            if ("session".equals(limit)) sessions.compute(c.sid(),(sid,old) ->
+                    new SessionStore.Session(old.schemaVersion(),old.sid(),old.userId(),old.scope(),old.status(),c.issuedAt().plusSeconds(bound).getEpochSecond()));
+            if ("knowledge-proof".equals(limit)) fixture.updateWindow("k-time-check","knode-knowledge",c.issuedAt().plusSeconds(bound),c.issuedAt().plusSeconds(600));
+            if ("knowledge-authorization".equals(limit)) fixture.updateWindow("k-time-check","knode-knowledge",c.issuedAt().plusSeconds(500),c.issuedAt().plusSeconds(bound));
+            if ("agent-proof".equals(limit)) fixture.updateWindow("a-time-check","knode-agent",c.issuedAt().plusSeconds(bound),c.issuedAt().plusSeconds(600));
+            registerCheckpoint(c,"started-step".equals(limit)?bound:500,"lease".equals(limit)?bound:500);
+            String checkpoint=issueToken(issue(c.agent(),checkpointBody(c)));
+            var verified=verifier().verifyCheckpoint(checkpoint,"knode-agent");
+            assertEquals(c.issuedAt().plusSeconds(bound).getEpochSecond(),verified.expiresAt(),limit);
+            TIME.set(c.issuedAt().plusSeconds(bound-1));
+            assertEquals(verified.jti(),verifier().verifyCheckpoint(checkpoint,"knode-agent").jti(),limit);
+            TIME.set(c.issuedAt().plusSeconds(bound));
+            assertEquals(401,assertThrows(AuthFailure.class,() -> verifier().verifyCheckpoint(checkpoint,"knode-agent"),limit).status());
+        }
+    }
+
     @Test void rejectsOversizedMachineJwtWithoutTruncatingPermissions() throws Exception {
         String basic="Basic "+Base64.getEncoder().encodeToString(("knode-heavy:"+SECRET).getBytes(StandardCharsets.UTF_8));
         var response=call(HttpMethod.POST,"/internal/v1/auth/service-tokens",Map.of("audience","knode-agent","permissions",HEAVY),basic);

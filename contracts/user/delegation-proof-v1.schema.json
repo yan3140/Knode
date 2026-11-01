@@ -163,7 +163,8 @@
     },
     "validUntil": {
       "type": "string",
-      "format": "date-time"
+      "format": "date-time",
+      "description": "For AGENT_SAFE_CHECKPOINT, the Agent authority must derive this deadline from durable facts and never return a time later than the started step save window or current worker lease. It must reject a not-yet-started, revoked or expired step or lease and any run, epoch, worker, step or operation mismatch."
     },
     "authorizationExpiresAt": {
       "type": "string",

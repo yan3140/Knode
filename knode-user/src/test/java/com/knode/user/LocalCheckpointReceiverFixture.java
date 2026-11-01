@@ -11,12 +11,13 @@ import org.springframework.transaction.support.TransactionTemplate;
 final class LocalCheckpointReceiverFixture implements CheckpointCommitGuard {
     final JdbcTemplate db;
     final TransactionTemplate tx;
-    LocalCheckpointReceiverFixture() {
-        var ds=new DriverManagerDataSource("jdbc:h2:mem:g7_checkpoint;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1","sa","");
+    LocalCheckpointReceiverFixture() {this("run-1","1","worker-1");}
+    LocalCheckpointReceiverFixture(String run,String epoch,String worker) {
+        var ds=new DriverManagerDataSource("jdbc:h2:mem:"+java.util.UUID.randomUUID().toString().replace("-","")+";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1","sa","");
         db=new JdbcTemplate(ds);tx=new TransactionTemplate(new DataSourceTransactionManager(ds));
         db.execute("CREATE TABLE receiver_run(run_id VARCHAR(64) PRIMARY KEY, epoch VARCHAR(19), worker VARCHAR(64), effects INT)");
         db.execute("CREATE TABLE receiver_checkpoint(operation_id VARCHAR(64) PRIMARY KEY, jti VARCHAR(36) UNIQUE, digest VARCHAR(64))");
-        db.update("INSERT INTO receiver_run VALUES('run-1','1','worker-1',0)");
+        db.update("INSERT INTO receiver_run VALUES(?,?,?,0)",run,epoch,worker);
     }
     @Override public Outcome commit(DelegationTokenVerifier.AuthorizedCheckpoint c,String digest) {
         if (c==null || digest==null || !digest.matches("[0-9a-f]{64}")) throw new AuthFailure(403);
