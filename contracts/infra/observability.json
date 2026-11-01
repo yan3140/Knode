@@ -1,6 +1,6 @@
 {
-  "version": "0.2-draft",
-  "status": "unfrozen",
+  "version": "0.2",
+  "status": "infra-verified; User and Agent business integration pending",
   "requestId": {
     "header": "X-Request-Id",
     "pattern": "[A-Za-z0-9._-]{1,64}",
@@ -18,10 +18,17 @@
     "bounds": "Gateway SDK max queue 512 spans, max batch 128, schedule 1s, export timeout 2s, connect timeout 1s. Overflow drops spans; observability is best effort.",
     "metrics": "Spring Boot http.server.requests uses method, status, outcome, exception and a framework route template when available; Gateway may report UNKNOWN. Histogram enabled. Never add raw path IDs, user IDs, sids or request IDs as metric labels.",
     "management": "Expose health and prometheus on an explicitly configured loopback management address and independent port; do not expose prometheus via a public gateway route.",
-    "enabledServices": "Gateway code wired but opt-in; ordinary Java service must add the module and configuration. No user or Agent business service has been changed."
+    "enabledServices": "Gateway wired and disabled by default; ordinary Java services must explicitly add the module and configuration. User and Agent business integration remains pending.",
+    "configurationEnvironment": [
+      "KNODE_OBSERVABILITY_ENABLED",
+      "KNODE_ENVIRONMENT",
+      "KNODE_SERVICE_VERSION",
+      "KNODE_OTLP_TRACES_ENDPOINT",
+      "KNODE_TRACE_SAMPLE_RATIO"
+    ]
   },
   "python": "Independent FastAPI fixture uses existing read-only yan_agent.observability.tracing with W3C and OTLP HTTP. OTEL_BSP_* and OTEL_EXPORTER_OTLP_TRACES_TIMEOUT in the environment template bound its queue and HTTP timeout. This does not prove the Agent business pipeline.",
-  "async": "See contracts/shared/observability/trace-context.json. A synthetic in-process queue is verified; no claim of User Outbox or Redis Stream integration.",
+  "async": "See contracts/shared/observability/trace-context.json. Synthetic Java/Redis-protocol-substitute fixture and Collector/Jaeger paths are verified separately; real User Outbox to Redis Stream chain is not verified.",
   "collector": {
     "receiver": "OTLP gRPC and HTTP on loopback by default",
     "memoryLimitMiB": 128,

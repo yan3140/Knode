@@ -1,6 +1,6 @@
 {
-  "version": "0.4-draft",
-  "status": "unfrozen",
+  "version": "0.4",
+  "status": "infra-verified; User and Agent integration pending",
   "serviceName": "knode-gateway",
   "health": "/actuator/health",
   "liveness": "/actuator/health/liveness",
@@ -30,7 +30,9 @@
     "KNODE_GOV_NACOS_NAMESPACE",
     "KNODE_GOV_NACOS_GROUP",
     "KNODE_GOV_NACOS_USERNAME",
-    "KNODE_GOV_NACOS_PASSWORD"
+    "KNODE_GOV_NACOS_PASSWORD",
+    "KNODE_GOV_NACOS_RETRY_MIN_MS",
+    "KNODE_GOV_NACOS_RETRY_MAX_MS"
   ],
   "authEnvironment": [
     "KNODE_GATEWAY_AUTH_CONFIGURED",
@@ -41,6 +43,7 @@
     "KNODE_GATEWAY_AUTH_REDIS_USERNAME",
     "KNODE_GATEWAY_AUTH_REDIS_PASSWORD",
     "KNODE_GATEWAY_AUTH_REDIS_DATABASE",
+    "KNODE_GATEWAY_AUTH_REDIS_TLS",
     "KNODE_GATEWAY_AUTH_TIMEOUT_MS"
   ],
   "defaultPort": 18089,
@@ -55,5 +58,14 @@
     "gateway": 18089,
     "user": 18090,
     "dashboard": 18091
-  }
+  },
+  "authRedisTls": "Default true; full certificate and hostname verification. False must be explicit for a deliberately isolated plaintext server. VM native TLS not verified.",
+  "observabilityEnvironment": [
+    "KNODE_OBSERVABILITY_ENABLED",
+    "KNODE_ENVIRONMENT",
+    "KNODE_SERVICE_VERSION",
+    "KNODE_OTLP_TRACES_ENDPOINT",
+    "KNODE_TRACE_SAMPLE_RATIO"
+  ],
+  "localInitialization": "scripts/microservices/infra/nacos-init.js; verify-only separate fresh namespace and group; see deploy/microservices/nacos/initialization.json."
 }

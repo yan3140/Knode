@@ -1,15 +1,43 @@
 {
-  "status": "template-only",
-  "namespace": "explicit isolated namespace id required",
-  "group": "KNODE_SENTINEL",
-  "entries": [
-    "knode-gateway.gw-flow.json",
-    "knode-gateway.gw-api-group.json",
-    "<service>.flow.json",
-    "<service>.degrade.json"
+  "status": "implemented-verified-on-isolated-nacos-3.0.3",
+  "scope": "Only Nacos 3.0.3 standalone with authenticated admin API on an explicit 127.0.0.1 non-default test port, reserved exclusively for this initialization. This initializes a new verify namespace; it is not a production initializer.",
+  "tool": "scripts/microservices/infra/nacos-init.js",
+  "invocation": {
+    "python": "subprocess.run(['node', tool, '--server=http://127.0.0.1:<test-port>', '--namespace=verify-<12-lowercase-hex>', '--group=VERIFY_<same-12-hex-uppercase>', '--data-ids=<comma-separated-explicit-ids>'], check=True)",
+    "apply": "Append --apply only after reviewing the default plan. Set NACOS_INIT_ACCESS_TOKEN and NACOS_INIT_EXCLUSIVE_INSTANCE=confirm in the subprocess environment. The latter is the operator assertion that this newly isolated instance has no other writers; never put the token in arguments or the manifest.",
+    "tests": "subprocess.run(['node','--test','scripts/microservices/infra/nacos-init.test.js'], check=True)"
+  },
+  "allowedDataIds": {
+    "knode-gateway.yaml": "deploy/microservices/nacos/knode-gateway.yaml",
+    "knode-gateway.gw-flow.json": "deploy/microservices/nacos/knode-gateway.gw-flow.json",
+    "knode-gateway.gw-api-group.json": "deploy/microservices/nacos/knode-gateway.gw-api-group.json",
+    "knode-user.flow.json": "deploy/microservices/nacos/service.flow.json",
+    "knode-user.degrade.json": "deploy/microservices/nacos/service.degrade.json"
+  },
+  "contract": "At least one explicitly named Gateway Data ID and one explicitly named User Data ID are required. The User IDs are only empty governance-rule templates; User Nacos import, User application configuration and observability wiring remain with User and are not claimed implemented.",
+  "plan": "Reads only the fixed non-secret templates, validates input, prints Data IDs and SHA-256 hashes, performs no network access and creates no manifest.",
+  "apply": [
+    "Requires an external NACOS_INIT_ACCESS_TOKEN and NACOS_INIT_EXCLUSIVE_INSTANCE=confirm; acquires a same-control-port local lock and writes a no-secret manifest before any network request.",
+    "Verifies Nacos-reported version 3.0.3, standalone mode, server port, enabled auth and an anonymous admin request rejected with HTTP 401/403.",
+    "Rejects every pre-existing namespace unless this exact completed local manifest and the remote namespace ownership marker match. A matching run is read-only: all Data IDs must match exactly for a no-op; any missing or different value is rejected.",
+    "For a fresh namespace, requires the Nacos namespace create operation to succeed, stores a random non-secret ownership marker as namespace description, and checks exact ownership. Existing Data IDs are refused.",
+    "For each absent Data ID, passes a deliberately non-MD5 casMd5 sentinel and checks the result. This can reject a normally persisted existing value, but is not a reliable create-if-absent under concurrent writers: Nacos 3.0.3 embedded Derby was observed reporting success for both racing requests. The isolated single-writer requirement is essential.",
+    "Read back each value, then record complete. A planned or incomplete manifest cannot be resumed automatically; inspect ownership and clean up the exact test namespace or create a new run."
   ],
-  "overwriteExisting": false,
-  "deployment": "check existing Data IDs before importing",
-  "serviceSample": "Replace <service> with the exact spring.application.name; initialize from the sample arrays.",
-  "separateDiscoveryAndConfigurationNamespaces": "Use distinct explicit namespace IDs as required; governance namespace is independent."
+  "manifest": "deploy/microservices/nacos/target/initialization/verify-<run>/manifest.json contains endpoint, namespace, group, explicit Data IDs, template hashes, process ID and a non-secret ownership marker; never credentials, tokens or template content. A per-server-port lock serializes initializers in this workspace; a stale lock or incomplete manifest requires operator inspection.",
+  "limits": [
+    "The tool cannot enforce isolation against other Nacos clients or administrators. Do not apply if any other writer could access this Nacos instance; the local per-port lock coordinates only this tool in this workspace. A confirmation is an operator assertion, not proof.",
+    "Nacos 3.0.3 concurrent CAS creation is not treated as atomic. In an isolated native test, two racing requests sometimes both reported success. This tool requires an exclusive fresh instance and namespace, rejects existing namespaces without its completed ownership manifest, and does not claim safe concurrent external publication.",
+    "Direct database tampering or corrupted blank MD5s are outside this isolated test boundary.",
+    "This is not a transactional multi-Data-ID publish; partial failure leaves a fresh namespace for review. A planned or incomplete manifest is not resumed automatically.",
+    "Only the listed local templates can be applied. The tool never reads existing credentials, discovers accounts, creates ACLs, deletes namespaces or changes firewall settings.",
+    "Namespace creation ownership is bound to successful creation plus the random description marker. If the creation response is lost or the marker is missing/mismatched, ownership is not assumed.",
+    "No real User logout, Redis, Agent run, or User Nacos wiring is validated by this initializer."
+  ],
+  "sources": [
+    "https://github.com/alibaba/nacos/blob/3.0.3/config/src/main/java/com/alibaba/nacos/config/server/controller/v3/ConfigControllerV3.java",
+    "https://github.com/alibaba/nacos/blob/3.0.3/config/src/main/java/com/alibaba/nacos/config/server/service/ConfigOperationService.java",
+    "https://github.com/alibaba/nacos/blob/3.0.3/config/src/main/java/com/alibaba/nacos/config/server/service/repository/embedded/EmbeddedConfigInfoPersistServiceImpl.java",
+    "https://nacos.io/en/docs/v3.0/manual/admin/admin-api/"
+  ]
 }

@@ -1,6 +1,6 @@
 {
-  "version": "0.3-draft",
-  "status": "unfrozen",
+  "version": "0.3",
+  "status": "infra-verified; business-service integration pending",
   "namespace": "explicit isolated namespace required",
   "group": "KNODE_SENTINEL",
   "dataIds": [
@@ -62,11 +62,23 @@
       "deploy/microservices/nacos/service.degrade.json"
     ],
     "feignFailureSemantics": "Any Exception escaping the wrapped call, including Feign non-2xx exceptions, is traced and translated to 503. Handle expected business responses inside the callable if they must retain their own semantics.",
-    "logging": "At most one invalid-update warning per Data ID until recovery; retry warnings are emitted at attempts 1, 2, 4, 8 and 16."
+    "logging": "At most one invalid-update warning per Data ID until recovery; retry warnings are emitted at attempts 1, 2, 4, 8 and 16.",
+    "environment": [
+      "KNODE_GOVERNANCE_ENABLED",
+      "KNODE_GOVERNANCE_NACOS_SERVER_ADDR",
+      "KNODE_GOVERNANCE_NACOS_NAMESPACE",
+      "KNODE_GOVERNANCE_NACOS_GROUP",
+      "KNODE_GOVERNANCE_NACOS_USERNAME",
+      "KNODE_GOVERNANCE_NACOS_PASSWORD",
+      "KNODE_GOVERNANCE_NACOS_RETRY_MIN_MS",
+      "KNODE_GOVERNANCE_NACOS_RETRY_MAX_MS"
+    ],
+    "default": "Disabled unless KNODE_GOVERNANCE_ENABLED=true."
   },
   "localPorts": {
     "gateway": "18089; GATEWAY_PORT override",
     "user": "18090, owned by user",
     "dashboard": "18091; DASHBOARD_PORT override"
-  }
+  },
+  "configurationTls": "No dedicated Nacos TLS environment switch is defined by these templates; transport and trust configuration must be supplied and verified for the chosen Nacos client and deployment."
 }
