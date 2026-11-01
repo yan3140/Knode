@@ -30,6 +30,6 @@
     "stream": "No XTRIM by producer. Operators and consumers must agree retention and durable consumer watermarks before any independent trimming.",
     "historicalGap": "Existing G3 REVOKED intents without outbox remain absent; no automatic backfill."
   },
-  "readiness": "Disabled reports DISABLED. Enabled probes a separate unique prefix:UUID stream with atomic MULTI/XADD/EXPIRE/EXEC and exact-key DEL. Target-key ACL may differ and is explicitly reported unverified; most recent successful publication is exposed, not a guarantee of current target ACL.",
+  "readiness": "Disabled reports DISABLED. Enabled probes a separate unique prefix:UUID stream with atomic MULTI/XADD/PEXPIRE/EXEC and exact-key DEL. Target-key ACL may differ and is explicitly reported unverified; most recent successful publication is exposed, not a guarantee of current target ACL.",
   "notImplemented": "Agent consumption, deduplication, pause/checkpoint and downstream completion."
 }

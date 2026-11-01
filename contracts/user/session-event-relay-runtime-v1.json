@@ -21,7 +21,7 @@
     "KNODE_SESSION_EVENTS_CLEANUP_INITIAL_MS"
   ],
   "credentials": "Use a dedicated event identity distinct from session read and write identities. No production in-memory publisher. Redis credential and private values must be injected externally.",
-  "probe": "Every probe uses a unique <configured-prefix>:<UUID> key: MULTI, XADD probe 1, EXPIRE 10, EXEC, then DEL that exact key. Concurrent checks cannot delete one another. Expiry commits atomically with creation; no synthetic event is added to the business event stream. Probe-prefix ACL does not prove target-key ACL.",
+  "probe": "Every probe uses a unique <configured-prefix>:<UUID> key: MULTI, XADD probe 1, PEXPIRE 10000, EXEC, then DEL that exact key. Concurrent checks cannot delete one another. Expiry commits atomically with creation; no synthetic event is added to the business event stream. Probe-prefix ACL does not prove target-key ACL.",
   "minimumAcl": {
     "producerTarget": [
       "XADD <explicit-target> * event <json>"
@@ -29,7 +29,7 @@
     "producerProbe": [
       "MULTI",
       "XADD <explicit-probe-prefix>:<uuid> * probe 1",
-      "EXPIRE <explicit-probe-prefix>:<uuid> 10",
+      "PEXPIRE <explicit-probe-prefix>:<uuid> 10000",
       "EXEC",
       "DISCARD on transaction failure",
       "DEL <explicit-probe-prefix>:<uuid>"

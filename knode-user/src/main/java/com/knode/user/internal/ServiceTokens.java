@@ -23,6 +23,7 @@ public final class ServiceTokens {
                 .audience().add(audience).and().claim("token_use","service").claim("permissions",permissions)
                 .id(UUID.randomUUID().toString()).issuedAt(Date.from(Instant.ofEpochSecond(now)))
                 .expiration(Date.from(Instant.ofEpochSecond(now+ttl))).signWith(keys.privateKey(),Jwts.SIG.RS256).compact();
+        if (jwt.length()>8192) throw new InternalFailure(400,"TOKEN_BUDGET_EXCEEDED");
         return new Issued(jwt,"Bearer",ttl,audience,permissions);
     }
     public ServiceTokenVerifier.Principal verify(String token,String permission) {

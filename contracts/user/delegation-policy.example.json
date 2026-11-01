@@ -1,0 +1,44 @@
+{
+  "rules": [
+    {
+      "actor": "knode-knowledge",
+      "audience": "knode-agent",
+      "purpose": "CREATE",
+      "permissions": [
+        "agent:runs:create"
+      ]
+    },
+    {
+      "actor": "knode-knowledge",
+      "audience": "knode-agent",
+      "purpose": "CONTINUE",
+      "permissions": [
+        "agent:runs:execute"
+      ]
+    },
+    {
+      "actor": "knode-agent",
+      "audience": "knode-agent",
+      "purpose": "EXECUTE",
+      "permissions": [
+        "agent:runs:execute"
+      ]
+    },
+    {
+      "actor": "knode-agent",
+      "audience": "knode-knowledge",
+      "purpose": "EXCHANGE",
+      "permissions": [
+        "knowledge:rag:search"
+      ]
+    },
+    {
+      "actor": "knode-agent",
+      "audience": "knode-agent",
+      "purpose": "SAFE_CHECKPOINT",
+      "permissions": [
+        "agent:checkpoint:write"
+      ]
+    }
+  ]
+}

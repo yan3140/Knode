@@ -1,0 +1,213 @@
+{
+  "name": "AUTH-DELEGATION",
+  "version": "1",
+  "status": "User-side implementation; requires independent Knowledge and Agent authority implementations and receiver enforcement.",
+  "security": {
+    "issuer": "knode-user",
+    "algorithm": "RS256",
+    "token_use": "delegation",
+    "oneAudience": true,
+    "maxJwtBytes": 8192,
+    "normalMaximumSeconds": 60,
+    "safeCheckpointMaximumSeconds": 300,
+    "liveAuthorizationRequired": true
+  },
+  "issue": {
+    "method": "POST",
+    "path": "/internal/v1/auth/delegations",
+    "callerPermission": "auth:delegations:issue",
+    "source": "Exactly one of subjectToken, parentToken, grantId. parentToken is verified for the authenticated caller audience; grantId requires its persisted holder to be the caller.",
+    "fields": [
+      "subjectToken|parentToken|grantId",
+      "purpose",
+      "audience",
+      "permissions",
+      "proofRefs",
+      "expectedResource?"
+    ],
+    "response": [
+      "accessToken",
+      "tokenType",
+      "expiresIn",
+      "audience",
+      "permissions",
+      "grantId"
+    ],
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "knowledgeBaseId",
+        "clientRequestId"
+      ],
+      "properties": {
+        "knowledgeBaseId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,18}$"
+        },
+        "clientRequestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "conversationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "controlEpoch": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,18})$"
+        },
+        "workerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "checkpointOperationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        }
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    }
+  },
+  "validate": {
+    "method": "POST",
+    "path": "/internal/v1/auth/delegations:validate",
+    "callerPermission": "auth:delegations:validate",
+    "fields": [
+      "actorToken",
+      "delegationToken",
+      "permission",
+      "resource"
+    ],
+    "behavior": "Verify actual actor machine token, signature, persisted grant lineage, live subject session, current domain proofs and exact resource/permission binding."
+  },
+  "validateCheckpoint": {
+    "method": "POST",
+    "path": "/internal/v1/auth/delegations:validate-checkpoint",
+    "callerPermission": "auth:delegations:validate-checkpoint",
+    "fields": [
+      "actorToken",
+      "delegationToken",
+      "resource"
+    ],
+    "behavior": "Distinct checkpoint token and permission; current independent domain proof and persisted lineage remain mandatory after logout. Receiver must atomically check current run/epoch/worker and deduplicate jti plus checkpointOperationId and result digest in the same transaction as the checkpoint effect."
+  },
+  "paths": [
+    {
+      "purpose": "CREATE",
+      "actor": "knode-knowledge",
+      "audience": "knode-agent",
+      "source": "subjectToken",
+      "authorities": [
+        "knowledge"
+      ]
+    },
+    {
+      "purpose": "CONTINUE",
+      "actor": "knode-knowledge",
+      "audience": "knode-agent",
+      "source": "subjectToken",
+      "authorities": [
+        "knowledge",
+        "agent"
+      ]
+    },
+    {
+      "purpose": "EXECUTE",
+      "actor": "knode-agent",
+      "audience": "knode-agent",
+      "source": "parentToken|grantId",
+      "parentPurpose": [
+        "CREATE",
+        "CONTINUE"
+      ],
+      "authorities": [
+        "knowledge",
+        "agent"
+      ]
+    },
+    {
+      "purpose": "EXCHANGE",
+      "actor": "knode-agent",
+      "audience": "knode-knowledge",
+      "source": "parentToken|grantId",
+      "parentPurpose": [
+        "CREATE",
+        "CONTINUE",
+        "EXECUTE"
+      ],
+      "authorities": [
+        "knowledge",
+        "agent"
+      ]
+    },
+    {
+      "purpose": "SAFE_CHECKPOINT",
+      "actor": "knode-agent",
+      "audience": "knode-agent",
+      "source": "parentToken",
+      "parentPurpose": [
+        "EXECUTE",
+        "CONTINUE"
+      ],
+      "authorities": [
+        "knowledge",
+        "agent"
+      ]
+    }
+  ],
+  "proofResolution": {
+    "method": "POST",
+    "path": "/internal/v1/authz/delegation-proofs:resolve",
+    "caller": "knode-user service token with audience of authority and auth:proofs:read",
+    "requestFields": [
+      "schemaVersion",
+      "proofRef",
+      "proofKind",
+      "purpose",
+      "subject",
+      "actorService",
+      "parentGrantId",
+      "rootGrantId",
+      "expectedResource"
+    ],
+    "responseSchema": "delegation-proof-v1.schema.json",
+    "forbidden": "Never treat caller-supplied resource or proof reference as authority; resolve durable independent facts and current epoch/lease/started step."
+  },
+  "errors": {
+    "400": "Malformed, unknown or oversized request; or token budget exceeded.",
+    "401": "Invalid bearer, delegation, session or lineage.",
+    "403": "Policy, requested permission, proof or domain authority denied.",
+    "503": "Required authority, session or persistence unavailable, malformed or stale."
+  }
+}

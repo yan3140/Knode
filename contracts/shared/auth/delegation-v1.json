@@ -1,0 +1,19 @@
+{
+  "name": "shared-delegation-verifier",
+  "version": "1",
+  "module": "knode-auth",
+  "usage": [
+    "verifyNormal or verifyCheckpoint only checks local JWT signature and immutable claims; it is not authorization.",
+    "Verify the separate actor service token for the receiving audience and required permission.",
+    "For normal use pass authoritative ACTIVE Session and CurrentProof to authorize. For checkpoint use authorizeCheckpoint and enforce CheckpointCommitGuard transaction semantics.",
+    "CurrentProof is populated exclusively from authenticated current grant and domain authority checks, never from caller input."
+  ],
+  "types": [
+    "Verified",
+    "VerifiedCheckpoint",
+    "Authorized",
+    "AuthorizedCheckpoint",
+    "CheckpointCommitGuard"
+  ],
+  "contract": "../../user/auth-delegation-v1.json"
+}

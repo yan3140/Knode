@@ -81,4 +81,40 @@ public class UserConfiguration {
     @Bean com.knode.user.internal.ServiceTokens serviceTokens(SigningKeyRing keys,com.knode.user.internal.ServicePolicy policy,Clock clock) {
         return new com.knode.user.internal.ServiceTokens(keys,policy,clock);
     }
+    @Bean com.knode.user.internal.DelegationPolicy delegationPolicy(Environment env) {
+        String file=env.getProperty("KNODE_DELEGATION_POLICY_FILE"),variable=env.getProperty("KNODE_DELEGATION_POLICY_ENV");
+        if (file!=null && variable!=null) throw new IllegalStateException("Set one delegation policy source");
+        if (file==null && variable==null) return com.knode.user.internal.DelegationPolicy.disabled();
+        try {
+            String content=file!=null?java.nio.file.Files.readString(Path.of(file)):System.getenv(variable);
+            if (content==null) throw new IllegalStateException("Delegation policy environment variable missing");
+            return com.knode.user.internal.DelegationPolicy.load(content);
+        } catch (java.io.IOException e) {throw new IllegalStateException("Cannot read delegation policy");}
+    }
+    @Bean(destroyMethod="close") com.knode.user.internal.DelegationAuthorityClient delegationAuthority(Environment env,com.knode.user.internal.ServiceTokens tokens,Clock clock) {
+        var origins=new HashMap<String,java.net.URI>();
+        String knowledge=env.getProperty("KNODE_DELEGATION_KNOWLEDGE_ORIGIN"),agent=env.getProperty("KNODE_DELEGATION_AGENT_ORIGIN");
+        try {
+            if (knowledge!=null) origins.put("knode-knowledge",java.net.URI.create(knowledge));
+            if (agent!=null) origins.put("knode-agent",java.net.URI.create(agent));
+        } catch (IllegalArgumentException e) {throw new IllegalArgumentException("Invalid delegation authority origin");}
+        String file=env.getProperty("KNODE_DELEGATION_OUTBOUND_SECRET_FILE"),variable=env.getProperty("KNODE_DELEGATION_OUTBOUND_SECRET_ENV");
+        if (file!=null && variable!=null) throw new IllegalStateException("Set one delegation outbound secret source");
+        return new com.knode.user.internal.DelegationAuthorityClient(origins,audience -> {
+            try {
+                String secret=file!=null?java.nio.file.Files.readString(Path.of(file)):variable!=null?System.getenv(variable):null;
+                if (secret==null || secret.isEmpty() || secret.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>72)
+                    throw new IllegalStateException("Missing external outbound credential");
+                return tokens.issue("knode-user",secret,audience,java.util.List.of("auth:proofs:read")).accessToken();
+            } catch (java.io.IOException e) {throw new IllegalStateException("Cannot read outbound credential");}
+        },clock,java.time.Duration.ofSeconds(2));
+    }
+    @Bean com.knode.user.internal.DelegationGrantStore delegationGrantStore(org.springframework.jdbc.core.JdbcTemplate db,org.springframework.transaction.support.TransactionTemplate tx,Clock clock) {
+        return new com.knode.user.internal.DelegationGrantStore(db,tx,clock);
+    }
+    @Bean com.knode.user.internal.DelegationService delegationService(SigningKeyRing keys,Clock clock,com.knode.user.internal.DelegationPolicy policy,
+            com.knode.user.internal.DelegationAuthorityClient authority,com.knode.user.internal.DelegationGrantStore grants,
+            SessionStore.Reader sessions,com.knode.user.account.AccountService accounts,RevocationCoordinator revocations) {
+        return new com.knode.user.internal.DelegationService(keys,clock,policy,authority,grants,sessions,accounts,revocations);
+    }
 }
