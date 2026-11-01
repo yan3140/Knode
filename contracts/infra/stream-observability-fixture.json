@@ -1,0 +1,117 @@
+{
+  "name": "STREAM-OBSERVABILITY-FIXTURE",
+  "version": "0.1-candidate",
+  "status": "test-only fixture; synthetic checks complete; real Redis and User producer integration pending",
+  "boundary": "Test classes and test-scope dependencies only. This is not an Agent consumer, and never runs as part of the production artifact. It has no User database access, pause implementation or business run state.",
+  "event": {
+    "streamField": "Exactly one field named event, containing the JSON envelope.",
+    "v1": "contracts/user/session-revoked-v1.schema.json, strict, no traceContext",
+    "v2": "Candidate only: all v1 fields and values, with schemaVersion 2 and optional traceContext object containing only string traceparent. User must publish and implement this contract. No tracestate or baggage.",
+    "unknown": "Extra/missing fields, malformed envelope, unknown version or conflicting immutable fact: durable UNSUPPORTED or CONFLICT; no ACK. Missing or malformed traceparent on an otherwise valid v2 is accepted with a new root.",
+    "facts": "Exact eventId identifies the effect; a canonical SHA-256 digest of the envelope excluding traceContext detects conflicting facts. Only hashes and bounded status/attempt counts are persisted, never sid/userId or event payload."
+  },
+  "tracing": {
+    "api": "EventTraceContext SDK W3C extraction from root context, no ambient consumer parent",
+    "serviceName": "knode-stream-observability-fixture",
+    "operation": "fixture.session_revoked.consume",
+    "attributes": [
+      "knode.event.delivery_attempt",
+      "knode.fixture.result"
+    ],
+    "correlation": "Each log line contains status, attempt and trace ID, never event payload, sid, userId, credentials or raw Redis key. A sampled producer context is necessary for a backend-visible parent-based trace.",
+    "backend": "Query Jaeger GET /api/traces/<trace-id>; save response in an ignored run directory and verify CHILD_OF producer span and attempt attributes. No synthetic result is evidence of the User Logout chain."
+  },
+  "guard": {
+    "environment": "KNODE_FIXTURE_ENVIRONMENT must match verify-[a-z0-9-]{1,24}",
+    "run": "KNODE_FIXTURE_RUN must be exactly 12 lowercase hexadecimal characters unique to this run",
+    "stream": "KNODE_FIXTURE_STREAM must be the precise knode:<environment>:v1:business:<suffix>:<run> key allocated for this test, never a legacy or other environment key.",
+    "group": "KNODE_FIXTURE_GROUP must be fixture-<run>; consumer must be fixture-<run>-<1..16 lowercase alphanumeric characters>.",
+    "identity": "Explicit independent test username containing verify, password of length 16..512, explicit host/port/database/TLS. Password and JWT are never written to the manifest. No credentials are discovered, no ACLs are created and no Redis key scans occur.",
+    "endpoint": "KNODE_FIXTURE_OTLP_HTTP must be http://127.0.0.1:<port>/v1/traces or localhost equivalent; select an isolated Collector.",
+    "manifest": "knode-observability/target/stream-fixture/<run>/manifest.json is forced before any connection. It records run, exact endpoint/stream/group/consumer, process ID, local H2 path and recovery/cleanup instructions, but no password or event. A group-created marker is written only after CREATE succeeds; missing marker forbids reconnect. A crash between Redis CREATE and marker requires manual recovery from the manifest; do not resume against an unconfirmed existing group."
+  },
+  "modes": {
+    "create": "XGROUP CREATE exact-stream fixture-<run> 0-0 MKSTREAM; refuses an existing group; only after success marks this fixture as group owner.",
+    "crash": "XREADGROUP GROUP group consumer COUNT 10 STREAMS exact-stream >; after first successful inbox commit, force-flush spans and halt the disposable test JVM with exit 73 before ACK. Surefire reports an intentionally crashed fork; this is expected only when the APPLIED/DUPLICATE result and exit 73 are verified.",
+    "reclaim": "XAUTOCLAIM exact-stream group consumer 1000 <KNODE_FIXTURE_CLAIM_START, default 0-0> COUNT 10. Read reclaim_next from output and repeat with that cursor until 0-0; only APPLIED or DUPLICATE is ACKed.",
+    "poll": "XREADGROUP GROUP group consumer COUNT 10 STREAMS exact-stream >; applies and ACKs only valid nonconflicting facts.",
+    "durability": "H2 file inbox is committed with WRITE_DELAY=0 before ACK. A restart reuses the same run directory; each stream record has a persistent attempt counter. Unknown and conflicting records remain in the pending list for operator review; they are not silently accepted or automatically trimmed.",
+    "concurrency": "Use one active fixture process per run and H2 file. This fixture is a bounded verification tool, not a continuously running worker."
+  },
+  "requiredEnvironment": [
+    "KNODE_FIXTURE_ENVIRONMENT",
+    "KNODE_FIXTURE_RUN",
+    "KNODE_FIXTURE_STREAM",
+    "KNODE_FIXTURE_GROUP",
+    "KNODE_FIXTURE_CONSUMER",
+    "KNODE_FIXTURE_REDIS_HOST",
+    "KNODE_FIXTURE_REDIS_PORT",
+    "KNODE_FIXTURE_REDIS_DATABASE",
+    "KNODE_FIXTURE_REDIS_USERNAME",
+    "KNODE_FIXTURE_REDIS_PASSWORD",
+    "KNODE_FIXTURE_REDIS_TLS",
+    "KNODE_FIXTURE_OTLP_HTTP",
+    "KNODE_FIXTURE_MODE"
+  ],
+  "invocation": {
+    "entry": "com.knode.observability.fixture.stream.RealStreamFixtureTest; skipped by default",
+    "pythonCommand": "subprocess.run([mvn_path, '-B', '-ntp', '-pl', 'knode-observability', '-am', 'test', '-Dtest=RealStreamFixtureTest', '-Dsurefire.failIfNoSpecifiedTests=false', '-Dknode.fixture.real.enabled=true'], env=private_environment, check=True)",
+    "note": "In crash mode inspect Surefire's fork exit code 73 instead of requiring Maven exit 0. Set credentials only in the spawned process environment, never in arguments or saved files. No temporary Python script is needed.",
+    "steps": [
+      "Start isolated native Collector and Jaeger with fresh ports and directories. Create a fresh verify environment, precise stream and dedicated authorized credentials externally.",
+      "Invoke create once. Trigger the real User Logout after its v2 tracing integration is available and wait for its real Outbox relay; do not seed or alter User internal data.",
+      "Invoke crash, verify APPLIED and fork exit 73; keep the manifest and local H2.",
+      "After at least one second invoke reclaim with a different fixture consumer and identical run/stream/group/endpoint; verify DUPLICATE, attempt 2, single inbox row and one ACK.",
+      "Query Jaeger using the printed trace ID and verify the real User producer, relay semantics and two consumer spans; save the result without secrets.",
+      "Stop only processes created for the test. Review the manifest before cleanup. An explicitly authorized operator may XGROUP DESTROY the exact group and, only after confirming the test stream is disposable and owned, DEL the exact stream. Do not XTRIM or SCAN. Remove only the listed run directory."
+    ]
+  },
+  "redisAcl": {
+    "consumerData": [
+      "XGROUP CREATE <exact-stream> <exact-group> 0-0 MKSTREAM",
+      "XREADGROUP GROUP <exact-group> <consumer> COUNT 10 STREAMS <exact-stream> >",
+      "XAUTOCLAIM <exact-stream> <exact-group> <consumer> 1000 <cursor> COUNT 10",
+      "XACK <exact-stream> <exact-group> <record-id>"
+    ],
+    "candidateCommandGrants": [
+      "+xgroup|create",
+      "+xreadgroup",
+      "+xautoclaim",
+      "+xack"
+    ],
+    "connection": "AUTH/HELLO negotiation; Lettuce may use CLIENT SETINFO. SELECT only for an explicitly selected nonzero database. Operator must verify least privileges against the deployed Redis and the actual client version. No broad command category, SCAN, XTRIM or ACL management is required by fixture.",
+    "cleanup": "XGROUP DESTROY and DEL are separate operator-only grants, not needed by fixture; never grant them by default.",
+    "references": [
+      "https://redis.io/docs/latest/commands/xgroup-create/",
+      "https://redis.io/docs/latest/commands/xreadgroup/",
+      "https://redis.io/docs/latest/commands/xautoclaim/",
+      "https://redis.io/docs/latest/commands/xack/",
+      "https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/",
+      "https://redis.github.io/lettuce/advanced-usage/client-options/"
+    ]
+  },
+  "nativeBackends": {
+    "versionsAndHashes": "deploy/microservices/observability/native-sources.json",
+    "launcher": "deploy/microservices/observability/native-launch.json",
+    "collector": [
+      "otelcol.exe",
+      "--config=<absolute-worktree>/deploy/microservices/observability/collector.yaml"
+    ],
+    "collectorEnv": [
+      "KNODE_OTLP_GRPC_BIND=127.0.0.1:<fresh-port>",
+      "KNODE_OTLP_HTTP_BIND=127.0.0.1:<fresh-port>",
+      "KNODE_COLLECTOR_HEALTH_BIND=127.0.0.1:<fresh-port>",
+      "KNODE_COLLECTOR_METRICS_PORT=<fresh-port>",
+      "KNODE_JAEGER_OTLP_ENDPOINT=http://127.0.0.1:<jaeger-otlp-http-port>"
+    ],
+    "jaeger": "Use the full explicit loopback flags and process environment from native-launch.json, replacing every port independently; set OTEL_EXPORTER_OTLP_ENDPOINT to that Jaeger gRPC port and OTEL_TRACES_SAMPLER=always_off.",
+    "prometheus": "Use the loopback executable arguments from native-launch.json and a private copy of prometheus.yaml with fresh scrape/listen ports and an isolated tsdb directory.",
+    "h2": "H2 and Lettuce are Maven test dependencies of knode-observability; no Docker or WSL required."
+  },
+  "pending": [
+    "User must publish compatible SessionRevoked v2 and persist validated traceparent at the correct producer span, while replaying already serialized v1 unchanged.",
+    "Controller must provide the authorized exact stream, dedicated verify credentials and real User application/runtime inputs; run the opt-in Redis scenario and real Logout-to-Jaeger chain.",
+    "Validate deployed Redis ACL command details and native TLS independently; local RESP substitution does not prove either.",
+    "No claim is made about Agent business consumption, pause/checkpoint behavior, or downstream completion."
+  ]
+}
