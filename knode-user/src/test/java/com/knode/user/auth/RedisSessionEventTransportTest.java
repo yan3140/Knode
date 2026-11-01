@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.connection.stream.RecordId;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StreamOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.SessionCallback;
@@ -89,6 +90,80 @@ class RedisSessionEventTransportTest {
                 .withProperty("KNODE_SESSION_EVENTS_PROBE_KEY","knode:test:v1:events:probe");
         assertThrows(IllegalArgumentException.class,()->new RedisSessionEventTransport(env));
     }
+    private static MockEnvironment configuration(String environment,String stream,String probe) {
+        var env=new MockEnvironment().withProperty("KNODE_AUTH_ENVIRONMENT",environment)
+                .withProperty("KNODE_SESSION_EVENTS_REDIS_USERNAME","events-only")
+                .withProperty("KNODE_SESSION_EVENTS_REDIS_HOST","127.0.0.1")
+                .withProperty("KNODE_SESSION_EVENTS_REDIS_PORT","6379")
+                .withProperty("KNODE_SESSION_EVENTS_REDIS_PASSWORD","synthetic-test-only")
+                .withProperty("KNODE_SESSION_EVENTS_REDIS_TLS","false")
+                .withProperty("KNODE_SESSION_EVENTS_PROBE_PREFIX",probe);
+        if (stream!=null) env.setProperty("KNODE_SESSION_EVENTS_STREAM_KEY",stream);
+        return env;
+    }
+
+    @Test void rejectsForeignLegacyAndProductionBusinessKeysBeforeConnectionFactoryExists() {
+        String events="knode:prod:v1:events:";
+        String testEvents="knode:verify-test:v1:events:";
+        String[][] bad={
+                {"prod","knode:other:v1:events:session",events+"probe"},
+                {"prod",events+"session","knode:other:v1:events:probe"},
+                {"prod","login:blog:42",events+"probe"},
+                {"prod",events+"session","blog:legacy:probe"},
+                {"prod","knode:prod:v1:business:stream",events+"probe"},
+                {"prod",events+"session","knode:prod:v1:business:probe"},
+                {"prod","knode:prod:v1:events-extra:stream",events+"probe"},
+                {"prod",events,events+"probe"},
+                {"prod",events+"session",events},
+                {"verify-test","knode:verify-other:v1:business:stream",testEvents+"probe"},
+                {"verify-test",testEvents+"session","knode:verify-other:v1:business:probe"},
+                {"verify-test","knode:prod:v1:events:session",testEvents+"probe"},
+                {"verify-","knode:verify-:v1:business:stream","knode:verify-:v1:business:probe"}
+        };
+        try (var factories=mockConstruction(LettuceConnectionFactory.class)) {
+            for (String[] item:bad) {
+                var failure=assertThrows(IllegalArgumentException.class,() ->
+                        new RedisSessionEventTransport(configuration(item[0],item[1],item[2])));
+                assertEquals("Distinct stream and probe prefixes within the current environment are required",failure.getMessage());
+            }
+            assertTrue(factories.constructed().isEmpty(),"invalid keys must be rejected before a connection factory is created");
+        }
+    }
+
+    @Test void allowsCurrentEnvironmentEventsAndVerifyOnlyBusinessOverridesWithoutNetwork() {
+        String[][] accepted={
+                {"prod",null,"knode:prod:v1:events:probe"},
+                {"prod","knode:prod:v1:events:session","knode:prod:v1:events:probe"},
+                {"verify-test","knode:verify-test:v1:events:session","knode:verify-test:v1:events:probe"},
+                {"verify-test","knode:verify-test:v1:business:relay","knode:verify-test:v1:business:probe"},
+                {"verify-test","knode:verify-test:v1:events:session","knode:verify-test:v1:business:probe"}
+        };
+        try (var factories=mockConstruction(LettuceConnectionFactory.class)) {
+            for (String[] item:accepted) {
+                var transport=assertDoesNotThrow(() -> new RedisSessionEventTransport(configuration(item[0],item[1],item[2])));
+                assertTrue(transport.enabled());transport.close();
+            }
+            assertEquals(accepted.length,factories.constructed().size());
+            for (var factory:factories.constructed()) {
+                verify(factory).start();verify(factory).destroy();verify(factory,never()).getConnection();
+            }
+        }
+    }
+
+    @Test @SuppressWarnings("unchecked") void defaultStreamRemainsCurrentEnvironmentSessionStream() {
+        StreamOperations<String,Object,Object> ops=mock(StreamOperations.class);
+        when(ops.add(eq("knode:prod:v1:events:session"),anyMap())).thenReturn(RecordId.of("1-0"));
+        try (var factories=mockConstruction(LettuceConnectionFactory.class);
+             var templates=mockConstruction(StringRedisTemplate.class,(mock,context) -> when(mock.opsForStream()).thenReturn(ops))) {
+            var transport=new RedisSessionEventTransport(configuration("prod",null,"knode:prod:v1:events:probe"));
+            try {
+                transport.publish("synthetic-envelope");
+                verify(ops).add("knode:prod:v1:events:session",Map.of("event","synthetic-envelope"));
+                verify(factories.constructed().get(0),never()).getConnection();
+            } finally {transport.close();}
+        }
+    }
+
     @Test void refusesUsingSessionWriterIdentityBeforeConnecting() {
         var env=new MockEnvironment().withProperty("KNODE_AUTH_ENVIRONMENT","test")
                 .withProperty("KNODE_SESSION_EVENTS_REDIS_USERNAME","shared")

@@ -29,9 +29,9 @@ public final class RedisSessionEventTransport implements SessionEventTransport {
         if (configuredPrefix!=null && legacyPrefix!=null) throw new IllegalArgumentException("Set one probe prefix");
         probePrefix=configuredPrefix!=null?configuredPrefix:legacyPrefix;
         if (!validKey(stream) || !validKey(probePrefix) || probePrefix.length()>218
-                || stream.equals(probePrefix) || stream.startsWith(probePrefix+":")
-                || stream.matches("knode:[a-z0-9-]+:v1:auth:.*") || (probePrefix+":").matches("knode:[a-z0-9-]+:v1:auth:.*"))
-            throw new IllegalArgumentException("Distinct non-auth stream and probe prefixes required");
+                || !allowedNamespace(environment,stream) || !allowedNamespace(environment,probePrefix)
+                || stream.equals(probePrefix) || stream.startsWith(probePrefix+":"))
+            throw new IllegalArgumentException("Distinct stream and probe prefixes within the current environment are required");
         int port=Integer.parseInt(required(env,"KNODE_SESSION_EVENTS_REDIS_PORT"));
         int db=Integer.parseInt(env.getProperty("KNODE_SESSION_EVENTS_REDIS_DATABASE","0"));
         if (port<1 || port>65535 || db<0) throw new IllegalArgumentException("Invalid event Redis configuration");
@@ -50,6 +50,13 @@ public final class RedisSessionEventTransport implements SessionEventTransport {
         String value=env.getProperty(key);if (value==null || value.isBlank()) throw new IllegalArgumentException("Missing "+key);return value;
     }
     private static boolean validKey(String key) {return key!=null && key.matches("[A-Za-z0-9:_-]{1,255}");}
+    private static boolean allowedNamespace(String environment,String key) {
+        String events="knode:"+environment+":v1:events:";
+        if (key.startsWith(events) && key.length()>events.length()) return true;
+        String business="knode:"+environment+":v1:business:";
+        return environment.startsWith("verify-") && environment.length()>"verify-".length()
+                && key.startsWith(business) && key.length()>business.length();
+    }
     @Override public boolean enabled() {return true;}
     @Override public void publish(String envelope) {append(redis,stream,envelope);}
     static void append(StringRedisTemplate redis,String stream,String envelope) {

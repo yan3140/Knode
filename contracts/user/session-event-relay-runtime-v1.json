@@ -81,5 +81,11 @@
     "revocation": "Dedicated revocationScheduler with exactly one worker for bounded periodic session revocation recovery.",
     "event": "Separate sessionEventScheduler with exactly one worker for bounded relay and retention cleanup; blocked event delivery cannot occupy the revocation scheduler.",
     "tasks": "Only fixed-delay scheduled tasks are registered; relay processes at most 50 items per scheduled batch. No dynamically created thread pool."
+  },
+  "namespacePolicy": {
+    "production": "Both the stream key and probe prefix must have a nonempty suffix under knode:<current KNODE_AUTH_ENVIRONMENT>:v1:events:. The stream defaults to knode:<environment>:v1:events:session.",
+    "verifyOnly": "When and only when the current environment begins verify- and has a nonempty suffix, an explicitly configured stream key or probe prefix may instead use knode:<same environment>:v1:business: with a nonempty suffix.",
+    "validation": "Reject other environments, legacy keys, production business keys and empty namespace suffixes before creating a Redis connection factory. Stream and probe prefix must remain distinct and non-overlapping.",
+    "acl": "These checks do not grant access. Restrict the dedicated Redis identity to the specific approved stream key and probe prefix; do not broaden ACLs to unrelated keys."
   }
 }
