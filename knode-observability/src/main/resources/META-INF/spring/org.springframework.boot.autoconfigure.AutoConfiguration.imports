@@ -1,0 +1,3 @@
+com.knode.observability.ObservabilityAutoConfiguration
+com.knode.observability.ReactiveObservationConfiguration
+com.knode.observability.ServletObservationConfiguration

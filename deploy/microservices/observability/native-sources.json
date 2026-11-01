@@ -1,0 +1,25 @@
+{
+  "description": "Official release assets for optional Windows-native local verification; binaries are not tracked. SHA-256 values from each official GitHub release asset.",
+  "assets": [
+    {
+      "name": "otelcol_0.129.1_windows_amd64.tar.gz",
+      "url": "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.129.1/otelcol_0.129.1_windows_amd64.tar.gz",
+      "sha256": "a298ca03ed4b71db68a3b057c09b70f7aeab2ec514d143aeead946a714803ae4",
+      "size": 38412485,
+      "reportedRuntimeVersion": "0.129.0",
+      "versionNote": "The official v0.129.1 asset reports 0.129.0 via --version; pin and verify the exact release URL and SHA-256."
+    },
+    {
+      "name": "prometheus-3.4.1.windows-amd64.zip",
+      "url": "https://github.com/prometheus/prometheus/releases/download/v3.4.1/prometheus-3.4.1.windows-amd64.zip",
+      "sha256": "f69bd9a66d640baa24688e6954880e9af6567b897662a65b50828dd900513543",
+      "size": 121161885
+    },
+    {
+      "name": "jaeger-1.70.0-windows-amd64.zip",
+      "url": "https://github.com/jaegertracing/jaeger/releases/download/v1.70.0/jaeger-1.70.0-windows-amd64.zip",
+      "sha256": "fc043075062d36a4dc72c16676e7395e3ace2387f46d309ed429ceb503646d32",
+      "size": 149303620
+    }
+  ]
+}

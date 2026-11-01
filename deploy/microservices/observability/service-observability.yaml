@@ -1,0 +1,45 @@
+# Import explicitly in a Boot 3 service; set the environment variables before enabling.
+spring:
+  reactor:
+    context-propagation: auto
+knode:
+  observability:
+    enabled: ${KNODE_OBSERVABILITY_ENABLED:false}
+    environment: ${KNODE_ENVIRONMENT:}
+    version: ${KNODE_SERVICE_VERSION:}
+management:
+  server:
+    address: 127.0.0.1
+    port: ${KNODE_MANAGEMENT_PORT:19090}
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  tracing:
+    enabled: ${KNODE_OBSERVABILITY_ENABLED:false}
+    sampling:
+      probability: ${KNODE_TRACE_SAMPLE_RATIO:0.1}
+    baggage:
+      enabled: false
+    propagation:
+      type: w3c
+    opentelemetry:
+      export:
+        max-queue-size: 512
+        max-batch-size: 128
+        schedule-delay: 1s
+        timeout: 2s
+  otlp:
+    tracing:
+      endpoint: ${KNODE_OTLP_TRACES_ENDPOINT:}
+      timeout: 2s
+      connect-timeout: 1s
+  opentelemetry:
+    resource-attributes:
+      "[service.name]": ${spring.application.name}
+      "[service.version]": ${KNODE_SERVICE_VERSION:}
+      "[deployment.environment.name]": ${KNODE_ENVIRONMENT:}
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true

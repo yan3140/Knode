@@ -2,6 +2,8 @@ server:
   port: ${GATEWAY_PORT:18089}
   forward-headers-strategy: none
 spring:
+  reactor:
+    context-propagation: auto
   application:
     name: knode-gateway
   config:
@@ -20,6 +22,34 @@ spring:
         server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
         namespace: ${NACOS_CONFIG_NAMESPACE:${NACOS_NAMESPACE:}}
 management:
+  tracing:
+    enabled: ${KNODE_OBSERVABILITY_ENABLED:false}
+    sampling:
+      probability: ${KNODE_TRACE_SAMPLE_RATIO:0.1}
+    baggage:
+      enabled: false
+    propagation:
+      type: w3c
+    opentelemetry:
+      export:
+        max-queue-size: 512
+        max-batch-size: 128
+        schedule-delay: 1s
+        timeout: 2s
+  otlp:
+    tracing:
+      endpoint: ${KNODE_OTLP_TRACES_ENDPOINT:}
+      timeout: 2s
+      connect-timeout: 1s
+  opentelemetry:
+    resource-attributes:
+      "[service.name]": ${spring.application.name}
+      "[service.version]": ${KNODE_SERVICE_VERSION:}
+      "[deployment.environment.name]": ${KNODE_ENVIRONMENT:}
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
   health:
     redis:
       enabled: false
@@ -35,6 +65,10 @@ management:
       exposure:
         include: health
 knode:
+  observability:
+    enabled: ${KNODE_OBSERVABILITY_ENABLED:false}
+    environment: ${KNODE_ENVIRONMENT:}
+    version: ${KNODE_SERVICE_VERSION:}
   governance:
     nacos:
       enabled: ${KNODE_GOV_NACOS_ENABLED:false}

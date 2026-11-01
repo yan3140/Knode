@@ -242,6 +242,38 @@ class NacosRuleBridgeTest {
                 .content(body + " \n"))).path("code").asInt());
     }
 
+    @Test void officialApiRadioStringsPublishAsNumericAndOtherStringsFail() throws Exception {
+        String body = "{\"app\":\"demo\",\"apiName\":\"ui-api\",\"predicateItems\":[{\"pattern\":\"/api/**\",\"matchStrategy\":\"1\"}]}";
+        MvcResult response = perform(post("/gateway/api/new.json").param("app","demo")
+                .header("X-Nacos-Version",md5("[]")).contentType(MediaType.APPLICATION_JSON).content(body));
+        assertEquals(0, content(response).path("code").asInt(), response.getResponse().getContentAsString());
+        JsonNode value = json.readTree(store.get("demo.gw-api-group.json")).get(0)
+                .path("predicateItems").get(0).path("matchStrategy");
+        assertTrue(value.isIntegralNumber());
+        assertEquals(1, value.asInt());
+        for (String strategy : new String[] {"0", "2"}) {
+            store.put("demo.gw-api-group.json", "[]");
+            String candidate = body.replace("\"1\"", "\"" + strategy + "\"").replace("/api/**", "/api/a.*");
+            response = perform(post("/gateway/api/new.json").param("app","demo")
+                    .header("X-Nacos-Version",md5("[]")).contentType(MediaType.APPLICATION_JSON).content(candidate));
+            assertEquals(0, content(response).path("code").asInt(), strategy);
+            JsonNode stored = json.readTree(store.get("demo.gw-api-group.json")).get(0)
+                    .path("predicateItems").get(0).path("matchStrategy");
+            assertTrue(stored.isIntegralNumber());
+            assertEquals(Integer.parseInt(strategy), stored.asInt());
+        }
+        store.put("demo.gw-api-group.json", "[]");
+        for (String bad : new String[] {"01", "9", "bad"}) {
+            response = perform(post("/gateway/api/new.json").param("app","demo")
+                    .header("X-Nacos-Version",md5("[]")).contentType(MediaType.APPLICATION_JSON)
+                    .content(body.replace("\"1\"", "\"" + bad + "\"")));
+            assertNotEquals(0, content(response).path("code").asInt(), bad);
+            assertEquals("[]", store.get("demo.gw-api-group.json"));
+        }
+        store.put("demo.gw-api-group.json", "[{\"apiName\":\"bad\",\"predicateItems\":[{\"pattern\":\"/x\",\"matchStrategy\":\"1\"}]}]");
+        assertNotEquals(0, content(perform(get("/gateway/api/list.json").param("app","demo"))).path("code").asInt());
+    }
+
     private MvcResult perform(MockHttpServletRequestBuilder request) throws Exception { return mvc.perform(request).andReturn(); }
     private JsonNode content(MvcResult result) throws Exception { return json.readTree(result.getResponse().getContentAsString()); }
     private static String md5(String value) throws Exception {

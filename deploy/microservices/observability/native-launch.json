@@ -1,0 +1,39 @@
+{
+  "notes": [
+    "Windows native examples; extract only verified assets listed in native-sources.json. Run in isolated test directories and stop only processes started for this instance.",
+    "All listeners explicitly bind loopback; set individual flags to choose other dedicated ports. Jaeger in-memory storage is ephemeral and bounded.",
+    "Prometheus scrape targets in prometheus.yaml are local defaults and can be changed in a private generated copy.",
+    "Set OTEL_EXPORTER_OTLP_ENDPOINT to the same isolated Jaeger gRPC port if overriding the default, so Jaeger self-telemetry cannot contact an unrelated localhost collector."
+  ],
+  "jaeger": {
+    "environment": {
+      "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:14317",
+      "OTEL_TRACES_SAMPLER": "always_off"
+    },
+    "executable": "jaeger-all-in-one.exe",
+    "arguments": [
+      "--memory.max-traces=10000",
+      "--collector.otlp.grpc.host-port=127.0.0.1:14317",
+      "--collector.otlp.http.host-port=127.0.0.1:14318",
+      "--query.grpc-server.host-port=127.0.0.1:16685",
+      "--query.http-server.host-port=127.0.0.1:16686",
+      "--collector.grpc-server.host-port=127.0.0.1:14250",
+      "--collector.http-server.host-port=127.0.0.1:14268",
+      "--admin.http.host-port=127.0.0.1:14269"
+    ]
+  },
+  "collector": {
+    "executable": "otelcol.exe",
+    "arguments": [
+      "--config=deploy/microservices/observability/collector.yaml"
+    ]
+  },
+  "prometheus": {
+    "executable": "prometheus.exe",
+    "arguments": [
+      "--config.file=deploy/microservices/observability/prometheus.yaml",
+      "--storage.tsdb.path=<isolated-data-directory>",
+      "--web.listen-address=127.0.0.1:19091"
+    ]
+  }
+}

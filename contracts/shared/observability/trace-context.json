@@ -1,0 +1,21 @@
+{
+  "version": "0.1-draft",
+  "status": "unfrozen",
+  "scope": "optional immutable event trace context; candidate for future producer and consumer integration",
+  "schema": {
+    "traceContext": {
+      "type": "object",
+      "optional": true,
+      "additionalProperties": false,
+      "fields": {
+        "traceparent": "W3C Trace Context, validated and normalized by the OpenTelemetry SDK"
+      }
+    }
+  },
+  "privacy": "This version deliberately omits tracestate because it is opaque and could contain private vendor data. Do not store or propagate JWT, sid, passwords, personal payloads or baggage in traceContext.",
+  "producer": "At the time the immutable fact is recorded call EventTraceContext.captureCurrent(); persist traceparent with that fact. If no valid current context, omit traceContext.",
+  "relay": "Transmit the stored immutable traceparent unchanged on each retry. Never capture the relay thread as the event producer.",
+  "consumer": "Validate with EventTraceContext.fromStored, then startConsumer with the persisted context and a bounded operation name and delivery attempt. Missing or invalid context starts a new root, never inherits ambient relay/consumer-thread context. End the returned span.",
+  "delivery": "At-least-once retries may create multiple consumer spans, each with knode.event.delivery_attempt >= 1 and the same producer parent. Span export is best effort and does not prove business delivery.",
+  "integration": "Java API implemented; fixture queue tested. User Outbox and Redis Stream are not yet integrated or verified."
+}

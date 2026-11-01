@@ -1,1 +1,37 @@
-{"version":"0.1-draft","status":"unfrozen","requestId":{"header":"X-Request-Id","pattern":"[A-Za-z0-9._-]{1,64}","invalid":"regenerate","duplicate":"reject"},"tracing":"pending","sentinelPublishing":"pending"}
+{
+  "version": "0.2-draft",
+  "status": "unfrozen",
+  "requestId": {
+    "header": "X-Request-Id",
+    "pattern": "[A-Za-z0-9._-]{1,64}",
+    "invalid": "regenerate",
+    "duplicate": "gateway rejects; servlet regenerates",
+    "identity": "correlation only; never authorization"
+  },
+  "java": {
+    "coordinate": "com.lx:knode-observability:1.0-SNAPSHOT",
+    "default": "disabled; explicit service name, environment, version, HTTP(S) OTLP endpoint and management.tracing.enabled required",
+    "transport": "W3C traceparent propagation through Boot-managed HTTP instrumentation. Malformed traceparent is ignored by the SDK. Controlled servlet outbound propagation uses Boot-managed RestClient.Builder.",
+    "correlation": "traceId/spanId from tracing context; request ID recorded as high-cardinality knode.request_id span attribute only, never a metric label. Servlet filter also binds requestId in MDC during synchronous handling.",
+    "privacy": "No request/response bodies, credential headers, JWT, sid, passwords, or user IDs as instrumentation attributes; baggage disabled in example config. Caller-owned code must not add sensitive values.",
+    "resource": "explicit service.name, service.version and deployment.environment.name configured in template",
+    "bounds": "Gateway SDK max queue 512 spans, max batch 128, schedule 1s, export timeout 2s, connect timeout 1s. Overflow drops spans; observability is best effort.",
+    "metrics": "Spring Boot http.server.requests uses method, status, outcome, exception and a framework route template when available; Gateway may report UNKNOWN. Histogram enabled. Never add raw path IDs, user IDs, sids or request IDs as metric labels.",
+    "management": "Expose health and prometheus on an explicitly configured loopback management address and independent port; do not expose prometheus via a public gateway route.",
+    "enabledServices": "Gateway code wired but opt-in; ordinary Java service must add the module and configuration. No user or Agent business service has been changed."
+  },
+  "python": "Independent FastAPI fixture uses existing read-only yan_agent.observability.tracing with W3C and OTLP HTTP. OTEL_BSP_* and OTEL_EXPORTER_OTLP_TRACES_TIMEOUT in the environment template bound its queue and HTTP timeout. This does not prove the Agent business pipeline.",
+  "async": "See contracts/shared/observability/trace-context.json. A synthetic in-process queue is verified; no claim of User Outbox or Redis Stream integration.",
+  "collector": {
+    "receiver": "OTLP gRPC and HTTP on loopback by default",
+    "memoryLimitMiB": 128,
+    "spikeLimitMiB": 32,
+    "batchMaxSpans": 256,
+    "queueRequests": 64,
+    "exportTimeoutSeconds": 2,
+    "retryMaxSeconds": 30,
+    "overflow": "drop or reject telemetry; no business request should wait on exporter"
+  },
+  "local": "Collector, Jaeger and Prometheus config and pinned official Windows-native sources: deploy/microservices/observability/; binaries and test evidence remain untracked.",
+  "health": "Gateway and service health do not depend on telemetry export. Collector health_check reports its own process state and is not proof that Jaeger has received spans."
+}

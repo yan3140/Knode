@@ -8,6 +8,7 @@ import java.util.Locale;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import org.springframework.core.Ordered;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -21,8 +22,22 @@ public class IngressFilter implements WebFilter, Ordered {
     private static final Pattern REQUEST_ID = Pattern.compile("[A-Za-z0-9._-]{1,64}");
     private static final List<String> ID_PREFIXES = List.of("x-internal-", "x-user-", "x-principal-", "x-service-", "x-identity-", "x-authenticated-");
     private final AccessGate accessGate;
-    public IngressFilter(AccessGate accessGate) { this.accessGate = accessGate; }
+    private final int managementPort;
+    private final int serverPort;
+    public IngressFilter(AccessGate accessGate, @Value("${management.server.port:-1}") int managementPort,
+            @Value("${server.port:8080}") int serverPort) {
+        this.accessGate = accessGate; this.managementPort = managementPort; this.serverPort = serverPort;
+    }
     @Override public int getOrder() { return Ordered.HIGHEST_PRECEDENCE; }
+
+    private boolean isLocalManagementMetrics(ServerWebExchange exchange, String path) {
+        var local = exchange.getRequest().getLocalAddress();
+        var remote = exchange.getRequest().getRemoteAddress();
+        return path.equals("/actuator/prometheus") && managementPort > 0 && managementPort != serverPort
+                && local != null && local.getAddress() != null && local.getAddress().isLoopbackAddress()
+                && local.getPort() == managementPort && remote != null && remote.getAddress() != null
+                && remote.getAddress().isLoopbackAddress();
+    }
 
     private boolean untrustedHeader(String name) {
         String n = name.toLowerCase(Locale.ROOT);
@@ -54,7 +69,8 @@ public class IngressFilter implements WebFilter, Ordered {
             if (credential) headers.remove("token");
             headers.set("X-Request-Id", id);
         }).build();
-        boolean management = path.equals("/actuator/health") || path.startsWith("/actuator/health/");
+        boolean management = path.equals("/actuator/health") || path.startsWith("/actuator/health/")
+                || isLocalManagementMetrics(exchange, path);
         if (management) return chain.filter(exchange.mutate().request(request).build());
         return accessGate.authorize(request)
                 .then(Mono.defer(() -> chain.filter(exchange.mutate().request(request).build())))

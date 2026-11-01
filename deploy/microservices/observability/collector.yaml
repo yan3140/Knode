@@ -1,0 +1,47 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:KNODE_OTLP_GRPC_BIND:-127.0.0.1:4317}
+      http:
+        endpoint: ${env:KNODE_OTLP_HTTP_BIND:-127.0.0.1:4318}
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 128
+    spike_limit_mib: 32
+  batch:
+    timeout: 1s
+    send_batch_size: 128
+    send_batch_max_size: 256
+exporters:
+  otlphttp/jaeger:
+    endpoint: ${env:KNODE_JAEGER_OTLP_ENDPOINT:-http://127.0.0.1:14318}
+    timeout: 2s
+    sending_queue:
+      enabled: true
+      queue_size: 64
+      num_consumers: 2
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
+extensions:
+  health_check:
+    endpoint: ${env:KNODE_COLLECTOR_HEALTH_BIND:-127.0.0.1:13133}
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: ${env:KNODE_COLLECTOR_METRICS_PORT:-18888}
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/jaeger]

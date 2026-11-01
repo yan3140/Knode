@@ -104,7 +104,7 @@ public class NacosRuleBridge implements HandlerInterceptor {
             ArrayNode next = current.deepCopy();
             ObjectNode result = mapper.createObjectNode();
             if (create) {
-                JsonNode converted = toRule(kind, input);
+                JsonNode converted = toRule(kind, normalizeUiRequest(kind, input));
                 next.add(converted);
                 result = toUi(kind, app, req, converted, id(kind, app, next.size()-1, converted));
             } else {
@@ -128,7 +128,7 @@ public class NacosRuleBridge implements HandlerInterceptor {
                         if (!java.util.Arrays.asList("id","app","ip","port","gmtCreate","gmtModified").contains(field.getKey()))
                             merged.set(field.getKey(), field.getValue());
                     }
-                    JsonNode converted = toRule(kind, merged);
+                    JsonNode converted = toRule(kind, normalizeUiRequest(kind, merged));
                     next.set(found, converted);
                     result = toUi(kind, app, req, converted, id(kind, app, found, converted));
                 }
@@ -288,6 +288,20 @@ public class NacosRuleBridge implements HandlerInterceptor {
                     throw new IllegalArgumentException("Invalid degrade rule");
             }
         }
+    }
+
+    /** The pinned official Angular radio controls serialize 0/1/2 as strings. */
+    private ObjectNode normalizeUiRequest(String kind, ObjectNode input) {
+        if (!"gw-api-group".equals(kind)) return input;
+        ObjectNode copy = input.deepCopy();
+        JsonNode items = copy.get("predicateItems");
+        if (items != null && items.isArray()) for (JsonNode item : items) {
+            if (!item.isObject()) continue;
+            JsonNode strategy = item.get("matchStrategy");
+            if (strategy != null && strategy.isTextual() && strategy.asText().matches("[012]"))
+                ((ObjectNode) item).put("matchStrategy", Integer.parseInt(strategy.asText()));
+        }
+        return copy;
     }
 
     private ObjectNode normalizeApi(ObjectNode source) {
