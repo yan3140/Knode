@@ -1,6 +1,7 @@
 package com.knode.gateway;
 
 import com.knode.auth.UserTokenVerifier;
+import io.lettuce.core.SslVerifyMode;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -54,14 +55,17 @@ public class AuthenticationConfiguration {
             @Value("${knode.gateway.auth.redis-username:}") String username,
             @Value("${knode.gateway.auth.redis-password:}") String password,
             @Value("${knode.gateway.auth.redis-database:0}") int database,
-            @Value("${knode.gateway.auth.timeout-ms:1000}") long timeoutMs) {
+            @Value("${knode.gateway.auth.timeout-ms:1000}") long timeoutMs,
+            @Value("${knode.gateway.auth.redis-tls:true}") boolean tls) {
         if (host.isBlank() || username.isBlank() || password.isBlank() || port < 1 || port > 65535 || database < 0 || timeoutMs < 1 || timeoutMs > 10000)
             throw new IllegalArgumentException("Authentication Redis configuration incomplete");
         RedisStandaloneConfiguration config = new RedisStandaloneConfiguration(host, port);
         config.setDatabase(database);
         if (!username.isBlank()) config.setUsername(username);
         if (!password.isBlank()) config.setPassword(RedisPassword.of(password));
-        return new LettuceConnectionFactory(config, LettuceClientConfiguration.builder().commandTimeout(Duration.ofMillis(timeoutMs)).build());
+        var client = LettuceClientConfiguration.builder().commandTimeout(Duration.ofMillis(timeoutMs));
+        if (tls) client.useSsl().verifyPeer(SslVerifyMode.FULL);
+        return new LettuceConnectionFactory(config, client.build());
     }
 
     @Bean

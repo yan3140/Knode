@@ -20,7 +20,7 @@ class RedisSessionReaderTest {
     @Test void reactiveReaderUsesNamespacedGetAndNoWrites() throws Exception {
         try (RespPeer peer = new RespPeer()) {
             var factory = new AuthenticationConfiguration().authRedisConnection(
-                    "127.0.0.1", peer.port(), "test-reader", "test-password", 0, 1000);
+                    "127.0.0.1", peer.port(), "test-reader", "test-password", 0, 1000, false);
             factory.afterPropertiesSet();
             factory.start();
             try {

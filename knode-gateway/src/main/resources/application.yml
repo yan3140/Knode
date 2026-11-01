@@ -90,4 +90,5 @@ knode:
       redis-username: ${KNODE_GATEWAY_AUTH_REDIS_USERNAME:}
       redis-password: ${KNODE_GATEWAY_AUTH_REDIS_PASSWORD:}
       redis-database: ${KNODE_GATEWAY_AUTH_REDIS_DATABASE:0}
+      redis-tls: ${KNODE_GATEWAY_AUTH_REDIS_TLS:true}
       timeout-ms: ${KNODE_GATEWAY_AUTH_TIMEOUT_MS:1000}
