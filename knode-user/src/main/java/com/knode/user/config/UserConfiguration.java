@@ -91,7 +91,9 @@ public class UserConfiguration {
             return com.knode.user.internal.DelegationPolicy.load(content);
         } catch (java.io.IOException e) {throw new IllegalStateException("Cannot read delegation policy");}
     }
-    @Bean(destroyMethod="close") com.knode.user.internal.DelegationAuthorityClient delegationAuthority(Environment env,com.knode.user.internal.ServiceTokens tokens,Clock clock) {
+    @Bean(destroyMethod="close") com.knode.user.internal.DelegationAuthorityClient delegationAuthority(Environment env,com.knode.user.internal.ServiceTokens tokens,Clock clock,
+            org.springframework.beans.factory.ObjectProvider<com.knode.governance.GovernedCall> governed,
+            org.springframework.beans.factory.ObjectProvider<io.opentelemetry.api.OpenTelemetry> telemetry) {
         var origins=new HashMap<String,java.net.URI>();
         String knowledge=env.getProperty("KNODE_DELEGATION_KNOWLEDGE_ORIGIN"),agent=env.getProperty("KNODE_DELEGATION_AGENT_ORIGIN");
         try {
@@ -107,7 +109,8 @@ public class UserConfiguration {
                     throw new IllegalStateException("Missing external outbound credential");
                 return tokens.issue("knode-user",secret,audience,java.util.List.of("auth:proofs:read")).accessToken();
             } catch (java.io.IOException e) {throw new IllegalStateException("Cannot read outbound credential");}
-        },clock,java.time.Duration.ofSeconds(2));
+        },clock,java.time.Duration.ofSeconds(2),governed.getIfAvailable(),
+                env.getProperty("knode.observability.enabled",Boolean.class,false)?telemetry.getIfAvailable():null);
     }
     @Bean com.knode.user.internal.DelegationGrantStore delegationGrantStore(org.springframework.jdbc.core.JdbcTemplate db,org.springframework.transaction.support.TransactionTemplate tx,Clock clock) {
         return new com.knode.user.internal.DelegationGrantStore(db,tx,clock);

@@ -18,6 +18,9 @@ public class SessionEventRelay {
     private final SessionEventTransport transport;
     private final Clock clock;
     private final int maxAttempts,retentionDays;
+    private volatile com.knode.user.config.ControlledRelaySettings relaySettings;
+    @org.springframework.beans.factory.annotation.Autowired
+    void relaySettings(com.knode.user.config.ControlledRelaySettings settings) {this.relaySettings=settings;}
     public SessionEventRelay(JdbcTemplate db,TransactionTemplate tx,SessionEventTransport transport,Clock clock,Environment env) {
         this.db=db;this.tx=tx;this.transport=transport;this.clock=clock;
         maxAttempts=Integer.parseInt(env.getProperty("KNODE_SESSION_EVENTS_MAX_ATTEMPTS","5"));
@@ -155,7 +158,7 @@ public class SessionEventRelay {
     @Scheduled(scheduler="sessionEventScheduler",fixedDelayString="${KNODE_SESSION_EVENTS_POLL_MS:5000}",initialDelayString="${KNODE_SESSION_EVENTS_INITIAL_MS:5000}")
     public void poll() {
         if (!enabled()) return;
-        try {relay(50);} catch (RuntimeException ignored) { /* Persisted lease and due time enable later recovery. */ }
+        try {relay(relaySettings==null?50:relaySettings.batchSize());} catch (RuntimeException ignored) { /* Persisted lease and due time enable later recovery. */ }
     }
     @Scheduled(scheduler="sessionEventScheduler",fixedDelayString="${KNODE_SESSION_EVENTS_CLEANUP_POLL_MS:86400000}",initialDelayString="${KNODE_SESSION_EVENTS_CLEANUP_INITIAL_MS:86400000}")
     public void cleanupPoll() {try {cleanup(100);} catch (RuntimeException ignored) { /* Retry next scheduled pass. */ }}

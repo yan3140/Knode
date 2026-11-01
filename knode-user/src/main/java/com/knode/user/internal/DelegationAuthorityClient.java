@@ -11,7 +11,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicReference;
 
 /** Only configured authority origins are used; the response is read with a hard byte limit. */
 public final class DelegationAuthorityClient implements AutoCloseable {
@@ -25,6 +24,8 @@ public final class DelegationAuthorityClient implements AutoCloseable {
     private final TokenSource tokenSource;
     private final Clock clock;
     private final Duration timeout;
+    private final com.knode.governance.GovernedCall governed;
+    private final io.opentelemetry.api.OpenTelemetry telemetry;
     private final HttpClient http;
     private final ThreadPoolExecutor workers;
     @FunctionalInterface public interface TokenSource {String token(String audience);}
@@ -40,6 +41,14 @@ public final class DelegationAuthorityClient implements AutoCloseable {
             permissionsByAudience.forEach((k,v)->copy.put(k,Set.copyOf(v)));permissionsByAudience=Map.copyOf(copy);}
     }
     public DelegationAuthorityClient(Map<String,URI> configured,TokenSource tokens,Clock clock,Duration timeout) {
+        this(configured,tokens,clock,timeout,null,null);
+    }
+    public DelegationAuthorityClient(Map<String,URI> configured,TokenSource tokens,Clock clock,Duration timeout,com.knode.governance.GovernedCall governed) {
+        this(configured,tokens,clock,timeout,governed,null);
+    }
+    public DelegationAuthorityClient(Map<String,URI> configured,TokenSource tokens,Clock clock,Duration timeout,
+                                     com.knode.governance.GovernedCall governed,io.opentelemetry.api.OpenTelemetry telemetry) {
+        this.governed=governed;this.telemetry=telemetry;
         var safe=new HashMap<String,URI>();
         configured.forEach((name,uri)->{
             if (!Set.of("knode-knowledge","knode-agent").contains(name) || !validOrigin(uri))
@@ -61,7 +70,43 @@ public final class DelegationAuthorityClient implements AutoCloseable {
         if ("https".equalsIgnoreCase(uri.getScheme())) return true;
         return "http".equalsIgnoreCase(uri.getScheme()) && ("127.0.0.1".equals(uri.getHost()) || "[::1]".equals(uri.getHost()) || "::1".equals(uri.getHost()));
     }
+    public boolean configured() {return origins.keySet().containsAll(Set.of("knode-knowledge","knode-agent"));}
+    /** Local credential/policy readiness only; does not claim the remote authority is healthy. */
+    public boolean credentialsReady() {
+        try {
+            for (String audience:List.of("knode-knowledge","knode-agent")) {
+                String token=tokenSource.token(audience);
+                if (token==null || token.isBlank() || token.length()>8192) return false;
+            }
+            return true;
+        } catch (RuntimeException e) {return false;}
+    }
+    private record Resolution(Proof proof,InternalFailure denied) {}
     public Proof resolve(String authority,Request request) {
+        if (telemetry==null) return resolveGoverned(authority,request);
+        var span=telemetry.getTracer("com.knode.user.authority").spanBuilder("user.delegation.proof.resolve")
+                .setSpanKind(io.opentelemetry.api.trace.SpanKind.CLIENT).startSpan();
+        try (var scope=span.makeCurrent()) {return resolveGoverned(authority,request);}
+        catch (InternalFailure e) {
+            if (e.status()>=500) span.setStatus(io.opentelemetry.api.trace.StatusCode.ERROR);
+            throw e;
+        } finally {span.end();}
+    }
+    private Proof resolveGoverned(String authority,Request request) {
+        if (governed==null) return resolveDirect(authority,request);
+        try {
+            Resolution outcome=governed.execute("feign:delegationAuthority#resolve",() -> {
+                try {return new Resolution(resolveDirect(authority,request),null);}
+                catch (InternalFailure failure) {
+                    if (failure.status()==403) return new Resolution(null,failure);
+                    throw failure;
+                }
+            });
+            if (outcome.denied()!=null) throw outcome.denied();
+            return outcome.proof();
+        } catch (com.knode.governance.GovernanceUnavailableException failure) {throw unavailable();}
+    }
+    private Proof resolveDirect(String authority,Request request) {
         URI uri=origins.get(authority);
         if (uri==null) throw unavailable();
         if (request==null || !DelegationTokenVerifier.validOpaque(request.proofRef()) || !ServiceTokenVerifier.validService(request.actorService()))
@@ -78,16 +123,24 @@ public final class DelegationAuthorityClient implements AutoCloseable {
         try {machineToken=tokenSource.token(authority);}
         catch (RuntimeException e) {throw unavailable();}
         if (machineToken==null || machineToken.isBlank() || machineToken.length()>8192) throw unavailable();
-        var httpRequest=HttpRequest.newBuilder(uri).timeout(timeout).header("Content-Type","application/json")
-                .header("Authorization","Bearer "+machineToken).POST(HttpRequest.BodyPublishers.ofString(body,StandardCharsets.UTF_8)).build();
-        var stream=new AtomicReference<InputStream>();Future<HttpResult> task;
+        var builder=HttpRequest.newBuilder(uri).timeout(timeout).header("Content-Type","application/json")
+                .header("Authorization","Bearer "+machineToken).POST(HttpRequest.BodyPublishers.ofString(body,StandardCharsets.UTF_8));
+        if (telemetry!=null) {
+            var fields=new HashMap<String,String>();
+            io.opentelemetry.api.trace.propagation.W3CTraceContextPropagator.getInstance().inject(
+                    io.opentelemetry.context.Context.current(),fields,Map::put);
+            String traceparent=fields.get("traceparent");
+            if (traceparent!=null) builder.header("traceparent",traceparent);
+        }
+        var httpRequest=builder.build();
+        Future<HttpResult> task;
         try {task=workers.submit(() -> {
             var response=http.send(httpRequest,HttpResponse.BodyHandlers.ofInputStream());
             try (InputStream input=response.body()) {
-                stream.set(input);byte[] bytes=input.readNBytes(MAX_RESPONSE_BYTES+1);
+                byte[] bytes=input.readNBytes(MAX_RESPONSE_BYTES+1);
                 if (bytes.length>MAX_RESPONSE_BYTES) throw new IOException("response too large");
                 return new HttpResult(response.statusCode(),bytes);
-            } finally {stream.set(null);}
+            }
         });} catch (RejectedExecutionException e) {throw unavailable();}
         try {
             HttpResult response=task.get(timeout.toMillis(),TimeUnit.MILLISECONDS);
@@ -95,12 +148,11 @@ public final class DelegationAuthorityClient implements AutoCloseable {
             if (response.status()!=200) throw unavailable();
             return parse(response.body(),authority,request);
         } catch (TimeoutException e) {
-            InputStream input=stream.getAndSet(null);if (input!=null) try {input.close();} catch (IOException ignored) {}
+            // Closing a stalled HTTP response stream here can itself block the caller.
+            // Cancellation interrupts the bounded worker, whose try-with-resources owns the stream.
             task.cancel(true);throw unavailable();
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();InputStream input=stream.getAndSet(null);
-            if (input!=null) try {input.close();} catch (IOException ignored) {}
-            task.cancel(true);throw unavailable();
+            task.cancel(true);Thread.currentThread().interrupt();throw unavailable();
         } catch (ExecutionException e) {throw unavailable();}
     }
     private record HttpResult(int status,byte[] body) {}

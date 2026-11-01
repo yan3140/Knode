@@ -1,0 +1,71 @@
+{
+  "name": "USER-G8-RUNTIME",
+  "version": "0.1-candidate",
+  "status": "User-side implementation; real Redis/Agent chain requires controller integration",
+  "ports": {
+    "service": "USER_PORT default 18090",
+    "management": "USER_MANAGEMENT_PORT default 19092, bound 127.0.0.1; independent of service"
+  },
+  "toggles": {
+    "discovery": "USER_NACOS_DISCOVERY_ENABLED default false",
+    "fixedConfig": "USER_NACOS_CONFIG_ENABLED default false",
+    "governance": "USER_GOVERNANCE_ENABLED default false",
+    "observability": "USER_OBSERVABILITY_ENABLED default false"
+  },
+  "nacos": {
+    "address": "USER_NACOS_SERVER_ADDR or NACOS_SERVER_ADDR",
+    "namespace": "USER_NACOS_NAMESPACE or NACOS_NAMESPACE; explicit non-public namespace",
+    "group": "USER_NACOS_GROUP or NACOS_GROUP",
+    "credentials": "USER_NACOS_USERNAME and USER_NACOS_PASSWORD, or corresponding NACOS_* values, supplied externally as a pair where authentication is enabled",
+    "configGroup": "USER_NACOS_CONFIG_GROUP; otherwise USER_NACOS_GROUP or NACOS_GROUP",
+    "configDataId": "knode-user.relay.json",
+    "configShape": {
+      "sessionEventRelayBatchSize": "integer 1..100"
+    },
+    "configBehavior": "Only this field changes scheduled relay batch size. Missing, malformed or unavailable configuration makes readiness unavailable; last valid value remains in use. Nacos generic config import is disabled.",
+    "governanceGroup": "USER_GOVERNANCE_GROUP required when governance enabled"
+  },
+  "tracing": {
+    "environment": "USER_OBSERVABILITY_ENVIRONMENT must equal KNODE_AUTH_ENVIRONMENT",
+    "version": "USER_OBSERVABILITY_VERSION required when enabled",
+    "endpoint": "USER_OTLP_ENDPOINT must be HTTPS except loopback HTTP",
+    "sampling": "USER_TRACING_SAMPLE_RATE default 0.1",
+    "event": "session-revoked-v2.schema.json; traceparent-only captured on original durable intent transaction"
+  },
+  "legacyCompatibility": "Existing stored v1 event_json is replayed byte-for-byte. Existing intents use version 1 and retain no captured producer context; old unmaterialized outbox facts serialize v1. Newly recorded intents produce v2, with optional producer traceparent. Recovery and replay do not recapture relay context.",
+  "governance": {
+    "http": "HTTP <method> <matched path template>",
+    "authority": "feign:delegationAuthority#resolve; explicit authority denial remains 403, limit/dependency failure 503",
+    "readiness": "Enabled governanceRules must report UP. Observability export failure does not determine readiness."
+  },
+  "security": "No secrets or bearer tokens in config documents, URLs, metric labels, spans or manifest. Authority readiness reports configured/health unverified, never asserts external domain authority is healthy.",
+  "combinedOptIn": {
+    "enable": [
+      "-Dknode.it.real.enabled=true",
+      "-Dknode.it.events.enabled=true"
+    ],
+    "required": [
+      "KNODE_IT_EVENTS_STREAM",
+      "KNODE_IT_EVENTS_PROBE_PREFIX",
+      "KNODE_IT_OTLP_HTTP",
+      "KNODE_IT_AUTH_ENVIRONMENT",
+      "KNODE_IT_DB_URL",
+      "KNODE_IT_DB_USERNAME",
+      "KNODE_IT_DB_PASSWORD",
+      "KNODE_IT_REDIS_HOST",
+      "KNODE_IT_REDIS_PORT",
+      "KNODE_IT_REDIS_DATABASE",
+      "KNODE_IT_REDIS_TLS",
+      "KNODE_IT_REDIS_READ_USERNAME",
+      "KNODE_IT_REDIS_READ_PASSWORD",
+      "KNODE_IT_REDIS_WRITE_USERNAME",
+      "KNODE_IT_REDIS_WRITE_PASSWORD",
+      "KNODE_IT_REDIS_BUSINESS_USERNAME",
+      "KNODE_IT_REDIS_BUSINESS_PASSWORD",
+      "KNODE_IT_REDIS_BUSINESS_PREFIX",
+      "knode.it.gateway.jar"
+    ],
+    "scope": "Explicit verify namespace, loopback non-3306 empty MySQL and loopback OTLP. Manifest is fsynced before network and records exact stream, probe prefix, known session keys, owned process IDs and validated producer traceparent. An interruption during login is marked loginInProgress; an unreturned session ID cannot be precisely cleaned from this manifest and expires naturally. Stream remains for controller consumer. An interruption between process creation and PID persistence is marked processStarting; review exact executable and port before intervening.",
+    "redisCommands": "Session read: GET. Session writer: SET NX EX and DEL. Business verification: SET NX EX, GET, DEL. Relay: XADD exact stream; probe: MULTI, XADD, PEXPIRE, EXEC, DEL against exact probe prefix. Connection handshake AUTH/HELLO and CLIENT SETINFO as required. No SCAN, XTRIM or ACL mutation."
+  }
+}

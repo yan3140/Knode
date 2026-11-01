@@ -28,6 +28,7 @@ CREATE TABLE sys_role_menu (role_id BIGINT NOT NULL, menu_id BIGINT NOT NULL, PR
 CREATE TABLE auth_revocation_intent (
  sid VARCHAR(36) NOT NULL PRIMARY KEY, user_id BIGINT NOT NULL, scope VARCHAR(5) NOT NULL,
  event_id VARCHAR(36) NOT NULL UNIQUE, state VARCHAR(16) NOT NULL, reason VARCHAR(32) NOT NULL DEFAULT 'UNSPECIFIED',
+ event_schema_version INT NOT NULL DEFAULT 1, traceparent VARCHAR(512),
  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, revoked_at TIMESTAMP NULL,
  attempts INT NOT NULL DEFAULT 0, next_attempt_at TIMESTAMP NULL, claim_token VARCHAR(36), claim_until TIMESTAMP NULL, last_error VARCHAR(128)
 );

@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SessionRevoked v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "eventType",
+    "schemaVersion",
+    "producer",
+    "aggregateType",
+    "aggregateId",
+    "sourceRevision",
+    "occurredAt",
+    "visibility",
+    "payload"
+  ],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "eventType": {
+      "const": "SessionRevoked"
+    },
+    "schemaVersion": {
+      "const": 2
+    },
+    "producer": {
+      "const": "knode-user"
+    },
+    "aggregateType": {
+      "const": "AUTH_SESSION"
+    },
+    "aggregateId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sourceRevision": {
+      "const": "1"
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "visibility": {
+      "const": "INTERNAL"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sid",
+        "userId",
+        "scope",
+        "reason",
+        "executionScope"
+      ],
+      "properties": {
+        "sid": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)$"
+        },
+        "scope": {
+          "enum": [
+            "blog",
+            "admin"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "LOGOUT",
+            "ACCOUNT_SECURITY_CHANGED",
+            "UNSPECIFIED"
+          ]
+        },
+        "executionScope": {
+          "const": "SID_CURRENT_EXECUTIONS"
+        }
+      }
+    },
+    "traceContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "traceparent"
+      ],
+      "properties": {
+        "traceparent": {
+          "type": "string",
+          "minLength": 55,
+          "maxLength": 55,
+          "pattern": "^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$"
+        }
+      }
+    }
+  }
+}

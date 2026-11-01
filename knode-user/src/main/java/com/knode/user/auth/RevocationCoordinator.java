@@ -19,17 +19,24 @@ public class RevocationCoordinator {
     private final TransactionTemplate tx;
     private final SessionStore.Writer writer;
     private final Clock clock;
+    private final org.springframework.beans.factory.ObjectProvider<com.knode.observability.EventTraceContext> tracing;
     private final AtomicLong successes=new AtomicLong(), failures=new AtomicLong();
-    public RevocationCoordinator(JdbcTemplate jdbc,TransactionTemplate tx,SessionStore.Writer writer,Clock clock) {
-        this.jdbc=jdbc;this.tx=tx;this.writer=writer;this.clock=clock;
+    public RevocationCoordinator(JdbcTemplate jdbc,TransactionTemplate tx,SessionStore.Writer writer,Clock clock,
+                                 org.springframework.beans.factory.ObjectProvider<com.knode.observability.EventTraceContext> tracing) {
+        this.jdbc=jdbc;this.tx=tx;this.writer=writer;this.clock=clock;this.tracing=tracing;
+    }
+    private String currentTraceparent() {
+        var context=tracing.getIfAvailable();
+        return context==null?null:context.captureCurrent().map(com.knode.observability.EventTraceContext.Saved::traceparent).orElse(null);
     }
     public void revoke(UserTokens.Principal principal) {
         long userId=Long.parseLong(principal.userId());
+        String traceparent=currentTraceparent();
         try {
             tx.executeWithoutResult(status -> {
                 jdbc.queryForList("SELECT sid FROM auth_login_session WHERE sid=? FOR UPDATE",String.class,principal.sid());
-                jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state,reason) VALUES (?,?,?,?,'PENDING','LOGOUT')",
-                        principal.sid(),userId,principal.scope(),UUID.randomUUID().toString());
+                jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state,reason,event_schema_version,traceparent) VALUES (?,?,?,?,'PENDING','LOGOUT',2,?)",
+                        principal.sid(),userId,principal.scope(),UUID.randomUUID().toString(),traceparent);
             });
         } catch (DuplicateKeyException ignored) {
             Integer count=jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE sid=? AND user_id=? AND scope=?",
@@ -45,13 +52,18 @@ public class RevocationCoordinator {
             throw new AuthenticationFailure(503);
         }
         Boolean changed=tx.execute(status -> {
-            var rows=jdbc.queryForList("SELECT sid,user_id,scope,event_id,state,reason FROM auth_revocation_intent WHERE sid=? FOR UPDATE",sid);
+            var rows=jdbc.queryForList("SELECT sid,user_id,scope,event_id,state,reason,event_schema_version,traceparent FROM auth_revocation_intent WHERE sid=? FOR UPDATE",sid);
             if (rows.size()!=1) throw new AuthenticationFailure(503);
             var row=rows.get(0);
             if ("PENDING".equals(row.get("state"))) {
                 Timestamp occurred=Timestamp.from(clock.instant());
-                String envelope=SessionEventEnvelope.encode((String)row.get("event_id"),sid,
+                int version=((Number)row.get("event_schema_version")).intValue();
+                String envelope;
+                if (version==1) envelope=SessionEventEnvelope.encode((String)row.get("event_id"),sid,
                         ((Number)row.get("user_id")).longValue(),(String)row.get("scope"),(String)row.get("reason"),occurred.toInstant());
+                else if (version==2) envelope=SessionEventEnvelope.encodeV2((String)row.get("event_id"),sid,
+                        ((Number)row.get("user_id")).longValue(),(String)row.get("scope"),(String)row.get("reason"),occurred.toInstant(),(String)row.get("traceparent"));
+                else throw new AuthenticationFailure(503);
                 jdbc.update("INSERT INTO auth_revocation_outbox(event_id,sid,user_id,scope,occurred_at,execution_scope,state,reason,event_json) VALUES(?,?,?,?,?,'SID_CURRENT_EXECUTIONS','PENDING',?,?)",
                         row.get("event_id"),sid,row.get("user_id"),row.get("scope"),occurred,row.get("reason"),envelope);
                 jdbc.update("UPDATE auth_revocation_intent SET state='REVOKED',revoked_at=?,claim_token=NULL,claim_until=NULL,last_error=NULL WHERE sid=? AND state='PENDING'",occurred,sid);
@@ -87,12 +99,13 @@ public class RevocationCoordinator {
         if (!java.util.Set.of("ACCOUNT_SECURITY_CHANGED","UNSPECIFIED").contains(reason)) throw new IllegalArgumentException("Invalid revocation reason");
         if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
             throw new IllegalStateException("Account mutation transaction required");
+        String traceparent=currentTraceparent();
         var sessions=jdbc.queryForList("SELECT sid,scope FROM auth_login_session WHERE user_id=? AND active=1 FOR UPDATE",userId);
         for (var session:sessions) {
             String sid=(String)session.get("sid"), scope=(String)session.get("scope");
             Integer present=jdbc.queryForObject("SELECT COUNT(*) FROM auth_revocation_intent WHERE sid=?",Integer.class,sid);
-            if (present==0) jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state,reason) VALUES (?,?,?,?,'PENDING',?)",
-                    sid,userId,scope,UUID.randomUUID().toString(),reason);
+            if (present==0) jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state,reason,event_schema_version,traceparent) VALUES (?,?,?,?,'PENDING',?,2,?)",
+                    sid,userId,scope,UUID.randomUUID().toString(),reason,traceparent);
         }
         jdbc.update("UPDATE auth_login_session SET active=0 WHERE user_id=? AND active=1",userId);
     }

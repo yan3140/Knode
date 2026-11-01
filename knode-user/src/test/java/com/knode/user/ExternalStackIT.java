@@ -31,11 +31,16 @@ class ExternalStackIT {
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
     private final List<Process> processes = new ArrayList<>();
     private final Set<String> sessionKeys = new LinkedHashSet<>();
+    private final Set<String> explicitProbeKeys = new LinkedHashSet<>();
     private String environment, dbUrl, dbUser, dbPassword, redisHost, redisPort, redisDb, redisTls;
     private String readUser, readPassword, writeUser, writePassword, businessUser, businessPassword, businessPrefix;
     private Path userJar, gatewayJar, keyDir, privateFile, publicFile;
-    private int userPort, gatewayPort;
-    private boolean databaseInitialized;
+    private int userPort, gatewayPort,managementPort;
+    private boolean databaseInitialized,eventsEnabled,loginInProgress;
+    private String processStarting;
+    private String eventStream,eventProbePrefix,otlpEndpoint;
+    private Path manifest;
+    private final List<Map<String,String>> eventHandoffs=new ArrayList<>();
     private LettuceConnectionFactory readFactory, writeFactory, businessFactory;
     private StringRedisTemplate reader, writer, business;
 
@@ -56,8 +61,10 @@ class ExternalStackIT {
         readUser=setting("KNODE_IT_REDIS_READ_USERNAME");readPassword=setting("KNODE_IT_REDIS_READ_PASSWORD");
         writeUser=setting("KNODE_IT_REDIS_WRITE_USERNAME");writePassword=setting("KNODE_IT_REDIS_WRITE_PASSWORD");
         businessUser=setting("KNODE_IT_REDIS_BUSINESS_USERNAME");businessPassword=setting("KNODE_IT_REDIS_BUSINESS_PASSWORD");
+        if (new HashSet<>(List.of(readUser,writeUser,businessUser)).size()!=3) throw new IllegalArgumentException("Three distinct test Redis identities required");
         businessPrefix=setting("KNODE_IT_REDIS_BUSINESS_PREFIX");
-        if (!businessPrefix.matches("knode:verify-[a-z0-9-]{1,25}:v1:business:[a-z0-9:-]*") || businessPrefix.startsWith(prefix()))
+        if (!businessPrefix.matches("knode:verify-[a-z0-9-]{1,25}:v1:business:[a-z0-9:-]*")
+                || !businessPrefix.startsWith("knode:"+environment+":v1:business:") || businessPrefix.startsWith(prefix()))
             throw new IllegalArgumentException("A distinct verify- business test prefix is required");
         String gatewayPath=System.getProperty("knode.it.gateway.jar");
         if (gatewayPath==null || gatewayPath.isBlank()) throw new IllegalArgumentException("Gateway JAR parameter required");
@@ -65,6 +72,39 @@ class ExternalStackIT {
         userJar=Path.of(System.getProperty("knode.it.user.jar","target/knode-user-1.0-SNAPSHOT.jar")).toAbsolutePath().normalize();
         if (!Files.isRegularFile(userJar) || !Files.isRegularFile(gatewayJar)) throw new IllegalArgumentException("Built JAR files required");
         userPort=port();gatewayPort=port();while (gatewayPort==userPort) gatewayPort=port();
+        managementPort=port();while (managementPort==userPort || managementPort==gatewayPort) managementPort=port();
+        eventsEnabled=Boolean.getBoolean("knode.it.events.enabled");
+        if (eventsEnabled) {
+            eventStream=setting("KNODE_IT_EVENTS_STREAM");eventProbePrefix=setting("KNODE_IT_EVENTS_PROBE_PREFIX");
+            otlpEndpoint=setting("KNODE_IT_OTLP_HTTP");
+            ExternalEventGuard.check(environment,businessPrefix,eventStream,eventProbePrefix,otlpEndpoint);
+        }
+        Path manifestDir=Files.createTempDirectory(Path.of("target"),"external-stack-manifest-");
+        manifest=manifestDir.resolve("manifest.json");
+        saveManifest();
+        System.out.println("External stack manifest: "+manifest.toAbsolutePath());
+    }
+    private void saveManifest() throws IOException {
+        var body=new LinkedHashMap<String,Object>();
+        body.put("environment",environment);body.put("dbUrl",dbUrl);body.put("redisHost",redisHost);body.put("redisPort",redisPort);
+        body.put("userPort",userPort);body.put("gatewayPort",gatewayPort);body.put("managementPort",managementPort);
+        body.put("eventsEnabled",eventsEnabled);body.put("stream",eventStream);body.put("probePrefix",eventProbePrefix);
+        body.put("otlpEndpoint",otlpEndpoint);body.put("sessionKeys",List.copyOf(sessionKeys));
+        body.put("explicitProbeKeys",List.copyOf(explicitProbeKeys));body.put("loginInProgress",loginInProgress);
+        body.put("ownedProcesses",processes.stream().map(p -> Map.of("pid",p.pid(),"alive",p.isAlive())).toList());
+        body.put("processStarting",processStarting);
+        body.put("keyDirectory",keyDir==null?null:keyDir.toAbsolutePath().toString());
+        body.put("keyFiles",privateFile==null?List.of():List.of(privateFile.toAbsolutePath().toString(),publicFile.toAbsolutePath().toString()));
+        body.put("handoffs",List.copyOf(eventHandoffs));
+        body.put("cleanup","Stop only listed owned processes; delete listed session keys. Keep the exact stream for the controller consumer; probes have TTL. No SCAN.");
+        byte[] bytes=json.writerWithDefaultPrettyPrinter().writeValueAsBytes(body);
+        Path staged=manifest.resolveSibling("manifest.pending");
+        try (var channel=java.nio.channels.FileChannel.open(staged,StandardOpenOption.CREATE,StandardOpenOption.TRUNCATE_EXISTING,StandardOpenOption.WRITE)) {
+            var buffer=java.nio.ByteBuffer.wrap(bytes);
+            while (buffer.hasRemaining()) channel.write(buffer);
+            channel.force(true);
+        }
+        Files.move(staged,manifest,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
     }
     private int port() throws IOException {try (var socket=new ServerSocket(0,1,InetAddress.getByName("127.0.0.1"))) {return socket.getLocalPort();}}
     private void initializeDatabase() throws Exception {
@@ -83,7 +123,7 @@ class ExternalStackIT {
     private void makeKeys() throws Exception {
         keyDir=Files.createTempDirectory(Path.of("target"),"external-stack-keys-");
         var generator=KeyPairGenerator.getInstance("RSA");generator.initialize(2048);var pair=generator.generateKeyPair();
-        privateFile=keyDir.resolve("private.pem");publicFile=keyDir.resolve("public.pem");
+        privateFile=keyDir.resolve("private.pem");publicFile=keyDir.resolve("public.pem");saveManifest();
         Files.writeString(privateFile,"-----BEGIN PRIVATE KEY-----\n"+Base64.getMimeEncoder().encodeToString(pair.getPrivate().getEncoded())+"\n-----END PRIVATE KEY-----");
         Files.writeString(publicFile,"-----BEGIN PUBLIC KEY-----\n"+Base64.getMimeEncoder().encodeToString(pair.getPublic().getEncoded())+"\n-----END PUBLIC KEY-----");
     }
@@ -104,7 +144,7 @@ class ExternalStackIT {
         List<String> cmd=new ArrayList<>(List.of(java,"-jar",(gateway?gatewayJar:userJar).toString(),"--server.address=127.0.0.1"));
         if (gateway) cmd.add("--spring.cloud.discovery.client.simple.instances.knode-user[0].uri=http://127.0.0.1:"+userPort);
         ProcessBuilder b=new ProcessBuilder(cmd);Map<String,String> e=b.environment();
-        e.keySet().removeIf(k -> k.startsWith("KNODE_") || k.startsWith("SPRING_") || k.startsWith("NACOS_")
+        e.keySet().removeIf(k -> k.startsWith("KNODE_") || k.startsWith("SPRING_") || k.startsWith("NACOS_") || k.startsWith("USER_")
                 || Set.of("JAVA_TOOL_OPTIONS","JDK_JAVA_OPTIONS","SERVER_PORT","USER_PORT","GATEWAY_PORT").contains(k));
         if (gateway) {
             e.put("SERVER_PORT",Integer.toString(gatewayPort));e.put("GATEWAY_PORT",Integer.toString(gatewayPort));
@@ -114,7 +154,7 @@ class ExternalStackIT {
             e.put("KNODE_GATEWAY_AUTH_REDIS_USERNAME",readUser);e.put("KNODE_GATEWAY_AUTH_REDIS_PASSWORD",badRead?UUID.randomUUID().toString():readPassword);
             e.put("KNODE_GATEWAY_AUTH_REDIS_TLS",redisTls);e.put("NACOS_DISCOVERY_ENABLED","false");e.put("NACOS_CONFIG_ENABLED","false");e.put("KNODE_GOV_NACOS_ENABLED","false");
         } else {
-            e.put("USER_PORT",Integer.toString(userPort));e.put("KNODE_USER_DB_URL",dbUrl);e.put("KNODE_USER_DB_USERNAME",dbUser);e.put("KNODE_USER_DB_PASSWORD",dbPassword);
+            e.put("USER_PORT",Integer.toString(userPort));e.put("USER_MANAGEMENT_PORT",Integer.toString(managementPort));e.put("KNODE_USER_DB_URL",dbUrl);e.put("KNODE_USER_DB_USERNAME",dbUser);e.put("KNODE_USER_DB_PASSWORD",dbPassword);
             e.put("KNODE_AUTH_ENVIRONMENT",environment);e.put("KNODE_AUTH_SIGNING_KID","it-key");
             e.put("KNODE_AUTH_SIGNING_PRIVATE_FILE",privateFile.toAbsolutePath().toString());e.put("KNODE_AUTH_SIGNING_PUBLIC_FILE",publicFile.toAbsolutePath().toString());
             e.remove("KNODE_AUTH_SIGNING_PRIVATE_ENV");e.remove("KNODE_AUTH_TRUSTED_PUBLIC_KEYS_FILE");e.remove("KNODE_AUTH_SERVICE_POLICY_FILE");e.remove("KNODE_AUTH_SERVICE_POLICY_ENV");
@@ -124,10 +164,21 @@ class ExternalStackIT {
                 e.put(prefix+"PASSWORD",(read?badRead:badWrite)?UUID.randomUUID().toString():(read?readPassword:writePassword));
             }
             e.put("KNODE_AUTH_REVOCATION_INITIAL_MS","1000");e.put("KNODE_AUTH_REVOCATION_POLL_MS","1000");
+            if (eventsEnabled) {
+                e.put("KNODE_SESSION_EVENTS_ENABLED","true");e.put("KNODE_SESSION_EVENTS_STREAM_KEY",eventStream);
+                e.put("KNODE_SESSION_EVENTS_PROBE_PREFIX",eventProbePrefix);
+                e.put("KNODE_SESSION_EVENTS_REDIS_HOST",redisHost);e.put("KNODE_SESSION_EVENTS_REDIS_PORT",redisPort);
+                e.put("KNODE_SESSION_EVENTS_REDIS_DATABASE",redisDb);e.put("KNODE_SESSION_EVENTS_REDIS_TLS",redisTls);
+                e.put("KNODE_SESSION_EVENTS_REDIS_USERNAME",businessUser);e.put("KNODE_SESSION_EVENTS_REDIS_PASSWORD",businessPassword);
+                e.put("KNODE_SESSION_EVENTS_INITIAL_MS","1000");e.put("KNODE_SESSION_EVENTS_POLL_MS","1000");
+                e.put("USER_OBSERVABILITY_ENABLED","true");e.put("USER_OBSERVABILITY_ENVIRONMENT",environment);
+                e.put("USER_OBSERVABILITY_VERSION","verify");e.put("USER_OTLP_ENDPOINT",otlpEndpoint);e.put("USER_TRACING_SAMPLE_RATE","1.0");
+            }
         }
         // The subprocess may log request or connection details: discard it, never persist secrets or tokens.
         b.redirectOutput(ProcessBuilder.Redirect.DISCARD);b.redirectError(ProcessBuilder.Redirect.DISCARD);
-        Process p=b.start();processes.add(p);awaitPort(p,gateway?gatewayPort:userPort);return p;
+        processStarting=gateway?"gateway":"user";saveManifest();
+        Process p=b.start();processes.add(p);processStarting=null;saveManifest();awaitPort(p,gateway?gatewayPort:userPort);return p;
     }
     private void awaitPort(Process p,int port) throws Exception {
         long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(90);
@@ -142,19 +193,22 @@ class ExternalStackIT {
         if (p==null || !p.isAlive()) return;
         p.destroy();if (!p.waitFor(15,TimeUnit.SECONDS)) {p.destroyForcibly();p.waitFor(10,TimeUnit.SECONDS);}
         if (p.isAlive()) throw new IllegalStateException("Failed to stop owned test process");
+        if (manifest!=null) saveManifest();
     }
     private HttpResponse<String> request(int port,String method,String path,String body,String token) throws Exception {
         var b=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+path)).timeout(Duration.ofSeconds(10)).header("Content-Type","application/json");
         if (token!=null) b.header("token",token);
+        if (eventsEnabled && path.endsWith("/auth/logout")) b.header("traceparent","00-"+UUID.randomUUID().toString().replace("-","")+"-"+UUID.randomUUID().toString().replace("-","").substring(0,16)+"-01");
         return http.send(b.method(method,body==null?HttpRequest.BodyPublishers.noBody():HttpRequest.BodyPublishers.ofString(body)).build(),HttpResponse.BodyHandlers.ofString());
     }
     private String login() throws Exception {
+        loginInProgress=true;saveManifest();
         var response=request(userPort,"POST","/api/blog/auth/login","{\"userName\":\"it-user\",\"password\":\"synthetic-test-password\"}",null);
         assertEquals(200,response.statusCode());JsonNode node=json.readTree(response.body());assertEquals(200,node.path("code").asInt());
         String token=node.path("data").path("token").asText();assertFalse(token.isBlank());
         JsonNode claims=json.readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1]));
         String sid=claims.path("sid").asText();assertDoesNotThrow(()->UUID.fromString(sid));
-        sessionKeys.add(prefix()+sid);return token;
+        sessionKeys.add(prefix()+sid);loginInProgress=false;saveManifest();return token;
     }
     private String prefix() {return "knode:"+environment+":v1:auth:session:";}
     private int status(int port,String token) throws Exception {return request(port,"GET","/api/blog/user/userInfo",null,token).statusCode();}
@@ -165,8 +219,9 @@ class ExternalStackIT {
             assertTrue(found,"Expected Redis NOPERM response");
         }
     }
-    private void aclAssertions() {
+    private void aclAssertions() throws IOException {
         String probe=prefix()+"it-"+UUID.randomUUID(), outside="knode:verify-outside-"+UUID.randomUUID()+":v1:auth:session:"+UUID.randomUUID(), businessProbe=businessPrefix+UUID.randomUUID();
+        explicitProbeKeys.addAll(List.of(probe,outside,businessProbe));saveManifest();
         try {
             assertTrue(Boolean.TRUE.equals(writer.opsForValue().setIfAbsent(probe,"fixture",Duration.ofSeconds(60))));
             assertEquals("fixture",reader.opsForValue().get(probe));
@@ -194,6 +249,33 @@ class ExternalStackIT {
         while (System.nanoTime()<end) {if ("REVOKED".equals(intent(token))) return;Thread.sleep(500);}
         fail("Pending revocation did not recover");
     }
+    private String traceFromIntent(String token) throws Exception {
+        String sid=json.readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1])).path("sid").asText();
+        try (Connection c=DriverManager.getConnection(dbUrl,dbUser,dbPassword);PreparedStatement p=c.prepareStatement("SELECT traceparent FROM auth_revocation_intent WHERE sid=?")) {
+            p.setString(1,sid);try (ResultSet rs=p.executeQuery()) {if (!rs.next()) throw new IllegalStateException("Missing persisted intent");return rs.getString(1);}
+        }
+    }
+    private void awaitPublished(String token,String expectedTrace) throws Exception {
+        String sid=json.readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1])).path("sid").asText();
+        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(45);
+        while (System.nanoTime()<end) {
+            try (Connection c=DriverManager.getConnection(dbUrl,dbUser,dbPassword);PreparedStatement p=c.prepareStatement("SELECT state,event_json,event_id FROM auth_revocation_outbox WHERE sid=?")) {
+                p.setString(1,sid);try (ResultSet rs=p.executeQuery()) {
+                    if (rs.next() && "PUBLISHED".equals(rs.getString(1))) {
+                        JsonNode event=json.readTree(rs.getString(2));String trace=event.path("traceContext").path("traceparent").asText();
+                        var verifier=new com.knode.observability.EventTraceContext(io.opentelemetry.api.OpenTelemetry.noop());
+                        assertEquals(trace,verifier.fromStored(trace,null).orElseThrow().traceparent());
+                        if (expectedTrace!=null) assertEquals(expectedTrace,trace);
+                        assertEquals(2,event.path("schemaVersion").asInt());assertEquals(rs.getString(3),event.path("eventId").asText());
+                        eventHandoffs.add(Map.of("eventId",rs.getString(3),"traceparent",trace));saveManifest();return;
+                    }
+                }
+            }
+            Thread.sleep(500);
+        }
+        fail("Actual logout event was not published");
+    }
+
     @Test void realUserGatewayAndExplicitRedisAcl() throws Exception {
         configure(); // All guards run before opening the dedicated DB or Redis.
         try {
@@ -203,6 +285,7 @@ class ExternalStackIT {
             assertEquals(200,status(userPort,a));assertEquals(200,status(gatewayPort,a));
             assertEquals(403,request(gatewayPort,"GET","/api/admin/auth/me",null,a).statusCode());
             assertEquals(200,request(userPort,"POST","/api/blog/auth/logout",null,a).statusCode());
+            if (eventsEnabled) awaitPublished(a,null);
             assertEquals(401,status(userPort,a));assertEquals(401,status(gatewayPort,a));
             assertEquals(200,status(userPort,b));assertEquals(200,status(gatewayPort,b));
             String c=login();assertEquals(401,status(userPort,a));assertEquals(401,status(gatewayPort,a));assertEquals(200,status(gatewayPort,c));
@@ -211,7 +294,10 @@ class ExternalStackIT {
             stop(user);user=start(false,true,false);assertEquals(503,status(userPort,b));
             stop(user);user=start(false,false,true);
             assertEquals(503,request(userPort,"POST","/api/blog/auth/logout",null,c).statusCode());assertEquals("PENDING",intent(c));
+            String originalTrace=eventsEnabled?traceFromIntent(c):null;
+            if (eventsEnabled) assertNotNull(originalTrace);
             stop(user);user=start(false,false,false);awaitRevoked(c);
+            if (eventsEnabled) awaitPublished(c,originalTrace);
             assertEquals(401,status(userPort,c));assertEquals(401,status(gatewayPort,c));assertEquals(200,status(userPort,b));assertEquals(200,status(gatewayPort,b));
         } finally {
             int cleanupFailures=0;
@@ -228,6 +314,7 @@ class ExternalStackIT {
             try {if (privateFile!=null) Files.deleteIfExists(privateFile);} catch (IOException ex) {cleanupFailures++;}
             try {if (publicFile!=null) Files.deleteIfExists(publicFile);} catch (IOException ex) {cleanupFailures++;}
             try {if (keyDir!=null) Files.deleteIfExists(keyDir);} catch (IOException ex) {cleanupFailures++;}
+            if (manifest!=null) try {saveManifest();} catch (IOException ex) {cleanupFailures++;}
             if (cleanupFailures>0) throw new IllegalStateException("Owned test cleanup failed; count="+cleanupFailures);
         }
     }

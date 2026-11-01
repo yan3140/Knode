@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,properties="management.server.port=0")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class UserHttpIntegrationTest {
     @Autowired TestRestTemplate http;
@@ -80,6 +80,8 @@ class UserHttpIntegrationTest {
     }
     @BeforeAll void schema() { new ResourceDatabasePopulator(new ClassPathResource("db/schema.sql")).execute(dataSource); }
     @BeforeEach void setup() {
+        http.getRestTemplate().setRequestFactory(new org.springframework.http.client.HttpComponentsClientHttpRequestFactory(
+                org.apache.hc.client5.http.impl.classic.HttpClients.custom().disableAutomaticRetries().disableRedirectHandling().build()));
         for (String table:new String[]{"auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_role_menu","sys_user_role","yan_menu","sys_role","sys_user"})
             jdbc.update("DELETE FROM "+table);
         sessions.clear(); failRead.set(false);failWrite.set(false);failMark.set(false);
@@ -520,6 +522,19 @@ class UserHttpIntegrationTest {
              assertEquals(503,failed.getStatusCode().value());assertTrue(data(failed).has("error"));assertFalse(data(failed).has("items"));}
         finally {jdbc.execute("ALTER TABLE sys_user_temp RENAME TO sys_user");}
     }
+    @Test void legacyIntentAndSerializedV1RemainLegacyWithoutRecapturedTrace() throws Exception {
+        String sid=UUID.randomUUID().toString(),id=UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES(?,42,'blog',?,'PENDING')",sid,id);
+        assertEquals(1,coordinator.recoverPending(10));
+        String old=jdbc.queryForObject("SELECT event_json FROM auth_revocation_outbox WHERE event_id=?",String.class,id);
+        var oldEvent=json.readTree(old);assertEquals(1,oldEvent.path("schemaVersion").asInt());assertFalse(oldEvent.has("traceContext"));
+        String oldBytes=old+" \n";
+        jdbc.update("UPDATE auth_revocation_outbox SET event_json=? WHERE event_id=?",oldBytes,id);
+        when(eventTransport.enabled()).thenReturn(true);
+        assertEquals(1,relay.relay(10));verify(eventTransport).publish(oldBytes);
+        assertEquals(oldBytes,jdbc.queryForObject("SELECT event_json FROM auth_revocation_outbox WHERE event_id=?",String.class,id));
+    }
+
     @Test void relayDeadLetterReplayAndRealAdminAuthorization() throws Exception {
         when(eventTransport.enabled()).thenReturn(true);
         String alice=login("alice","blog"), admin=login("admin","admin");
@@ -528,7 +543,7 @@ class UserHttpIntegrationTest {
         String envelope=jdbc.queryForObject("SELECT event_json FROM auth_revocation_outbox WHERE event_id=?",String.class,event);
         var payload=json.readTree(envelope);
         assertEquals(event,payload.path("eventId").asText());assertEquals("SessionRevoked",payload.path("eventType").asText());
-        assertTrue(payload.path("schemaVersion").isInt());assertEquals(1,payload.path("schemaVersion").asInt());
+        assertTrue(payload.path("schemaVersion").isInt());assertEquals(2,payload.path("schemaVersion").asInt());
         assertEquals("knode-user",payload.path("producer").asText());assertEquals("AUTH_SESSION",payload.path("aggregateType").asText());
         assertEquals("1",payload.path("sourceRevision").asText());assertEquals("INTERNAL",payload.path("visibility").asText());
         java.time.Instant.parse(payload.path("occurredAt").asText());

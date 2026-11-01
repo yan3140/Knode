@@ -23,6 +23,9 @@ final class LocalDelegationAuthorityFixture implements AutoCloseable {
     private final Clock clock;
     final AtomicReference<String> mode=new AtomicReference<>("NORMAL");
     final AtomicInteger authenticatedRequests=new AtomicInteger();
+    final AtomicReference<String> lastTraceparent=new AtomicReference<>();
+    final AtomicReference<String> lastTracestate=new AtomicReference<>();
+    final AtomicReference<String> lastBaggage=new AtomicReference<>();
     final AtomicReference<Runnable> afterSafeProof=new AtomicReference<>();
 
     LocalDelegationAuthorityFixture(RSAPublicKey publicKey,Clock clock) throws Exception {
@@ -36,7 +39,7 @@ final class LocalDelegationAuthorityFixture implements AutoCloseable {
         server.setExecutor(workers);server.createContext("/internal/v1/authz/delegation-proofs:resolve",this::handle);server.start();
     }
     String origin(){return "http://127.0.0.1:"+server.getAddress().getPort();}
-    void clear(){db.update("DELETE FROM authority_fact");db.update("DELETE FROM authority_run");mode.set("NORMAL");authenticatedRequests.set(0);afterSafeProof.set(null);}
+    void clear(){db.update("DELETE FROM authority_fact");db.update("DELETE FROM authority_run");mode.set("NORMAL");authenticatedRequests.set(0);afterSafeProof.set(null);lastTraceparent.set(null);lastTracestate.set(null);lastBaggage.set(null);}
     void put(String ref,String authority,String kind,String user,String sid,String scope,String actor,Map<String,String> resource,
              Map<String,List<String>> envelope,String parent,String root,String revision,Instant valid,Instant authorized) throws Exception {
         db.update("INSERT INTO authority_fact(ref,authority,kind,user_id,sid,user_scope,actor,resource_json,envelope_json,parent_id,root_id,revision,valid_until,authorized_until,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE')",
@@ -80,6 +83,9 @@ final class LocalDelegationAuthorityFixture implements AutoCloseable {
             }
             if (!"knode-user".equals(caller.service())) {send(exchange,403,new byte[0]);return;}
             authenticatedRequests.incrementAndGet();
+            lastTraceparent.set(exchange.getRequestHeaders().getFirst("traceparent"));
+            lastTracestate.set(exchange.getRequestHeaders().getFirst("tracestate"));
+            lastBaggage.set(exchange.getRequestHeaders().getFirst("baggage"));
             String m=mode.get();
             if ("TIMEOUT".equals(m)) {Thread.sleep(3500);send(exchange,503,new byte[0]);return;}
             if ("TRICKLE".equals(m)) {

@@ -24,8 +24,18 @@ public class UserRequestFilter extends OncePerRequestFilter {
     private final AccountService accounts;
     private final RevocationCoordinator revocations;
     private final ObjectMapper json;
-    public UserRequestFilter(UserTokens tokens,AccountService accounts,RevocationCoordinator revocations,ObjectMapper json) {
-        this.tokens=tokens;this.accounts=accounts;this.revocations=revocations;this.json=json;
+    private final org.springframework.core.env.Environment environment;
+    public UserRequestFilter(UserTokens tokens,AccountService accounts,RevocationCoordinator revocations,ObjectMapper json,
+                             org.springframework.core.env.Environment environment) {
+        this.tokens=tokens;this.accounts=accounts;this.revocations=revocations;this.json=json;this.environment=environment;
+    }
+    private boolean managementRequest(HttpServletRequest req) {
+        try {
+            int port=environment.getProperty("management.server.port",Integer.class,19092);
+            return port>0 && req.getLocalPort()==port
+                    && java.net.InetAddress.getByName(req.getLocalAddr()).isLoopbackAddress()
+                    && java.net.InetAddress.getByName(req.getRemoteAddr()).isLoopbackAddress();
+        } catch (Exception e) {return false;}
     }
     @Override protected void doFilterInternal(HttpServletRequest req,HttpServletResponse res,FilterChain chain) throws ServletException,IOException {
         try {
@@ -44,6 +54,12 @@ public class UserRequestFilter extends OncePerRequestFilter {
                     || lower.contains("%3b") || lower.contains("%2f") || lower.contains("%5c") || lower.contains("%25"))
                 throw new AuthenticationFailure(401);
             String path=req.getServletPath();
+            if (path.equals("/actuator") || path.startsWith("/actuator/")) {
+                boolean allowed="GET".equals(req.getMethod()) && java.util.Set.of("/actuator/health","/actuator/health/liveness",
+                        "/actuator/health/readiness","/actuator/prometheus").contains(path) && managementRequest(req);
+                if (!allowed) throw new AuthenticationFailure(401);
+                chain.doFilter(req,res);return;
+            }
             if (path.startsWith("/internal/")) {
                 var auth=Collections.list(req.getHeaders("Authorization"));
                 if (!values.isEmpty() || auth.size()!=1 || auth.get(0).contains(",")) throw new AuthenticationFailure(401);

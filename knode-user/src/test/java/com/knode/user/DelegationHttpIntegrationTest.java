@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,properties="management.server.port=0")
 @Import(DelegationHttpIntegrationTest.TimeConfig.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @DirtiesContext(classMode=DirtiesContext.ClassMode.AFTER_CLASS)
@@ -87,6 +87,8 @@ class DelegationHttpIntegrationTest {
     @BeforeAll void schema(){new ResourceDatabasePopulator(new ClassPathResource("db/schema.sql")).execute(dataSource);}
     @AfterAll void close(){fixture.close();}
     @BeforeEach void setup() {
+        http.getRestTemplate().setRequestFactory(new org.springframework.http.client.HttpComponentsClientHttpRequestFactory(
+                org.apache.hc.client5.http.impl.classic.HttpClients.custom().disableAutomaticRetries().disableRedirectHandling().build()));
         TIME.reset();
         for (String table:List.of("auth_delegation_grant_audit","auth_delegation_grant","auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_user")) db.update("DELETE FROM "+table);
         fixture.clear();sessions.clear();reset(reader,writer);
