@@ -1,7 +1,7 @@
 {
   "name": "AUTH-DELEGATION",
   "version": "0.1-candidate",
-  "status": "Unfrozen proposal; no implementation or issuer exists in G6.",
+  "status": "Historical unfrozen G6 proposal; no implementation or issuer existed at that stage. Superseded by auth-delegation-v1.json and delegation-runtime-v1.json; independent Knowledge and Agent authority and receiver integration remain pending.",
   "fundamental": [
     "Issuer knode-user holds signing key; single target audience; token_use=delegation. Validate algorithm, trusted kid, issuer, expiry and token type.",
     "An authenticated machine service token and a valid user token or independently verifiable parent grant are both required. act.sub is the actual authenticated calling service, not a body claim.",
@@ -67,5 +67,5 @@
     "Checkpoint capability replay protection and the transaction boundary for step completion versus revocation.",
     "Allowed delegation chains, maximum lifetimes and operation-specific resource scopes."
   ],
-  "nonGoals": "No delegation endpoint, authorization proof service, Agent state machine or consumer is implemented by this candidate."
+  "nonGoals": "This historical G6 candidate did not implement a delegation endpoint, proof service, Agent state machine or consumer. See auth-delegation-v1.json and delegation-runtime-v1.json for the current User-side scope and remaining integration."
 }

@@ -1,7 +1,7 @@
 {
   "name": "USER-G8-RUNTIME",
   "version": "0.1-candidate",
-  "status": "User-side implementation; real Redis/Agent chain requires controller integration",
+  "status": "User G8 integrated; controller G8 run 7e74b8359bcd validated actual Gateway, User, Redis, v2 events, test consumer and Jaeger trace linkage. Real Agent and business consumer integration remains pending; G9 rerun is in progress.",
   "ports": {
     "service": "USER_PORT default 18090",
     "management": "USER_MANAGEMENT_PORT default 19092, bound 127.0.0.1; independent of service",

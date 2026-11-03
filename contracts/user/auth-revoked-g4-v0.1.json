@@ -1,7 +1,7 @@
 {
   "name": "AUTH-REVOKED-OUTBOX",
   "version": "0.1",
-  "status": "candidate; no Stream relay or consumer implemented",
+  "status": "Historical G4 candidate: no Stream relay or consumer existed at that stage. Current producer and delivery contract: auth-revoked-stream-v1.json and session-revoked-v2.schema.json; real Agent and business consumers remain pending.",
   "event": {
     "eventId": "stable UUID generated with sid intent",
     "sid": "UUID string",
@@ -15,6 +15,6 @@
   "revocation": "same sid logout retry allowed while session remains valid; non-logout PENDING requests return 503; delete is idempotent",
   "metrics": "protected GET /api/admin/ops/revocations/metrics; persisted counts plus process-local success/failure counters",
   "rollout": "G3 tokens without SQL sid records must be invalidated by a separately approved key retirement or allowed to expire before cutover",
-  "integration": "future relay must use original eventId on redelivery and establish its own lease/retry/ACK; no claim of downstream Agent pause",
+  "integration": "Historical G4 relay requirement: use the original eventId on redelivery and establish lease/retry/ACK. The current relay contract is auth-revoked-stream-v1.json; downstream Agent pause is not claimed.",
   "historical_gap": "G3 intents already marked REVOKED are not automatically copied into the new outbox; a separately approved backfill/replay plan is required."
 }

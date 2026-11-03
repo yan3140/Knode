@@ -1,6 +1,6 @@
 {
   "version": "0.2",
-  "status": "controller approved semantic revision; consumer integration pending",
+  "status": "Controller-frozen AUTH-USER-SESSION v0.2 protocol semantics, validated by User and Gateway; other domain integration pending.",
   "module": "com.lx:knode-auth:1.0-SNAPSHOT",
   "flow": [
     "verifyToken(token) performs CPU-only signature and claim verification",
