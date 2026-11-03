@@ -60,7 +60,7 @@ class LoginThrottleMysqlIT {
         assertEquals(43L,limiter().check(name,"blog",request("198.51.100.31")));
     }
     @Test void repeatedBlockedAttemptsStay429WhenDriverReportsChangedRows() {
-        var affected=new DriverManagerDataSource(ds.getUrl(),ds.getUsername(),"");
+        var affected=new DriverManagerDataSource(ds.getUrl(),ds.getUsername(),ds.getPassword());
         var properties=new Properties();properties.setProperty("useAffectedRows","true");
         affected.setConnectionProperties(properties);
         var jdbc=new JdbcTemplate(affected);
