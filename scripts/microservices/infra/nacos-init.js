@@ -11,6 +11,7 @@ const files = Object.freeze({
   'knode-gateway.yaml': 'deploy/microservices/nacos/knode-gateway.yaml',
   'knode-gateway.gw-flow.json': 'deploy/microservices/nacos/knode-gateway.gw-flow.json',
   'knode-gateway.gw-api-group.json': 'deploy/microservices/nacos/knode-gateway.gw-api-group.json',
+  'knode-user.relay.json': 'deploy/microservices/nacos/knode-user.relay.json',
   'knode-user.flow.json': 'deploy/microservices/nacos/service.flow.json',
   'knode-user.degrade.json': 'deploy/microservices/nacos/service.degrade.json'
 });
@@ -18,6 +19,20 @@ const ABSENT_MD5 = 'knode-no-existing-md5-v1'; // Intentionally not a possible 3
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 class SafeError extends Error {}
 function fail(message) { throw new SafeError(message); }
+// Only fixed non-secret Gateway routes, empty rule sets and the bounded User field may be published.
+function validateTemplate(id, content) {
+  if (id === 'knode-gateway.yaml' &&
+      sha(Buffer.from(content.replace(/\r\n/g, '\n'), 'utf8')) !==
+        '133e51601b49c19a14f5f6c1eeed600ba5078015503fefa8f71fbe59e1ab597b')
+    fail('Gateway template differs from approved non-secret routes');
+  if (id === 'knode-user.relay.json' &&
+      !/^[ \t\r\n]*\{[ \t\r\n]*"sessionEventRelayBatchSize"[ \t\r\n]*:[ \t\r\n]*(?:[1-9]|[1-9][0-9]|100)[ \t\r\n]*\}[ \t\r\n]*(?![^])/.test(content))
+    fail('invalid User relay template');
+  if ((id === 'knode-user.flow.json' || id === 'knode-user.degrade.json' ||
+       id === 'knode-gateway.gw-flow.json' || id === 'knode-gateway.gw-api-group.json') &&
+      !/^[ \t\r\n]*\[[ \t\r\n]*\][ \t\r\n]*(?![^])/.test(content))
+    fail('rule initialization requires an empty array');
+}
 function parseArgs(args) {
   const options = {};
   for (const arg of args) {
@@ -48,7 +63,9 @@ function parseArgs(args) {
     if (!fs.statSync(filename).isFile()) fail('invalid template');
     const content = fs.readFileSync(filename);
     if (content.length === 0 || content.length > 32768) fail('invalid template size');
-    return { id, template: files[id], sha256: sha(content), content: content.toString('utf8') };
+    const text = content.toString('utf8');
+    validateTemplate(id, text);
+    return { id, template: files[id], sha256: sha(content), content: text };
   });
   return { server: address.origin, namespace: options.namespace, group: options.group, entries, apply: !!options.apply };
 }
@@ -181,4 +198,5 @@ async function main() {
   if (!c.apply) return console.log(JSON.stringify({result: 'plan', plan: publicPlan(c)}, null, 2));
   console.log(JSON.stringify(await execute(c, process.env.NACOS_INIT_ACCESS_TOKEN), null, 2));
 }
-main().catch(error => { console.error('initialization refused: ' + (error instanceof SafeError ? error.message : 'I/O or protocol failure')); process.exitCode = 1; });
+if (require.main === module) main().catch(error => { console.error('initialization refused: ' + (error instanceof SafeError ? error.message : 'I/O or protocol failure')); process.exitCode = 1; });
+module.exports = {validateTemplate};

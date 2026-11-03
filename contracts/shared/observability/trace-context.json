@@ -17,6 +17,6 @@
   "relay": "Transmit the stored immutable traceparent unchanged on each retry. Never capture the relay thread as the event producer.",
   "consumer": "Validate with EventTraceContext.fromStored, then startConsumer with the persisted context and a bounded operation name and delivery attempt. Missing or invalid context starts a new root, never inherits ambient relay/consumer-thread context. End the returned span.",
   "delivery": "At-least-once retries may create multiple consumer spans, each with knode.event.delivery_attempt >= 1 and the same producer parent. Span export is best effort and does not prove business delivery.",
-  "integration": "Java API and synthetic fixtures verified. User v2 producer wiring and real User Outbox to Redis Stream consumer chain remain pending.",
+  "integration": "Java API and synthetic fixtures verified. User-side v2 producer wiring is delivered; controller integration and the real User Outbox to Redis Stream consumer chain remain pending.",
   "compatibility": "The existing EventTraceContext methods and traceparent-only semantics remain unchanged; tracestate and baggage are not accepted in this version."
 }

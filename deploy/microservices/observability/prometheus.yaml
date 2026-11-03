@@ -5,8 +5,8 @@ scrape_configs:
   - job_name: knode-gateway
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ["127.0.0.1:19089"]
-  - job_name: knode-java-fixture
+      - targets: ["127.0.0.1:19090"]
+  - job_name: knode-user
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ["127.0.0.1:19090"]
+      - targets: ["127.0.0.1:19092"]

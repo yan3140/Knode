@@ -1,5 +1,5 @@
 {
-  "status": "implemented-verified-on-isolated-nacos-3.0.3",
+  "status": "G8 initializer verified against isolated Nacos 3.0.3; R1 User relay template verified with HTTP substitute, awaiting real combined validation",
   "scope": "Only Nacos 3.0.3 standalone with authenticated admin API on an explicit 127.0.0.1 non-default test port, reserved exclusively for this initialization. This initializes a new verify namespace; it is not a production initializer.",
   "tool": "scripts/microservices/infra/nacos-init.js",
   "invocation": {
@@ -12,9 +12,10 @@
     "knode-gateway.gw-flow.json": "deploy/microservices/nacos/knode-gateway.gw-flow.json",
     "knode-gateway.gw-api-group.json": "deploy/microservices/nacos/knode-gateway.gw-api-group.json",
     "knode-user.flow.json": "deploy/microservices/nacos/service.flow.json",
-    "knode-user.degrade.json": "deploy/microservices/nacos/service.degrade.json"
+    "knode-user.degrade.json": "deploy/microservices/nacos/service.degrade.json",
+    "knode-user.relay.json": "deploy/microservices/nacos/knode-user.relay.json"
   },
-  "contract": "At least one explicitly named Gateway Data ID and one explicitly named User Data ID are required. The User IDs are only empty governance-rule templates; User Nacos import, User application configuration and observability wiring remain with User and are not claimed implemented.",
+  "contract": "At least one explicitly named Gateway and one explicitly named User Data ID are required. The fixed User relay template contains only sessionEventRelayBatchSize, an integer in 1..100 (default 50). User flow and degrade initialization are empty arrays. User configuration implementation is delivered but awaits controller integration and real combined verification.",
   "plan": "Reads only the fixed non-secret templates, validates input, prints Data IDs and SHA-256 hashes, performs no network access and creates no manifest.",
   "apply": [
     "Requires an external NACOS_INIT_ACCESS_TOKEN and NACOS_INIT_EXCLUSIVE_INSTANCE=confirm; acquires a same-control-port local lock and writes a no-secret manifest before any network request.",
@@ -32,7 +33,10 @@
     "This is not a transactional multi-Data-ID publish; partial failure leaves a fresh namespace for review. A planned or incomplete manifest is not resumed automatically.",
     "Only the listed local templates can be applied. The tool never reads existing credentials, discovers accounts, creates ACLs, deletes namespaces or changes firewall settings.",
     "Namespace creation ownership is bound to successful creation plus the random description marker. If the creation response is lost or the marker is missing/mismatched, ownership is not assumed.",
-    "No real User logout, Redis, Agent run, or User Nacos wiring is validated by this initializer."
+    "No real User logout, Redis, Agent run, or User Nacos wiring is validated by this initializer.",
+    "User relay input is restricted to exactly one integer field; User rule initialization accepts only empty arrays. Arbitrary User configuration and credentials cannot be added through these templates.",
+    "The Gateway YAML must match the reviewed non-secret route template (line endings normalized); Gateway and User rule initialization accept only empty arrays. Changing route content requires an explicit tool/template update.",
+    "An existing completed G8 manifest with different Data IDs or template hashes is intentionally rejected; allocate a fresh exclusive verify namespace for the R1 relay configuration instead of silently extending the old run."
   ],
   "sources": [
     "https://github.com/alibaba/nacos/blob/3.0.3/config/src/main/java/com/alibaba/nacos/config/server/controller/v3/ConfigControllerV3.java",

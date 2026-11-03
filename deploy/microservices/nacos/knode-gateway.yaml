@@ -1,4 +1,4 @@
-# Non-secret sample for group KNODE_SERVICE; use a separate configuration namespace.
+# Non-secret routes; publish only to the explicitly selected configuration group.
 knode:
   gateway:
     user-uri: lb://knode-user

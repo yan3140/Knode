@@ -9,7 +9,7 @@ const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '../../..');
 const cli = path.join(__dirname, 'nacos-init.js');
 const id = () => crypto.randomBytes(6).toString('hex');
-const ids = 'knode-gateway.gw-flow.json,knode-user.flow.json';
+const ids = 'knode-gateway.yaml,knode-gateway.gw-flow.json,knode-user.flow.json,knode-user.relay.json';
 const dir = ns => path.join(root, 'deploy/microservices/nacos/target/initialization', ns);
 function argumentsFor(port, run) {
   return ['--server=http://127.0.0.1:' + port, '--namespace=verify-' + run,
@@ -91,16 +91,17 @@ test('manifest precedes network, conditional create, no-op and drift refusal', a
     } finally { fs.unlinkSync(lock); }
     const applied=await invoke(args.concat('--apply'));
     assert.equal(applied.code,0,applied.stderr);assert.equal(JSON.parse(applied.stdout).result,'created');
-    assert.equal(manifestSeen,true);assert.equal(writes,2);
+    assert.equal(manifestSeen,true);assert.equal(writes,4);
+    assert.deepEqual(JSON.parse(configs.get('knode-user.relay.json')),{sessionEventRelayBatchSize:50});
     const repeat=await invoke(args.concat('--apply'));
-    assert.equal(repeat.code,0,repeat.stderr);assert.equal(JSON.parse(repeat.stdout).result,'no-op');assert.equal(writes,2);
+    assert.equal(repeat.code,0,repeat.stderr);assert.equal(JSON.parse(repeat.stdout).result,'no-op');assert.equal(writes,4);
     owner='unexpected-owner';
     const changedOwner=await invoke(args.concat('--apply'));
-    assert.equal(changedOwner.code,1);assert.equal(writes,2);
+    assert.equal(changedOwner.code,1);assert.equal(writes,4);
     owner=JSON.parse(fs.readFileSync(path.join(dir(ns),'manifest.json'),'utf8')).owner;
-    configs.set('knode-user.flow.json','different');
+    configs.set('knode-user.relay.json','{"sessionEventRelayBatchSize":51}');
     const drift=await invoke(args.concat('--apply'));
-    assert.equal(drift.code,1);assert.equal(writes,2);assert.equal(configs.get('knode-user.flow.json'),'different');
+    assert.equal(drift.code,1);assert.equal(writes,4);assert.equal(configs.get('knode-user.relay.json'),'{"sessionEventRelayBatchSize":51}');
   } finally {await new Promise(resolve=>server.close(resolve));}
 });
 
@@ -122,4 +123,41 @@ test('an existing namespace without a completed ownership manifest cannot be wri
     assert.equal(result.code,1);assert.match(result.stderr,/existing namespace/);assert.equal(writes,0);
     assert.equal(JSON.parse(fs.readFileSync(path.join(dir(ns),'manifest.json'),'utf8')).state,'planned');
   } finally {await new Promise(resolve=>server.close(resolve));}
+});
+
+test('User initialization templates accept only the explicit non-secret shapes', () => {
+  const {validateTemplate}=require('./nacos-init.js');
+  for(const n of [1,50,100]) assert.doesNotThrow(()=>validateTemplate('knode-user.relay.json',
+      JSON.stringify({sessionEventRelayBatchSize:n})));
+  for(const invalid of ['{}','{"sessionEventRelayBatchSize":0}','{"sessionEventRelayBatchSize":101}',
+      '{"sessionEventRelayBatchSize":"50"}','{"sessionEventRelayBatchSize":1.0}',
+      '{"sessionEventRelayBatchSize":1e1}','{"sessionEventRelayBatchSize":50,"password":"secret"}',
+      '{"sessionEventRelayBatchSize":1,"sessionEventRelayBatchSize":50}',
+      '{"sessionEventRelayBatchSize":50} {}','{"sessionEventRelayBatchSize":50}\u000b',
+      '\ufeff{"sessionEventRelayBatchSize":50}','{"sessionEventRelayBatchSize":50}\u2028'])
+    assert.throws(()=>validateTemplate('knode-user.relay.json',invalid));
+  for(const id of ['knode-user.flow.json','knode-user.degrade.json','knode-gateway.gw-flow.json','knode-gateway.gw-api-group.json']) {
+    assert.doesNotThrow(()=>validateTemplate(id,' []\n'));
+    assert.throws(()=>validateTemplate(id,'[{"secret":"test"}]'));
+  }
+  const gateway=fs.readFileSync(path.join(root,'deploy/microservices/nacos/knode-gateway.yaml'),'utf8');
+  assert.doesNotThrow(()=>validateTemplate('knode-gateway.yaml',gateway));
+  assert.throws(()=>validateTemplate('knode-gateway.yaml',gateway+'password: secret\\n'));
+});
+
+test('local runbook binds matching discovery groups, loopback registration and management targets', () => {
+  const runbook=JSON.parse(fs.readFileSync(path.join(root,'deploy/microservices/local-run.json'),'utf8'));
+  const service=name=>runbook.startup.find(x=>x.name===name);
+  assert.equal(runbook.defaults.gatewayManagement,19090);
+  assert.equal(runbook.defaults.userManagement,19092);
+  assert.equal(runbook.defaults.prometheus,19091);
+  for(const name of ['gateway','user'])
+    assert(service(name).argv.includes('--spring.cloud.nacos.discovery.ip=127.0.0.1'));
+  assert(service('gateway').environment.includes('NACOS_DISCOVERY_GROUP'));
+  assert(service('user').environment.includes('USER_NACOS_GROUP'));
+  assert(service('user').environment.includes('USER_NACOS_CONFIG_GROUP'));
+  assert(service('nacos-initialization').argv.some(x=>x.includes('knode-user.relay.json')));
+  const prometheus=fs.readFileSync(path.join(root,'deploy/microservices/observability/prometheus.yaml'),'utf8');
+  assert.match(prometheus,/job_name: knode-gateway[\s\S]*?127\.0\.0\.1:19090/);
+  assert.match(prometheus,/job_name: knode-user[\s\S]*?127\.0\.0\.1:19092/);
 });

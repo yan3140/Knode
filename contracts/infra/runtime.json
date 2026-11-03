@@ -1,6 +1,6 @@
 {
   "version": "0.4",
-  "status": "infra-verified; User and Agent integration pending",
+  "status": "Gateway infra verified; User-side G8 delivery available, awaiting controller integration and combined verification",
   "serviceName": "knode-gateway",
   "health": "/actuator/health",
   "liveness": "/actuator/health/liveness",
@@ -9,6 +9,7 @@
     "defaultEnabled": false,
     "environment": [
       "NACOS_DISCOVERY_ENABLED",
+      "NACOS_DISCOVERY_GROUP",
       "NACOS_CONFIG_ENABLED",
       "NACOS_SERVER_ADDR",
       "NACOS_NAMESPACE",
@@ -21,7 +22,8 @@
     ],
     "namespaceBehavior": "Each explicit discovery/configuration namespace overrides NACOS_NAMESPACE; governance uses its own KNODE_GOV_NACOS_NAMESPACE.",
     "configurationImport": "NACOS_CONFIG_IMPORT is resolved before Spring Config Data; explicit SPRING_CONFIG_IMPORT takes precedence.",
-    "routeRefresh": "Refresh scope and gateway route cache are refreshed on configuration change."
+    "routeRefresh": "Refresh scope and gateway route cache are refreshed on configuration change.",
+    "groups": "NACOS_DISCOVERY_GROUP maps to spring.cloud.nacos.discovery.group, default DEFAULT_GROUP; it must equal the User registration group USER_NACOS_GROUP. NACOS_GROUP applies only to Gateway config and defaults KNODE_SERVICE; KNODE_GOV_NACOS_GROUP applies only to Gateway governance. These groups do not implicitly share a value."
   },
   "auth": "Shared SDK v0.2 plus nonblocking authoritative session GET; no positive cache",
   "governanceEnvironment": [
@@ -57,7 +59,10 @@
   "localPorts": {
     "gateway": 18089,
     "user": 18090,
-    "dashboard": 18091
+    "dashboard": 18091,
+    "gatewayManagement": "19090 explicitly selected for local run; without a separate management.server.port, management shares the application port",
+    "userManagement": "USER_MANAGEMENT_PORT defaults to 19092 and loopback, per User G8 runtime input",
+    "prometheus": "19091 explicitly selected in the local runbook"
   },
   "authRedisTls": "Default true; full certificate and hostname verification. False must be explicit for a deliberately isolated plaintext server. VM native TLS not verified.",
   "observabilityEnvironment": [

@@ -1,6 +1,6 @@
 {
   "version": "0.3",
-  "status": "infra-verified; business-service integration pending",
+  "status": "infra verified; User-side G8 governance delivery awaits controller integration and real combined verification",
   "namespace": "explicit isolated namespace required",
   "group": "KNODE_SENTINEL",
   "dataIds": [
@@ -20,13 +20,13 @@
       "id": "knode-<service>.flow.json",
       "type": "flow",
       "resource": "actual registered resource name",
-      "serviceClient": "opt-in knode-governance; not wired into business services"
+      "serviceClient": "opt-in knode-governance; User-side G8 integration delivered, awaiting controller integration and real combined verification"
     },
     {
       "id": "knode-<service>.degrade.json",
       "type": "degrade",
       "resource": "actual registered resource name",
-      "serviceClient": "opt-in knode-governance; not wired into business services"
+      "serviceClient": "opt-in knode-governance; User-side G8 integration delivered, awaiting controller integration and real combined verification"
     }
   ],
   "loading": {

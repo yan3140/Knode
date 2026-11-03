@@ -1,6 +1,6 @@
 {
   "version": "0.2",
-  "status": "infra-verified; User and Agent business integration pending",
+  "status": "infra verified; User-side G8 observability delivery awaits controller integration and real combined verification",
   "requestId": {
     "header": "X-Request-Id",
     "pattern": "[A-Za-z0-9._-]{1,64}",
@@ -18,7 +18,7 @@
     "bounds": "Gateway SDK max queue 512 spans, max batch 128, schedule 1s, export timeout 2s, connect timeout 1s. Overflow drops spans; observability is best effort.",
     "metrics": "Spring Boot http.server.requests uses method, status, outcome, exception and a framework route template when available; Gateway may report UNKNOWN. Histogram enabled. Never add raw path IDs, user IDs, sids or request IDs as metric labels.",
     "management": "Expose health and prometheus on an explicitly configured loopback management address and independent port; do not expose prometheus via a public gateway route.",
-    "enabledServices": "Gateway wired and disabled by default; ordinary Java services must explicitly add the module and configuration. User and Agent business integration remains pending.",
+    "enabledServices": "Gateway wired and disabled by default; User-side G8 observability wiring is delivered and disabled by default, pending controller integration and real combined verification. Agent business integration remains pending.",
     "configurationEnvironment": [
       "KNODE_OBSERVABILITY_ENABLED",
       "KNODE_ENVIRONMENT",
@@ -28,7 +28,7 @@
     ]
   },
   "python": "Independent FastAPI fixture uses existing read-only yan_agent.observability.tracing with W3C and OTLP HTTP. OTEL_BSP_* and OTEL_EXPORTER_OTLP_TRACES_TIMEOUT in the environment template bound its queue and HTTP timeout. This does not prove the Agent business pipeline.",
-  "async": "See contracts/shared/observability/trace-context.json. Synthetic Java/Redis-protocol-substitute fixture and Collector/Jaeger paths are verified separately; real User Outbox to Redis Stream chain is not verified.",
+  "async": "See contracts/shared/observability/trace-context.json. Synthetic Java/Redis-protocol-substitute fixture and Collector/Jaeger paths are verified separately. User-side v2 producer implementation is delivered; real User Outbox to Redis Stream chain awaits combined verification.",
   "collector": {
     "receiver": "OTLP gRPC and HTTP on loopback by default",
     "memoryLimitMiB": 128,
