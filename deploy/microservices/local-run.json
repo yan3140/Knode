@@ -75,7 +75,50 @@
         "<run>/nacos-runtime/nacos/target/nacos-server.jar"
       ],
       "environment": "Supply SPRING_APPLICATION_JSON privately with nacos.core.auth.enabled=true, nacos.core.auth.admin.enabled=true, nacos.core.auth.console.enabled=true, nacos.core.auth.plugin.nacos.token.secret.key, nacos.core.auth.server.identity.key and nacos.core.auth.server.identity.value. Initialize an admin only in this fresh instance, and obtain its short-lived token through the official auth API. Values stay in the child environment or memory.",
-      "ready": "GET http://127.0.0.1:<nacos-port>/nacos/v3/admin/core/state/readiness must return HTTP 200 and JSON code 0; /state must report version 3.0.3, standalone and auth enabled. Confirm anonymous namespace access returns 401/403, the separate console listener is available, and the owned Java process remains alive after startup. Using -Dserver.port for the server would also override the console port and cause a bind conflict."
+      "ready": "GET http://127.0.0.1:<nacos-port>/nacos/v3/admin/core/state/readiness must return HTTP 200 and JSON code 0; /state must report version 3.0.3, standalone and auth enabled. Confirm anonymous namespace access returns 401/403, the separate console listener is available, and the owned Java process remains alive after startup. Using -Dserver.port for the server would also override the console port and cause a bind conflict.",
+      "verifiedAdditionalJvmArgs": [
+        "-XX:ActiveProcessorCount=2"
+      ],
+      "bootstrapAuth": {
+        "boundary": "Fresh, exclusive, isolated loopback Nacos 3.0.3 instance only. Generate a new instance-specific administrator password and server auth values in memory or private environment. Never reuse shared credentials.",
+        "privateSpringApplicationJson": {
+          "nacos.core.auth.enabled": true,
+          "nacos.core.auth.admin.enabled": true,
+          "nacos.core.auth.console.enabled": true,
+          "nacos.core.auth.plugin.nacos.token.secret.key": "<base64 of fresh random secret bytes; supplied privately>",
+          "nacos.core.auth.server.identity.key": "<fresh private server identity key>",
+          "nacos.core.auth.server.identity.value": "<fresh private server identity value>"
+        },
+        "bootstrapAdmin": {
+          "method": "POST",
+          "path": "/nacos/v3/auth/user/admin",
+          "contentType": "application/x-www-form-urlencoded",
+          "form": {
+            "password": "<fresh administrator password from private environment or memory>"
+          },
+          "success": "HTTP 200 and JSON code 0; use only on a fresh instance. This response can echo the administrator password; parse in memory and never log, persist, or display the response body."
+        },
+        "login": {
+          "method": "POST",
+          "path": "/nacos/v3/auth/user/login",
+          "contentType": "application/x-www-form-urlencoded",
+          "form": {
+            "username": "nacos",
+            "password": "<same administrator password from private environment or memory>"
+          },
+          "success": "HTTP 200; read nonempty accessToken from the top-level JSON response, not data.accessToken. Keep the entire response and accessToken in memory; never display or persist them."
+        },
+        "initializer": "Pass the accessToken as NACOS_INIT_ACCESS_TOKEN and the explicit NACOS_INIT_EXCLUSIVE_INSTANCE=confirm only in the child environment. The initializer sends Authorization: Bearer <token> to admin APIs. A plan is offline and needs neither value.",
+        "applicationClients": "Pass username nacos and the same fresh password through the application-specific NACOS_USERNAME/NACOS_PASSWORD or USER_NACOS_USERNAME/USER_NACOS_PASSWORD environment variables. Do not substitute the admin bearer token for SDK username/password.",
+        "handling": "Construct a POST body using urllib.parse.urlencode(form).encode(), set Content-Type explicitly, and call urllib.request with data=body. Never put passwords or access tokens in URL/query, argv, saved logs, shell history, or manifests; never print response bodies or request headers. Handle errors without logging sensitive response data."
+      },
+      "checks": {
+        "process": "Retain the owned Popen handle and confirm poll() is None after startup and again after the console binds. An early server HTTP response alone can precede a later console bind failure.",
+        "server": "GET /nacos/v3/admin/core/state/readiness on the chosen server HTTP port: HTTP 200 and JSON code 0. GET /nacos/v3/admin/core/state: data.version=3.0.3, data.startup_mode=standalone, data.server_port equals the chosen port, and data.auth_enabled=true. Check anonymous GET /nacos/v3/admin/core/namespace/check with a fresh non-secret verify namespace returns 401 or 403.",
+        "console": "Probe a TCP connection to 127.0.0.1:<console-port> while the same owned process is alive. A listening port is liveness only; it does not validate console authentication or operation.",
+        "grpc": "Probe 127.0.0.1:<nacos-port+1000> for client gRPC and inspect <nacos-port+1001> for server-to-server gRPC. TCP connectivity alone does not prove protocol/auth. Confirm client function with a real authenticated Nacos SDK registration and an authenticated admin instance-list lookup in the exact isolated namespace and group. The G10 SDK registration worked; console and +1001 listener availability were not separately recorded in that run.",
+        "collision": "Before launch reserve/check server, server+1000, server+1001, console and all application ports; also check the whole host/network as applicable because gRPC may bind beyond loopback. Do not kill processes by name or port."
+      }
     },
     {
       "order": 2,
