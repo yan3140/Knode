@@ -39,7 +39,12 @@
       "exportTimeout": "2s",
       "connectTimeout": "1s"
     },
-    "propagation": "W3C trace context only; baggage and baggage correlation disabled"
+    "propagation": "W3C trace context only; baggage and baggage correlation disabled",
+    "resourceAttributes": {
+      "service.name": "spring.application.name",
+      "service.version": "USER_OBSERVABILITY_VERSION",
+      "deployment.environment.name": "USER_OBSERVABILITY_ENVIRONMENT"
+    }
   },
   "legacyCompatibility": "Existing stored v1 event_json is replayed byte-for-byte. Existing intents use version 1 and retain no captured producer context; old unmaterialized outbox facts serialize v1. Newly recorded intents produce v2, with optional producer traceparent. Recovery and replay do not recapture relay context.",
   "governance": {

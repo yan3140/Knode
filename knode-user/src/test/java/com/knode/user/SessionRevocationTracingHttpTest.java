@@ -38,7 +38,7 @@ import static org.mockito.Mockito.*;
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,properties={
         "USER_OBSERVABILITY_ENABLED=true","USER_OBSERVABILITY_ENVIRONMENT=test","USER_GOVERNANCE_ENABLED=true","USER_GOVERNANCE_GROUP=VERIFY_G8",
         "USER_NACOS_SERVER_ADDR=127.0.0.1:1","USER_NACOS_NAMESPACE=verify-test",
-        "USER_OBSERVABILITY_VERSION=test","USER_OTLP_ENDPOINT=http://127.0.0.1:1/v1/traces",
+        "USER_OBSERVABILITY_VERSION=r2-test-version","USER_OTLP_ENDPOINT=http://127.0.0.1:1/v1/traces",
         "management.tracing.sampling.probability=1.0"})
 @AutoConfigureObservability
 @Import(SessionRevocationTracingHttpTest.ExporterConfig.class)
@@ -239,6 +239,10 @@ class SessionRevocationTracingHttpTest {
         var original=exporter.getFinishedSpanItems().stream().filter(s -> parent.substring(36,52).equals(s.getSpanId())).findFirst();
         assertTrue(original.isPresent());assertEquals("11111111111111111111111111111111",original.get().getTraceId());
         assertEquals("2222222222222222",original.get().getParentSpanId());
+        var resource=original.get().getResource();
+        assertEquals("knode-user",resource.getAttribute(io.opentelemetry.api.common.AttributeKey.stringKey("service.name")));
+        assertEquals("r2-test-version",resource.getAttribute(io.opentelemetry.api.common.AttributeKey.stringKey("service.version")));
+        assertEquals("test",resource.getAttribute(io.opentelemetry.api.common.AttributeKey.stringKey("deployment.environment.name")));
         var freshLogin=call("/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"synthetic-password\"}",null,null);
         String freshToken=json.readTree(freshLogin.getBody()).path("data").path("token").asText();
         String privateTrace="33333333333333333333333333333333";
