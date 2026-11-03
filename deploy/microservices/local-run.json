@@ -106,7 +106,8 @@
             "username": "nacos",
             "password": "<same administrator password from private environment or memory>"
           },
-          "success": "HTTP 200; read nonempty accessToken from the top-level JSON response, not data.accessToken. Keep the entire response and accessToken in memory; never display or persist them."
+          "success": "HTTP 200; read nonempty accessToken from the top-level JSON response, not data.accessToken. Keep the entire response and accessToken in memory; never display or persist them.",
+          "readinessRetry": "After successful administrator initialization, a login may briefly return HTTP 403. Retry the same POST with the same credentials at short intervals for at most 30 seconds while the owned server process remains alive. On process exit or timeout, report not ready or authentication failure and stop; do not reinitialize the administrator, change the account or password, retry indefinitely, or record response bodies, passwords or tokens."
         },
         "initializer": "Pass the accessToken as NACOS_INIT_ACCESS_TOKEN and the explicit NACOS_INIT_EXCLUSIVE_INSTANCE=confirm only in the child environment. The initializer sends Authorization: Bearer <token> to admin APIs. A plan is offline and needs neither value.",
         "applicationClients": "Pass username nacos and the same fresh password through the application-specific NACOS_USERNAME/NACOS_PASSWORD or USER_NACOS_USERNAME/USER_NACOS_PASSWORD environment variables. Do not substitute the admin bearer token for SDK username/password.",
