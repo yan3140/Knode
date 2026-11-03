@@ -19,6 +19,7 @@ final class ExternalNacosMode implements AutoCloseable {
     private final Path cache;
     private final ObjectMapper json=new ObjectMapper();
     private final Runnable persist;
+    private final long readbackTimeoutMillis,readbackIntervalMillis;
     private final List<Map<String,Object>> journal=new ArrayList<>();
     private final Map<String,String> original=new LinkedHashMap<>();
     private ConfigService config,otherConfig;
@@ -26,7 +27,12 @@ final class ExternalNacosMode implements AutoCloseable {
     private final Map<String,String> previousProperties=new HashMap<>();
 
     ExternalNacosMode(ExternalNacosGuard.Inputs inputs,Path cache,Runnable persist) {
+        this(inputs,cache,persist,10000,200);
+    }
+    ExternalNacosMode(ExternalNacosGuard.Inputs inputs,Path cache,Runnable persist,long timeoutMillis,long intervalMillis) {
+        if (timeoutMillis<1 || intervalMillis<1) throw new IllegalArgumentException("Positive readback bounds required");
         this.inputs=inputs;this.cache=cache;this.persist=persist;
+        this.readbackTimeoutMillis=timeoutMillis;this.readbackIntervalMillis=intervalMillis;
     }
     Map<String,Object> manifest() {
         var result=new LinkedHashMap<String,Object>();
@@ -52,9 +58,33 @@ final class ExternalNacosMode implements AutoCloseable {
             otherNaming=NacosFactory.createNamingService(properties(inputs.otherNamespace()));
         } catch (Exception failure) {throw new IllegalStateException("Nacos SDK startup failed");}
     }
-    private String read(ConfigService client,String id,String group) throws Exception {
-        try {return client.getConfig(id,group,5000);}
+    private String read(ConfigService client,String id,String group) throws Exception {return read(client,id,group,5000);}
+    private String read(ConfigService client,String id,String group,long timeoutMillis) throws Exception {
+        try {return client.getConfig(id,group,timeoutMillis);}
         catch (Exception failure) {throw new IllegalStateException("Nacos config read failed for "+id);}
+    }
+    private void awaitReadback(ConfigService client,String action,String id,String group,String before,String expected) throws Exception {
+        long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(readbackTimeoutMillis);
+        while (true) {
+            long remaining=deadline-System.nanoTime();
+            if (remaining<=0) {
+                note(action,id,group,before,expected,"readback-timeout");
+                throw new IllegalStateException("Nacos readback timed out for "+action+" "+id);
+            }
+            String actual;
+            try {actual=read(client,id,group,Math.max(1,Math.min(1500,java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remaining))));}
+            catch (IllegalStateException unavailable) {
+                Thread.sleep(Math.max(1,Math.min(readbackIntervalMillis,java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remaining))));
+                continue;
+            }
+            if (Objects.equals(actual,expected)) return;
+            if (!Objects.equals(actual,before)) {
+                note(action,id,group,before,expected,"readback-unexpected");
+                throw new IllegalStateException("Unexpected Nacos readback for "+action+" "+id);
+            }
+            remaining=deadline-System.nanoTime();
+            if (remaining>0) Thread.sleep(Math.max(1,Math.min(readbackIntervalMillis,java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remaining))));
+        }
     }
     static int relayValue(String raw) throws Exception {
         if (raw==null || raw.length()>1024) throw new IllegalArgumentException("Explicit relay JSON required");
@@ -99,78 +129,89 @@ final class ExternalNacosMode implements AutoCloseable {
         entry.put("before",before);entry.put("after",after);entry.put("state",state);
         journal.add(entry);persist.run();
     }
-    private boolean knownCurrent(String id,String namespace,String value) {
+    private void settlePending(ConfigService client,String id,String namespace) throws Exception {
         for (int i=journal.size()-1;i>=0;i--) {
             var entry=journal.get(i);
             if (!id.equals(entry.get("dataId")) || !namespace.equals(entry.get("namespace"))) continue;
             String state=(String)entry.get("state"),action=(String)entry.get("action");
-            if ((action.startsWith("publish") || action.startsWith("remove") || action.startsWith("restore"))
-                    && ("planned".equals(state) || "verified".equals(state))) {
-                return Objects.equals(value,entry.get("after"))
-                        || ("planned".equals(state) && Objects.equals(value,entry.get("before")));
+            if (!(action.startsWith("publish") || action.startsWith("remove") || action.startsWith("restore"))) continue;
+            if ("verified".equals(state)) return;
+            if ("planned".equals(state)) {
+                String group=(String)entry.get("group"),before=(String)entry.get("before"),after=(String)entry.get("after");
+                awaitReadback(client,action,id,group,before,after);
+                note(action,id,group,before,after,"verified");
+                return;
             }
         }
-        return false;
+    }
+    private String currentExpected(ConfigService client,String id,String group,String namespace,String originalValue) throws Exception {
+        settlePending(client,id,namespace);
+        String expected=originalValue,previous=originalValue;
+        for (int i=journal.size()-1;i>=0;i--) {
+            var entry=journal.get(i);
+            if (!id.equals(entry.get("dataId")) || !namespace.equals(entry.get("namespace"))
+                    || !"verified".equals(entry.get("state"))) continue;
+            String action=(String)entry.get("action");
+            if (action.startsWith("publish") || action.startsWith("remove") || action.startsWith("restore")) {
+                expected=(String)entry.get("after");previous=(String)entry.get("before");break;
+            }
+        }
+        awaitReadback(client,namespace.equals(inputs.otherNamespace())?"check-other":"check-current",id,group,previous,expected);
+        return expected;
     }
     void publish(String id,String value) throws Exception {
         if (!id.equals(RELAY) && !id.equals(FLOW)) throw new IllegalArgumentException("Data ID not authorized");
         String group=id.equals(RELAY)?inputs.configGroup():inputs.governanceGroup();
-        String before=read(config,id,group);
-        boolean knownBefore=Objects.equals(before,original.get(id)) || knownCurrent(id,inputs.namespace(),before);
+        if (!original.containsKey(id)) throw new IllegalStateException("Missing original config for "+id);
+        String before=currentExpected(config,id,group,inputs.namespace(),original.get(id));
         boolean allowedValue=id.equals(RELAY)
                 ? List.of("{\"sessionEventRelayBatchSize\":0}","{\"sessionEventRelayBatchSize\":2}","{\"sessionEventRelayBatchSize\":3}").contains(value)
                 : List.of(RULE,"[]","{\"invalid\":true}").contains(value);
-        if (!original.containsKey(id) || !knownBefore || !allowedValue)
-            throw new IllegalStateException("Unexpected config; refusing publication for "+id);
+        if (!allowedValue) throw new IllegalStateException("Unexpected config; refusing publication for "+id);
         note("publish",id,group,before,value,"planned");
         try {if (!config.publishConfig(id,group,value)) throw new IllegalStateException("Nacos publish refused");}
         catch (Exception failure) {throw new IllegalStateException("Nacos publish failed for "+id);}
-        if (!value.equals(read(config,id,group))) throw new IllegalStateException("Nacos publish readback mismatch");
+        awaitReadback(config,"publish",id,group,before,value);
         note("publish",id,group,before,value,"verified");
     }
     void removeFlow() throws Exception {
         String group=inputs.governanceGroup();
-        String before=read(config,FLOW,group);
-        boolean known=original.containsKey(FLOW) && (Objects.equals(before,original.get(FLOW))
-                || knownCurrent(FLOW,inputs.namespace(),before));
-        if (!known || before==null) throw new IllegalStateException("Unexpected flow config; refusing removal");
+        if (!original.containsKey(FLOW)) throw new IllegalStateException("Missing original flow config");
+        String before=currentExpected(config,FLOW,group,inputs.namespace(),original.get(FLOW));
+        if (before==null) throw new IllegalStateException("Unexpected flow config; refusing removal");
         emptyRules(before);
         note("remove",FLOW,group,before,null,"planned");
         try {if (!config.removeConfig(FLOW,group)) throw new IllegalStateException("Removal refused");}
         catch (Exception failure) {throw new IllegalStateException("Nacos flow removal failed");}
-        if (read(config,FLOW,group)!=null) throw new IllegalStateException("Nacos flow removal readback mismatch");
+        awaitReadback(config,"remove",FLOW,group,before,null);
         note("remove",FLOW,group,before,null,"verified");
     }
     void publishOtherInvalidRelay() throws Exception {
-        String before=read(otherConfig,RELAY,inputs.configGroup());
-        if (!original.containsKey("otherRelay") || before==null || !Objects.equals(before,original.get("otherRelay")))
-            throw new IllegalStateException("Other namespace changed before test");
+        if (!original.containsKey("otherRelay")) throw new IllegalStateException("Missing other namespace config");
+        String before=currentExpected(otherConfig,RELAY,inputs.configGroup(),inputs.otherNamespace(),original.get("otherRelay"));
+        if (!Objects.equals(before,original.get("otherRelay"))) throw new IllegalStateException("Other namespace changed before test");
         String value="{\"sessionEventRelayBatchSize\":0}";
         note("publish-other",RELAY,inputs.configGroup(),before,value,"planned");
         try {if (!otherConfig.publishConfig(RELAY,inputs.configGroup(),value)) throw new IllegalStateException("Publish refused");}
         catch (Exception failure) {throw new IllegalStateException("Other namespace publish failed");}
-        if (!value.equals(read(otherConfig,RELAY,inputs.configGroup()))) throw new IllegalStateException("Other namespace readback mismatch");
+        awaitReadback(otherConfig,"publish-other",RELAY,inputs.configGroup(),before,value);
         note("publish-other",RELAY,inputs.configGroup(),before,value,"verified");
     }
     void restoreOther() throws Exception {
         String before=original.get("otherRelay");
         if (before==null) return;
-        String current=read(otherConfig,RELAY,inputs.configGroup());
+        String current=currentExpected(otherConfig,RELAY,inputs.configGroup(),inputs.otherNamespace(),before);
         if (!Objects.equals(before,current)) {
-            boolean known=knownCurrent(RELAY,inputs.otherNamespace(),current);
-            if (!known) {
-                note("restore-other",RELAY,inputs.configGroup(),null,null,"refused-unexpected-value");
-                throw new IllegalStateException("Unexpected third-party other namespace config; refusing restore");
-            }
             note("restore-other",RELAY,inputs.configGroup(),current,before,"planned");
             try {if (!otherConfig.publishConfig(RELAY,inputs.configGroup(),before)) throw new IllegalStateException("Restore refused");}
             catch (Exception failure) {throw new IllegalStateException("Other namespace restore failed");}
-            if (!before.equals(read(otherConfig,RELAY,inputs.configGroup()))) throw new IllegalStateException("Other namespace restore readback mismatch");
+            awaitReadback(otherConfig,"restore-other",RELAY,inputs.configGroup(),current,before);
         }
         note("restore-other",RELAY,inputs.configGroup(),current,before,"verified");
     }
     void assertOtherUnchanged() throws Exception {
-        if (!Objects.equals(original.get("otherRelay"),read(otherConfig,RELAY,inputs.configGroup())))
+        if (!Objects.equals(original.get("otherRelay"),
+                currentExpected(otherConfig,RELAY,inputs.configGroup(),inputs.otherNamespace(),original.get("otherRelay"))))
             throw new IllegalStateException("Other namespace relay changed");
         note("read-other",RELAY,inputs.configGroup(),original.get("otherRelay"),original.get("otherRelay"),"unchanged");
     }
@@ -201,22 +242,18 @@ final class ExternalNacosMode implements AutoCloseable {
             try {
                 String before=original.get(id);if (before==null) continue;
                 String group=id.equals(RELAY)?inputs.configGroup():inputs.governanceGroup();
-                String current=read(config,id,group);
+                String current=currentExpected(config,id,group,inputs.namespace(),before);
                 if (!Objects.equals(before,current)) {
-                    boolean known=knownCurrent(id,inputs.namespace(),current);
-                    if (!known) {
-                        note("restore",id,group,null,null,"refused-unexpected-value");
-                        throw new IllegalStateException("Unexpected third-party config; refusing restore for "+id);
-                    }
                     note("restore",id,group,current,before,"planned");
                     if (!config.publishConfig(id,group,before)) throw new IllegalStateException("Restore refused");
-                    if (!before.equals(read(config,id,group))) throw new IllegalStateException("Nacos restore readback mismatch");
+                    awaitReadback(config,"restore",id,group,current,before);
                 }
                 note("restore",id,group,current,before,"verified");
             } catch (Exception failure) {failures++;}
         }
-        try {restoreOther();} catch (Exception failure) {failures++;}
-        try {if (original.containsKey("otherRelay")) assertOtherUnchanged();} catch (Exception failure) {failures++;}
+        boolean otherRestored=true;
+        try {restoreOther();} catch (Exception failure) {failures++;otherRestored=false;}
+        try {if (otherRestored && original.containsKey("otherRelay")) assertOtherUnchanged();} catch (Exception failure) {failures++;}
         if (failures>0) throw new IllegalStateException("Nacos restore failed; inspect manifest; count="+failures);
     }
     @Override public void close() {

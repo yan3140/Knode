@@ -42,7 +42,9 @@ class ExternalStackIT {
     private ExternalNacosMode nacos;
     private Path nacosCache;
     private String nacosStage;
-    private int cleanupFailureCount;
+    private final ExternalFailureAudit failureAudit=new ExternalFailureAudit();
+    private boolean cleanupFinished;
+    private Map<String,Object> nacosCacheCleanup;
     private int exporterFailurePort;
     private long userStartedNanos;
     private ServerSocket exporterSink;
@@ -110,6 +112,7 @@ class ExternalStackIT {
         manifest=manifestDir.resolve("manifest.json");
         if (nacosEnabled) {
             nacosCache=Files.createTempDirectory(Path.of("target"),"external-nacos-cache-").toAbsolutePath().normalize();
+            nacosCacheCleanup=Map.of("ownedPath",nacosCache.toString(),"state","in-use","postForkCleanupRequired",true);
             nacos=new ExternalNacosMode(nacosInputs,nacosCache,() -> {
                 try {saveManifest();} catch (IOException e) {throw new java.io.UncheckedIOException(e);}
             });
@@ -124,7 +127,13 @@ class ExternalStackIT {
         body.put("gatewayManagementPort",gatewayManagementPort);
         body.put("eventsEnabled",eventsEnabled);body.put("stream",eventStream);body.put("probePrefix",eventProbePrefix);
         body.put("nacosEnabled",nacosEnabled);body.put("nacos",nacos==null?null:nacos.manifest());
-        body.put("nacosStage",nacosStage);body.put("cleanupFailures",cleanupFailureCount);
+        body.put("nacosStage",nacosStage);body.put("cleanupFailures",failureAudit.cleanupCount());
+        body.put("cleanupComplete",cleanupFinished && failureAudit.cleanupCount()==0 && (nacosCacheCleanup==null
+                || Boolean.FALSE.equals(nacosCacheCleanup.get("postForkCleanupRequired"))));
+        body.put("testForkPid",ProcessHandle.current().pid());
+        body.put("testForkParentPid",ProcessHandle.current().parent().map(ProcessHandle::pid).orElse(null));
+        body.put("primaryFailure",failureAudit.primary());body.put("cleanupIssues",failureAudit.cleanup());
+        body.put("nacosCacheCleanup",nacosCacheCleanup);
         body.put("exporterFailurePort",nacosEnabled?exporterFailurePort:null);
         body.put("failedExporterConnections",failedExports.get());
         body.put("otlpEndpoint",otlpEndpoint);body.put("jaegerQueryOrigin",jaegerEndpoint);body.put("sessionKeys",List.copyOf(sessionKeys));
@@ -459,22 +468,9 @@ class ExternalStackIT {
         nacos.assertOtherUnchanged();stage("completed");
     }
 
-    private void removeNacosCache() throws Exception {
-        Path target=Path.of("target").toAbsolutePath().normalize();
-        if (!nacosCache.getParent().equals(target) || !nacosCache.getFileName().toString().startsWith("external-nacos-cache-"))
-            throw new IllegalStateException("Invalid owned Nacos cache path");
-        IOException last=null;
-        for (int attempt=0;attempt<20;attempt++) {
-            try (var paths=Files.walk(nacosCache)) {
-                for (Path path:paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
-                return;
-            } catch (IOException failure) {last=failure;Thread.sleep(250);}
-        }
-        throw new IOException("Owned Nacos cache cleanup failed",last);
-    }
-
     @Test void realUserGatewayAndExplicitRedisAcl() throws Exception {
         configure(); // All guards run before opening the dedicated DB or Redis.
+        AssertionError primaryFailure=null;
         try {
             if (nacosEnabled) {
                 stage("nacos-preflight");nacos.connect();nacos.preflight();nacos.assertEmptyGroup();startExporterFailureSink();
@@ -508,30 +504,39 @@ class ExternalStackIT {
             stop(user);user=start(false,false,false);awaitRevoked(c);
             if (eventsEnabled) awaitPublished(c,originalTrace,"direct-recovery");
             assertEquals(401,status(userPort,c));assertEquals(401,status(gatewayPort,c));assertEquals(200,status(userPort,b));assertEquals(200,status(gatewayPort,b));
+        } catch (Throwable failure) {
+            primaryFailure=failureAudit.capturePrimary(failure,nacosStage);
+            if (manifest!=null) try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("primary-manifest",nacosStage,ex);}
+            throw primaryFailure;
         } finally {
-            int cleanupFailures=0;
-            for (Process p:processes) try {stop(p);} catch (Exception ex) {cleanupFailures++;}
+            for (Process p:processes) try {stop(p);} catch (Throwable ex) {failureAudit.cleanupFailure("stop-process",nacosStage,ex);}
             if (nacos!=null) {
-                try {nacos.restore();} catch (Exception ex) {cleanupFailures++;}
-                try {nacos.close();} catch (Exception ex) {cleanupFailures++;}
+                try {nacos.restore();} catch (Throwable ex) {failureAudit.cleanupFailure("nacos-restore",nacosStage,ex);}
+                try {nacos.close();} catch (Throwable ex) {failureAudit.cleanupFailure("nacos-close",nacosStage,ex);}
             }
-            try {if (exporterSink!=null) exporterSink.close();} catch (IOException ex) {cleanupFailures++;}
-            if (nacosCache!=null) try {removeNacosCache();} catch (Exception ex) {cleanupFailures++;}
+            try {if (exporterSink!=null) exporterSink.close();} catch (Throwable ex) {failureAudit.cleanupFailure("exporter-sink",nacosStage,ex);}
+            if (nacosCache!=null) {
+                try {nacosCacheCleanup=ExternalNacosCacheCleanup.attempt(Path.of("target"),nacosCache);}
+                catch (Throwable ex) {
+                    nacosCacheCleanup=Map.of("ownedPath",nacosCache.toString(),"state","validation-failed","postForkCleanupRequired",true);
+                    failureAudit.cleanupFailure("nacos-cache-path",nacosStage,ex);
+                }
+            }
             if (databaseInitialized && writer!=null) {
                 try (Connection c=DriverManager.getConnection(dbUrl,dbUser,dbPassword);PreparedStatement p=c.prepareStatement("SELECT sid FROM auth_login_session WHERE user_id=42");ResultSet rs=p.executeQuery()) {
                     while (rs.next()) {String sid=rs.getString(1);UUID.fromString(sid);sessionKeys.add(prefix()+sid);}
-                } catch (Exception ex) {cleanupFailures++;}
-                for (String key:sessionKeys) try {writer.delete(key);} catch (RuntimeException ex) {cleanupFailures++;}
+                } catch (Throwable ex) {failureAudit.cleanupFailure("session-enumeration",nacosStage,ex);}
+                for (String key:sessionKeys) try {writer.delete(key);} catch (Throwable ex) {failureAudit.cleanupFailure("session-delete",nacosStage,ex);}
             }
-            try {if (readFactory!=null) readFactory.destroy();} catch (RuntimeException ex) {cleanupFailures++;}
-            try {if (writeFactory!=null) writeFactory.destroy();} catch (RuntimeException ex) {cleanupFailures++;}
-            try {if (businessFactory!=null) businessFactory.destroy();} catch (RuntimeException ex) {cleanupFailures++;}
-            try {if (privateFile!=null) Files.deleteIfExists(privateFile);} catch (IOException ex) {cleanupFailures++;}
-            try {if (publicFile!=null) Files.deleteIfExists(publicFile);} catch (IOException ex) {cleanupFailures++;}
-            try {if (keyDir!=null) Files.deleteIfExists(keyDir);} catch (IOException ex) {cleanupFailures++;}
-            cleanupFailureCount=cleanupFailures;
-            if (manifest!=null) try {saveManifest();} catch (IOException ex) {cleanupFailures++;}
-            if (cleanupFailures>0) throw new IllegalStateException("Owned test cleanup failed; count="+cleanupFailures);
+            try {if (readFactory!=null) readFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-read-close",nacosStage,ex);}
+            try {if (writeFactory!=null) writeFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-write-close",nacosStage,ex);}
+            try {if (businessFactory!=null) businessFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-business-close",nacosStage,ex);}
+            try {if (privateFile!=null) Files.deleteIfExists(privateFile);} catch (Throwable ex) {failureAudit.cleanupFailure("private-key-delete",nacosStage,ex);}
+            try {if (publicFile!=null) Files.deleteIfExists(publicFile);} catch (Throwable ex) {failureAudit.cleanupFailure("public-key-delete",nacosStage,ex);}
+            try {if (keyDir!=null) Files.deleteIfExists(keyDir);} catch (Throwable ex) {failureAudit.cleanupFailure("key-directory-delete",nacosStage,ex);}
+            cleanupFinished=true;
+            if (manifest!=null) try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("cleanup-manifest",nacosStage,ex);}
+            failureAudit.finish(primaryFailure);
         }
     }
 }
