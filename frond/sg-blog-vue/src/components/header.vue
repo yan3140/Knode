@@ -215,7 +215,7 @@ export default {
 			}).then(() => {
 				// console.log(that.$route.path);
 
-				logout().then((response)=>{
+				return logout().then((response)=>{
 					removeToken()
 					localStorage.removeItem('userInfo');
 					that.haslogin = false;

@@ -291,7 +291,7 @@ export default {
         delete node.children
       }
       return {
-        id: node.id,
+        id: String(node.id),
         label: node.menuName,
         children: node.children
       }
@@ -300,7 +300,7 @@ export default {
     getTreeselect() {
       listMenu().then(response => {
         this.menuOptions = []
-        const menu = { id: 0, menuName: '主类目', children: [] }
+        const menu = { id: '0', menuName: '主类目', children: [] }
         menu.children = this.handleTree(response, 'id')
         this.menuOptions.push(menu)
       })
@@ -314,7 +314,7 @@ export default {
     reset() {
       this.form = {
         id: undefined,
-        parentId: 0,
+        parentId: '0',
         menuName: undefined,
         icon: undefined,
         menuType: 'M',
@@ -334,9 +334,9 @@ export default {
       this.reset()
       this.getTreeselect()
       if (row != null && row.id) {
-        this.form.parentId = row.id
+        this.form.parentId = String(row.id)
       } else {
-        this.form.parentId = 0
+        this.form.parentId = '0'
       }
       this.open = true
       this.title = '添加菜单'

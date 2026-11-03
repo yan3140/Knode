@@ -1,6 +1,7 @@
-﻿import axios from 'axios'
+import axios from 'axios'
 import { Notification, MessageBox, Message } from 'element-ui'
 import store from '@/store'
+import router from '@/router'
 import { getToken } from '@/utils/auth'
 import errorCode from '@/utils/errorCode'
 
@@ -12,6 +13,14 @@ const service = axios.create({
   // 超时
   timeout: 10000
 })
+function redirectToLogin() {
+  const current = router.currentRoute
+  const redirect = current && current.fullPath ? current.fullPath : '/'
+  return store.dispatch('FedLogOut').finally(() => {
+    if (!current || current.path !== '/login') router.replace({ path: '/login', query: { redirect } })
+  })
+}
+
 // request拦截器
 service.interceptors.request.use(config => {
   // 是否需要设置 token
@@ -62,9 +71,7 @@ service.interceptors.response.use(res => {
       type: 'warning'
     }
     ).then(() => {
-      store.dispatch('FedLogOut').then(() => {
-        location.href = '/index'
-      })
+      redirectToLogin()
     }).catch(() => { })
     return Promise.reject('无效的会话，或者会话已过期，请重新登录。')
   } else if (code === 500) {
@@ -91,10 +98,7 @@ error => {
   const status = error.response && error.response.status
   const responseMessage = error.response && error.response.data && error.response.data.msg
   if (status === 401) {
-    store.dispatch('FedLogOut').finally(() => {
-      const redirect = window.location.pathname + window.location.search + window.location.hash
-      window.location.replace('/login?redirect=' + encodeURIComponent(redirect))
-    })
+    redirectToLogin()
     return Promise.reject(new Error(responseMessage || '登录状态已过期'))
   }
   let { message } = error

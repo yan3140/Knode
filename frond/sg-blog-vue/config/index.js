@@ -12,7 +12,7 @@ module.exports = {
     assetsPublicPath: '/',
     proxyTable: {
       '/api': {
-        target: 'http://localhost:8989',
+        target: process.env.KNODE_GATEWAY_TARGET || 'http://127.0.0.1:18089',
         changeOrigin: true
       }
     },

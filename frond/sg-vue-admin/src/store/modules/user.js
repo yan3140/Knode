@@ -51,14 +51,17 @@ const user = {
       return new Promise((resolve, reject) => {
         getInfo().then(res => {
           const user = res.user
-          const avatar = user.avatar === '' ? require('@/assets/images/profile.jpg') : process.env.VUE_APP_BASE_API + user.avatar
+          const avatar = typeof user.avatar === 'string' && user.avatar.trim()
+            ? user.avatar
+            : require('@/assets/images/profile.jpg')
           if (res.roles && res.roles.length > 0) { // 验证返回的roles是否是一个非空数组
             commit('SET_ROLES', res.roles)
             commit('SET_PERMISSIONS', res.permissions)
           } else {
             commit('SET_ROLES', ['ROLE_DEFAULT'])
+            commit('SET_PERMISSIONS', [])
           }
-          commit('SET_NAME', user.userName)
+          commit('SET_NAME', user.nickName || user.userName || '')
           commit('SET_AVATAR', avatar)
           resolve(res)
         }).catch(error => {
@@ -86,6 +89,10 @@ const user = {
     FedLogOut({ commit }) {
       return new Promise(resolve => {
         commit('SET_TOKEN', '')
+        commit('SET_ROLES', [])
+        commit('SET_PERMISSIONS', [])
+        commit('SET_NAME', '')
+        commit('SET_AVATAR', '')
         removeToken()
         resolve()
       })

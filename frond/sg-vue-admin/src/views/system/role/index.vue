@@ -282,7 +282,7 @@ export default {
       // 半选中的菜单节点
       const halfCheckedKeys = this.$refs.menu.getHalfCheckedKeys()
       checkedKeys.unshift.apply(checkedKeys, halfCheckedKeys)
-      return checkedKeys
+      return checkedKeys.map(String)
     },
     /** 根据角色ID查询菜单树结构 */
     getRoleMenuTreeselect(id) {
@@ -343,7 +343,7 @@ export default {
     },
     // 多选框选中数据
     handleSelectionChange(selection) {
-      this.ids = selection.map((item) => item.id)
+      this.ids = selection.map((item) => String(item.id))
       this.single = selection.length !== 1
       this.multiple = !selection.length
     },
@@ -376,7 +376,7 @@ export default {
         this.open = true
         this.$nextTick(() => {
           roleMenu.then((res) => {
-            const checkedKeys = res.checkedKeys
+            const checkedKeys = (res.checkedKeys || []).map(String)
             checkedKeys.forEach((v) => {
               this.$nextTick(() => {
                 this.$refs.menu.setChecked(v, true, false)

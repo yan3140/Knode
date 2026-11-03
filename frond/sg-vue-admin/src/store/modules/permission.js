@@ -1,4 +1,4 @@
-﻿import { constantRoutes } from '@/router'
+import { constantRoutes } from '@/router'
 import { getRouters } from '@/api/menu'
 import Layout from '@/layout/index'
 import ParentView from '@/components/ParentView'
@@ -35,7 +35,7 @@ const permission = {
   actions: {
     // 生成路由
     GenerateRoutes({ commit }) {
-      return new Promise(resolve => {
+      return new Promise((resolve, reject) => {
         // 向后端请求路由数据   直接获取routers 暂时注释
         // getRouters().then(res => {
         //   const sdata = JSON.parse(JSON.stringify(res.routers))
@@ -65,7 +65,7 @@ const permission = {
           commit('SET_DEFAULT_ROUTES', sidebarRoutes)
           commit('SET_TOPBAR_ROUTES', sidebarRoutes)
           resolve(rewriteRoutes)
-        })
+        }).catch(reject)
       })
     }
   }
@@ -105,14 +105,14 @@ function getComponent(menu) {
   if (menu.component) {
     return menu.component
   }
-  if (!menu.component && menu.parentId !== 0) {
+  if (!menu.component && String(menu.parentId) !== '0') {
     return 'InnerLink'
   }
   return 'Layout'
 }
 
 function getRouterPath(menu) {
-  if (menu.parentId === 0) {
+  if (String(menu.parentId) === '0') {
     return '/' + menu.path
   }
   return menu.path
@@ -184,10 +184,8 @@ function filterChildren(childrenMap, lastRouter = false) {
 export const loadView = (view) => {
   if (process.env.NODE_ENV === 'development') {
     return (resolve) => require([`@/views/${view}`], resolve)
-  } else {
-    // 使用 import 实现生产环境的路由懒加载
-    // return () => import(`@/views/${view}`)
   }
+  return () => import(`@/views/${view}`)
 }
 
 export default permission

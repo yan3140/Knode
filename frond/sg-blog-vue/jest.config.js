@@ -9,7 +9,7 @@ const babelConfig = {
 module.exports = {
   moduleFileExtensions: ['js', 'json', 'vue'],
   testEnvironment: 'jsdom',
-  testMatch: ['<rootDir>/tests/unit/**/*.spec.js'],
+  testMatch: ['**/tests/unit/**/*.spec.js'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1'
   },

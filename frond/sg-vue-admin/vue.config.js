@@ -30,7 +30,7 @@ module.exports = {
     proxy: {
       // detail: https://cli.vuejs.org/config/#devserver-proxy
       '/dev-api': {
-        target: `http://localhost:8989`,
+        target: process.env.KNODE_GATEWAY_TARGET || 'http://127.0.0.1:18089',
         changeOrigin: true,
         pathRewrite: {
           '^/dev-api': ''

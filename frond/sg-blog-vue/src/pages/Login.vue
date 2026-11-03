@@ -122,8 +122,8 @@ export default {
                 localStorage.setItem('userInfo', JSON.stringify(response.userInfo))
                 const redirect = this.$route.query.redirect
                 this.$router.replace(redirect && !redirect.startsWith('/Login') ? redirect : '/')
-            }).catch(() => {
-                this.loginErr = true
+            }).catch(error => {
+                this.loginErr = !!error && error.code === 505
             })
         },
         registerEnterFun(e) {

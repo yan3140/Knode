@@ -102,7 +102,7 @@
             width="160"
             class-name="small-padding fixed-width"
           >
-            <template v-if="scope.row.id !== 1" slot-scope="scope">
+            <template v-if="String(scope.row.id) !== '1'" slot-scope="scope">
               <el-button
                 size="mini"
                 type="text"
@@ -332,7 +332,7 @@ export default {
     },
     // 多选框选中数据
     handleSelectionChange(selection) {
-      this.ids = selection.map(item => item.id)
+      this.ids = selection.map(item => String(item.id))
       this.single = selection.length !== 1
       this.multiple = !selection.length
     },
@@ -372,7 +372,7 @@ export default {
       getUser(id).then((response) => {
         this.form = response.user
         this.roleOptions = response.roles
-        this.form.roleIds = response.roleIds
+        this.form.roleIds = (response.roleIds || []).map(String)
         this.open = true
         this.title = '修改用户'
         this.form.password = response.password

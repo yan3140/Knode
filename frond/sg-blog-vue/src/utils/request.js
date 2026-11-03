@@ -16,6 +16,12 @@ const service = axios.create({
   timeout: 10000
 })
 
+function businessError(code, message) {
+  const error = new Error(message)
+  error.code = code
+  return error
+}
+
 function redirectToLogin() {
   removeToken()
   localStorage.removeItem('userInfo')
@@ -79,18 +85,18 @@ service.interceptors.response.use(res => {
   const msg = errorCode[code] || res.data.msg || errorCode['default']
   if (code === 401) {
     redirectToLogin()
-    return Promise.reject('无效的会话，或者会话已过期，请重新登录。')
+    return Promise.reject(businessError(code, msg))
   } else if (code === 500) {
     Message({
       message: msg,
       type: 'error'
     })
-    return Promise.reject(new Error(msg))
+    return Promise.reject(businessError(code, msg))
   } else if (code !== 200) {
     Notification.error({
       title: msg
     })
-    return Promise.reject('error')
+    return Promise.reject(businessError(code, msg))
   } else {
     // 把字符串total 转换成 数字 total
     if (res.data.data && res.data.data.total) {
