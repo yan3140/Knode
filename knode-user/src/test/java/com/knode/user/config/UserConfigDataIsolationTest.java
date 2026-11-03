@@ -104,7 +104,15 @@ class UserConfigDataIsolationTest {
             if (process!=null && process.isAlive()) {process.destroyForcibly();process.waitFor(10,TimeUnit.SECONDS);}
             for (ServerSocket socket:listeners) socket.close();
             try (var paths=Files.walk(dir)) {
-                for (Path path:paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
+                for (Path path:paths.sorted(Comparator.reverseOrder()).toList()) {
+                    for (int attempt=0;;attempt++) {
+                        try {Files.deleteIfExists(path);break;}
+                        catch (java.nio.file.FileSystemException busy) {
+                            if (attempt==20) throw busy;
+                            Thread.sleep(100);
+                        }
+                    }
+                }
             }
         }
     }

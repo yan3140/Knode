@@ -31,7 +31,7 @@ public final class LoginAttemptLimiter {
         if (!Set.of("admin","blog").contains(scope)) throw new IllegalArgumentException("Invalid login scope");
         byte[] ip=addresses.resolve(request);
         try {
-            Long id=username!=null && username.length()<=64?users.loginIdentity(username).orElse(null):null;
+            Long id=username!=null && username.length()<=128 && username.codePointCount(0,username.length())<=64?users.loginIdentity(username).orElse(null):null;
             String account=id==null?"unknown:"+unknownBucket(username):"id:"+id;
             String ipKey=scope+":i:"+hex(digest(ip));
             String userKey=scope+":u:"+hex(digest(account.getBytes(StandardCharsets.UTF_8)));
@@ -70,8 +70,9 @@ public final class LoginAttemptLimiter {
                 (row,n) -> new Window(row.getInt(1),row.getLong(2)),bucket);
     }
     private int update(String bucket,int limit,long now) {
-        return db.update("UPDATE user_login_attempt_window SET attempts=CASE WHEN expires_at<=? THEN 1 WHEN attempts<? THEN attempts+1 ELSE attempts END, expires_at=CASE WHEN expires_at<=? THEN ? ELSE expires_at END WHERE bucket=?",
-                now,limit+1,now,now+WINDOW_MS,bucket);
+        // Toggle the saturated value so MySQL changed-row mode still reports one updated row.
+        return db.update("UPDATE user_login_attempt_window SET attempts=CASE WHEN expires_at<=? THEN 1 WHEN attempts<=? THEN attempts+1 ELSE ? END, expires_at=CASE WHEN expires_at<=? THEN ? ELSE expires_at END WHERE bucket=?",
+                now,limit+1,limit+1,now,now+WINDOW_MS,bucket);
     }
     private int unknownBucket(String username) {
         String name=username==null?"":username;

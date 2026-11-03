@@ -54,6 +54,22 @@ class LoginThrottleMysqlIT {
         assertThrows(LoginAttemptLimiter.Limited.class,() -> b.check("eLLeN ","blog",request("198.51.100.20")));
         assertEquals(1,db.queryForObject("SELECT COUNT(*) FROM user_login_attempt_window WHERE bucket LIKE 'blog:u:%'",Integer.class));
     }
+    @Test void validSupplementaryCharactersUseTheExistingAccountBucket() {
+        String name="\uD83D\uDE03".repeat(33);
+        db.update("INSERT INTO sys_user(id,user_name) VALUES(43,?)",name);
+        assertEquals(43L,limiter().check(name,"blog",request("198.51.100.31")));
+    }
+    @Test void repeatedBlockedAttemptsStay429WhenDriverReportsChangedRows() {
+        var affected=new DriverManagerDataSource(ds.getUrl(),ds.getUsername(),"");
+        var properties=new Properties();properties.setProperty("useAffectedRows","true");
+        affected.setConnectionProperties(properties);
+        var jdbc=new JdbcTemplate(affected);
+        var instance=new LoginAttemptLimiter(jdbc,new UserRepository(jdbc),new LoginClientAddress(new MockEnvironment()),
+                new DataSourceTransactionManager(affected),() -> jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(3)",(row,n) -> row.getTimestamp(1).getTime()));
+        var req=request("203.0.113.29");
+        for (int i=0;i<8;i++) assertEquals(42L,instance.check("ellen","blog",req));
+        for (int i=0;i<5;i++) assertThrows(LoginAttemptLimiter.Limited.class,() -> instance.check("ellen","blog",req));
+    }
     @Test void independentInstancesEnforceOneLimitUnderConcurrentFirstUse() throws Exception {
         var a=limiter();var b=limiter();var pool=Executors.newFixedThreadPool(12);var start=new CountDownLatch(1);
         var results=new ArrayList<Future<Integer>>();
