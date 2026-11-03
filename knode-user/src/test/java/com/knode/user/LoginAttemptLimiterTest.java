@@ -43,6 +43,12 @@ class LoginAttemptLimiterTest {
         for (int i=0;i<20;i++) assertEquals(100L+i,limiter.check("user"+i,"blog",r));
         assertThrows(LoginAttemptLimiter.Limited.class,() -> limiter.check("user20","blog",r));
     }
+    @Test void adminIpLimitAppliesAcrossDistinctAccounts() {
+        for (int i=0;i<16;i++) db.update("INSERT INTO sys_user(id,user_name) VALUES(?,?)",200+i,"admin"+i);
+        var r=request("203.0.113.4");
+        for (int i=0;i<15;i++) assertEquals(200L+i,limiter.check("admin"+i,"admin",r));
+        assertThrows(LoginAttemptLimiter.Limited.class,() -> limiter.check("admin15","admin",r));
+    }
     @Test void concurrentNewBucketsCannotExceedTheAccountLimit() throws Exception {
         var pool=Executors.newFixedThreadPool(12);var start=new CountDownLatch(1);var results=new ArrayList<Future<Integer>>();
         try {
