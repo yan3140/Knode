@@ -18,6 +18,9 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 @Configuration
 public class UserConfiguration {
     @Bean Clock clock() { return Clock.systemUTC(); }
+    @Bean com.knode.user.account.LoginLimitTime loginLimitTime(org.springframework.jdbc.core.JdbcTemplate db) {
+        return () -> db.queryForObject("SELECT CURRENT_TIMESTAMP(3)",(row,n) -> row.getTimestamp(1).getTime());
+    }
     @Bean(name="revocationScheduler") ThreadPoolTaskScheduler revocationScheduler() {
         var scheduler=new ThreadPoolTaskScheduler();scheduler.setPoolSize(1);scheduler.setThreadNamePrefix("auth-revocation-");
         scheduler.setRemoveOnCancelPolicy(true);return scheduler;

@@ -1,0 +1,42 @@
+{
+  "name": "USER-LOGIN-ATTEMPT-LIMIT",
+  "version": "1.0-draft",
+  "status": "User-owned; migration V009 must be applied explicitly by the operator",
+  "scope": {
+    "admin": {
+      "ip": {
+        "attempts": 15,
+        "seconds": 300
+      },
+      "username": {
+        "attempts": 5,
+        "seconds": 300
+      }
+    },
+    "blog": {
+      "ip": {
+        "attempts": 20,
+        "seconds": 300
+      },
+      "username": {
+        "attempts": 8,
+        "seconds": 300
+      }
+    }
+  },
+  "behavior": "Each credential submission, including successful or rejected credentials and attempts later failing session creation, consumes both applicable fixed-window buckets in an independent transaction before account row locking. HTTP 429 retains the code/msg/data envelope and includes Retry-After in seconds. Counter or database-time uncertainty returns HTTP 503; no process-memory fallback. Windows and bounded cleanup use database time shared by service instances.",
+  "identity": "Existing names are resolved by the database's own user_name equality/collation to a stable user ID before the counter transaction; login rechecks the same ID under its normal row lock. Unknown, blank or overlong names use one of 256 bounded deterministic buckets per scope and still consume the IP bucket. IP and account bucket keys are SHA-256 digests, not plaintext; they are pseudonyms, not encryption.",
+  "storage": {
+    "table": "user_login_attempt_window",
+    "migration": "V009__login_attempt_window.sql",
+    "locking": "IP bucket then account bucket, both atomically and independently committed; bounded retries on transient lock conflicts.",
+    "cleanup": "At most 100 expired rows per pass with expiry recheck; USER_LOGIN_LIMIT_CLEANUP_INITIAL_MS and USER_LOGIN_LIMIT_CLEANUP_POLL_MS default 60000."
+  },
+  "proxy": {
+    "trustedCidrs": "USER_TRUSTED_PROXY_CIDRS: explicit comma-separated numeric CIDRs, maximum 32; default empty trusts no proxy.",
+    "default": "Untrusted direct peers use their actual numeric socket address; Forwarded and X-Forwarded-For never change it.",
+    "trusted": "Only a trusted direct peer may supply exactly one X-Forwarded-For header, at most 1024 characters and 16 comma-separated numeric IPv4/IPv6 literals. All entries are validated, then traversed from right to left until the first untrusted address. Missing X-Forwarded-For uses the direct peer. Forwarded is ignored. Duplicate, malformed or oversized trusted-chain input returns HTTP 400; no user-input DNS resolution.",
+    "deployment": "For a strictly co-located loopback Gateway only, explicitly set USER_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128 and prevent untrusted local processes from reaching User directly. In other deployments trust only the exact Gateway egress IP/CIDR and restrict direct User ingress to that Gateway. Do not trust 0.0.0.0/0 or ::/0.",
+    "framework": "server.forward-headers-strategy=none; this parser handles only login rate-limit source selection."
+  }
+}

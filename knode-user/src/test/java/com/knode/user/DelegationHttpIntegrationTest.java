@@ -90,7 +90,7 @@ class DelegationHttpIntegrationTest {
         http.getRestTemplate().setRequestFactory(new org.springframework.http.client.HttpComponentsClientHttpRequestFactory(
                 org.apache.hc.client5.http.impl.classic.HttpClients.custom().disableAutomaticRetries().disableRedirectHandling().build()));
         TIME.reset();
-        for (String table:List.of("auth_delegation_grant_audit","auth_delegation_grant","auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_user")) db.update("DELETE FROM "+table);
+        for (String table:List.of("auth_delegation_grant_audit","auth_delegation_grant","user_login_attempt_window","auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_user")) db.update("DELETE FROM "+table);
         fixture.clear();sessions.clear();reset(reader,writer);
         when(reader.find(anyString())).thenAnswer(inv -> Optional.ofNullable(sessions.get(inv.getArgument(0))));
         doAnswer(inv -> {var session=(SessionStore.Session)inv.getArgument(0);sessions.put(session.sid(),session);return null;}).when(writer).create(any());

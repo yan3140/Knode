@@ -14,8 +14,10 @@ public class UserController {
     private final AccountService accounts;
     private final UserRepository users;
     private final RevocationCoordinator revocations;
-    public UserController(AccountService accounts,UserRepository users,RevocationCoordinator revocations) {
-        this.accounts=accounts;this.users=users;this.revocations=revocations;
+    private final com.knode.user.account.LoginAttemptLimiter loginLimiter;
+    public UserController(AccountService accounts,UserRepository users,RevocationCoordinator revocations,
+                          com.knode.user.account.LoginAttemptLimiter loginLimiter) {
+        this.accounts=accounts;this.users=users;this.revocations=revocations;this.loginLimiter=loginLimiter;
     }
     @JsonIgnoreProperties(ignoreUnknown=true)
     public record Login(String userName,String password) {}
@@ -25,13 +27,17 @@ public class UserController {
     public record Profile(String nickName,String avatar,String sex) {}
     private UserTokens.Principal principal(HttpServletRequest req) { return (UserTokens.Principal)req.getAttribute(UserRequestFilter.PRINCIPAL); }
     @PostMapping("/api/blog/auth/login")
-    public ApiResponse blogLogin(@RequestBody Login input) {
-        var r=accounts.login(input.userName(),input.password(),"blog");
+    public ApiResponse blogLogin(@RequestBody Login input,HttpServletRequest req) {
+        String username=input==null?null:input.userName();
+        Long id=loginLimiter.check(username,"blog",req);
+        var r=accounts.login(username,input==null?null:input.password(),"blog",id);
         return ApiResponse.ok(Map.of("token",r.token(),"userInfo",r.userInfo()));
     }
     @PostMapping("/api/admin/auth/login")
-    public ApiResponse adminLogin(@RequestBody Login input) {
-        var r=accounts.login(input.userName(),input.password(),"admin");
+    public ApiResponse adminLogin(@RequestBody Login input,HttpServletRequest req) {
+        String username=input==null?null:input.userName();
+        Long id=loginLimiter.check(username,"admin",req);
+        var r=accounts.login(username,input==null?null:input.password(),"admin",id);
         return ApiResponse.ok(Map.of("token",r.token()));
     }
     @PostMapping("/api/blog/user/register")

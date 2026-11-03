@@ -88,7 +88,7 @@ class SessionRevocationTracingHttpTest {
     @BeforeEach void setup() {
         http.getRestTemplate().setRequestFactory(new org.springframework.http.client.HttpComponentsClientHttpRequestFactory(
                 org.apache.hc.client5.http.impl.classic.HttpClients.custom().disableAutomaticRetries().disableRedirectHandling().build()));
-        for (String table:List.of("auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_user")) db.update("DELETE FROM "+table);
+        for (String table:List.of("user_login_attempt_window","auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_user")) db.update("DELETE FROM "+table);
         sessions.clear();failWrite.set(false);reset(reader,writer,transport);exporter.reset();
         when(reader.find(anyString())).thenAnswer(inv -> Optional.ofNullable(sessions.get(inv.getArgument(0))));
         doAnswer(inv -> {SessionStore.Session s=inv.getArgument(0);sessions.put(s.sid(),s);return null;}).when(writer).create(any());

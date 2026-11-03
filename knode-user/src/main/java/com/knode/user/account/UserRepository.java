@@ -24,6 +24,9 @@ public class UserRepository {
         return new Account(r.getLong("id"),r.getString("user_name"),r.getString("nick_name"),r.getString("password"),
                 r.getString("type"),r.getString("status"),r.getString("email"),r.getString("sex"),r.getString("avatar"),r.getInt("del_flag"));
     }
+    public Optional<Long> loginIdentity(String name) {
+        return jdbc.queryForList("SELECT id FROM sys_user WHERE user_name=?",Long.class,name).stream().findFirst();
+    }
     public Optional<Account> byUsername(String name) {
         return jdbc.query("SELECT * FROM sys_user WHERE user_name=?",this::account,name).stream().findFirst();
     }

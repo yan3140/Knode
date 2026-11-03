@@ -35,12 +35,14 @@ public class HealthController {
         for (String table:new String[]{"sys_user","sys_role","yan_menu","sys_user_role","sys_role_menu","auth_login_session","auth_revocation_outbox","user_security_lock"})
             jdbc.queryForObject("SELECT COUNT(*) FROM "+table+" WHERE 1=0",Integer.class);
         if (jdbc.queryForObject("SELECT COUNT(*) FROM user_security_lock WHERE id=1",Integer.class)!=1) throw new AuthenticationFailure(503);
+        jdbc.queryForList("SELECT bucket,attempts,expires_at FROM user_login_attempt_window WHERE 1=0");
         jdbc.queryForList("SELECT reason,event_schema_version,traceparent FROM auth_revocation_intent WHERE 1=0");
         jdbc.queryForList("SELECT event_json,reason,attempts,next_attempt_at,claim_token,claim_until,last_error,published_at FROM auth_revocation_outbox WHERE 1=0");
         jdbc.queryForList("SELECT event_id,actor_id,requested_at FROM auth_revocation_replay_audit WHERE 1=0");
         tx.executeWithoutResult(status -> {
             jdbc.update("INSERT INTO auth_revocation_intent(sid,user_id,scope,event_id,state) VALUES(?,0,'blog',?,'PENDING')",sid,UUID.randomUUID().toString());
             jdbc.update("UPDATE auth_revocation_intent SET attempts=attempts WHERE sid=?",sid);
+            jdbc.update("UPDATE user_login_attempt_window SET attempts=attempts WHERE 1=0");
             for (String table:new String[]{"sys_user","sys_role","yan_menu","auth_login_session"})
                 jdbc.update("UPDATE "+table+" SET "+("auth_login_session".equals(table)?"active=active":"status=status")+" WHERE 1=0");
             status.setRollbackOnly();

@@ -21,10 +21,10 @@ public class AccountService {
     }
     public record LoginResult(String token,UserRepository.UserInfo userInfo) {}
     @org.springframework.transaction.annotation.Transactional
-    public LoginResult login(String username,String password,String scope) {
-        if (!StringUtils.hasText(username) || !StringUtils.hasText(password)) throw new BusinessFailure(505,"用户名或密码错误");
+    public LoginResult login(String username,String password,String scope,Long resolvedId) {
+        if (!StringUtils.hasText(username) || !StringUtils.hasText(password) || resolvedId==null) throw new BusinessFailure(505,"用户名或密码错误");
         var user=users.byUsernameForUpdate(username).orElseThrow(() -> new BusinessFailure(505,"用户名或密码错误"));
-        if (!user.active() || !encoder.matches(password,user.password())) throw new BusinessFailure(505,"用户名或密码错误");
+        if (user.id()!=resolvedId || !user.active() || !encoder.matches(password,user.password())) throw new BusinessFailure(505,"用户名或密码错误");
         if ("admin".equals(scope) && !"1".equals(user.type())) throw new AuthenticationFailure(403);
         var issued=tokens.issueDetailed(Long.toString(user.id()),scope);
         try {

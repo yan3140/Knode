@@ -27,8 +27,15 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,properties="management.server.port=0")
+@org.springframework.context.annotation.Import(UserHttpIntegrationTest.LimitTimeConfig.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class UserHttpIntegrationTest {
+    static final MutableTestClock LIMIT_TIME=new MutableTestClock();
+    @org.springframework.boot.test.context.TestConfiguration static class LimitTimeConfig {
+        @org.springframework.context.annotation.Bean @org.springframework.context.annotation.Primary
+        com.knode.user.account.LoginLimitTime testLoginLimitTime() {return LIMIT_TIME::millis;}
+    }
+    @org.springframework.boot.test.web.server.LocalServerPort int servicePort;
     @Autowired TestRestTemplate http;
     @Autowired JdbcTemplate jdbc;
     @Autowired DataSource dataSource;
@@ -80,9 +87,10 @@ class UserHttpIntegrationTest {
     }
     @BeforeAll void schema() { new ResourceDatabasePopulator(new ClassPathResource("db/schema.sql")).execute(dataSource); }
     @BeforeEach void setup() {
+        LIMIT_TIME.reset();
         http.getRestTemplate().setRequestFactory(new org.springframework.http.client.HttpComponentsClientHttpRequestFactory(
                 org.apache.hc.client5.http.impl.classic.HttpClients.custom().disableAutomaticRetries().disableRedirectHandling().build()));
-        for (String table:new String[]{"auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_role_menu","sys_user_role","yan_menu","sys_role","sys_user"})
+        for (String table:new String[]{"user_login_attempt_window","auth_revocation_replay_audit","auth_revocation_outbox","auth_revocation_intent","auth_login_session","sys_role_menu","sys_user_role","yan_menu","sys_role","sys_user"})
             jdbc.update("DELETE FROM "+table);
         sessions.clear(); failRead.set(false);failWrite.set(false);failMark.set(false);
         reset(reader,writer,eventTransport);
@@ -804,4 +812,70 @@ class UserHttpIntegrationTest {
         assertEquals(401,assertThrows(com.knode.auth.AuthFailure.class,() -> retired.verify(old,"knode-user",Set.of("users:public:read"))).status());
         assertThrows(IllegalArgumentException.class,() -> new SigningKeyRing("test-key",null,signingKeys.publicKeys()));
     }
+    @Test void loginLimitCountsBadAndValidCredentialsAndRejectsForgedClientHeaders() throws Exception {
+        for (int i=0;i<8;i++) {
+            var headers=new HttpHeaders();headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.add("X-Forwarded-For","198.51.100."+(i+1));
+            String password=i==7?"test-password":"wrong";
+            var result=http.exchange("/api/blog/auth/login",HttpMethod.POST,
+                    new HttpEntity<>("{\"userName\":\"alice\",\"password\":\""+password+"\"}",headers),String.class);
+            assertEquals(200,result.getStatusCode().value());
+            assertEquals(i==7?200:505,data(result).path("code").asInt());
+        }
+        var blocked=call(HttpMethod.POST,"/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"test-password\"}",null);
+        assertEquals(429,blocked.getStatusCode().value());assertEquals(429,data(blocked).path("code").asInt());
+        int retry=Integer.parseInt(Objects.requireNonNull(blocked.getHeaders().getFirst("Retry-After")));
+        assertTrue(retry>=1 && retry<=300);
+        assertEquals(200,call(HttpMethod.POST,"/api/admin/auth/login","{\"userName\":\"admin\",\"password\":\"test-password\"}",null).getStatusCode().value());
+    }
+    @Test void concurrentHttpAttemptsCannotPassTheAccountLimit() throws Exception {
+        var client=java.net.http.HttpClient.newHttpClient();
+        var pending=new ArrayList<java.util.concurrent.CompletableFuture<java.net.http.HttpResponse<String>>>();
+        for (int i=0;i<12;i++) {
+            var request=java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:"+servicePort+"/api/blog/auth/login"))
+                    .timeout(java.time.Duration.ofSeconds(30)).header("Content-Type","application/json")
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString("{\"userName\":\"bob\",\"password\":\"wrong\"}")).build();
+            pending.add(client.sendAsync(request,java.net.http.HttpResponse.BodyHandlers.ofString()));
+        }
+        int permitted=0,blocked=0;
+        for (var result:pending) {
+            var response=result.get(40,java.util.concurrent.TimeUnit.SECONDS);
+            if (response.statusCode()==200) {assertEquals(505,json.readTree(response.body()).path("code").asInt());permitted++;}
+            else {assertEquals(429,response.statusCode());blocked++;}
+        }
+        assertEquals(8,permitted);assertEquals(4,blocked);
+    }
+    @Test void loginCounterDependencyFailureIs503() {
+        jdbc.execute("ALTER TABLE user_login_attempt_window RENAME TO user_login_attempt_window_offline");
+        try {
+            var result=call(HttpMethod.POST,"/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"test-password\"}",null);
+            assertEquals(503,result.getStatusCode().value());
+        } finally {jdbc.execute("ALTER TABLE user_login_attempt_window_offline RENAME TO user_login_attempt_window");}
+    }
+
+    @Test void loginWindowResetsAtTheExactHttpBoundary() throws Exception {
+        var start=LIMIT_TIME.instant();
+        for (int i=0;i<8;i++)
+            assertEquals(505,data(call(HttpMethod.POST,"/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"wrong\"}",null)).path("code").asInt());
+        LIMIT_TIME.set(start.plusSeconds(299));
+        var blocked=call(HttpMethod.POST,"/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"wrong\"}",null);
+        assertEquals(429,blocked.getStatusCode().value());assertEquals("1",blocked.getHeaders().getFirst("Retry-After"));
+        LIMIT_TIME.set(start.plusSeconds(300));
+        assertEquals(200,data(call(HttpMethod.POST,"/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"test-password\"}",null)).path("code").asInt());
+    }
+    @Test void failedSessionCreationStillConsumesTheLoginAttempt() throws Exception {
+        failWrite.set(true);
+        assertEquals(503,call(HttpMethod.POST,"/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"test-password\"}",null).getStatusCode().value());
+        failWrite.set(false);
+        for (int i=0;i<7;i++)
+            assertEquals(505,data(call(HttpMethod.POST,"/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"wrong\"}",null)).path("code").asInt());
+        assertEquals(429,call(HttpMethod.POST,"/api/blog/auth/login","{\"userName\":\"alice\",\"password\":\"test-password\"}",null).getStatusCode().value());
+    }
+    @Test void adminSuccessfulCredentialsAlsoCountTowardItsLowerLimit() throws Exception {
+        for (int i=0;i<5;i++)
+            assertEquals(200,data(call(HttpMethod.POST,"/api/admin/auth/login","{\"userName\":\"admin\",\"password\":\"test-password\"}",null)).path("code").asInt());
+        var blocked=call(HttpMethod.POST,"/api/admin/auth/login","{\"userName\":\"admin\",\"password\":\"test-password\"}",null);
+        assertEquals(429,blocked.getStatusCode().value());assertEquals(429,data(blocked).path("code").asInt());
+    }
+
 }

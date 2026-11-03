@@ -10,6 +10,15 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 @RestControllerAdvice
 public class ApiErrors {
+    @ExceptionHandler(com.knode.user.account.LoginAttemptLimiter.Limited.class)
+    public ResponseEntity<ApiResponse> loginLimited(com.knode.user.account.LoginAttemptLimiter.Limited e) {
+        return ResponseEntity.status(429).header("Retry-After",Long.toString(e.retryAfter()))
+                .body(new ApiResponse(429,"登录尝试过多，请稍后重试",null));
+    }
+    @ExceptionHandler(com.knode.user.account.LoginClientAddress.InvalidAddress.class)
+    public ResponseEntity<ApiResponse> clientAddress() {
+        return ResponseEntity.badRequest().body(new ApiResponse(400,"客户端地址无效",null));
+    }
     @ExceptionHandler(BusinessFailure.class)
     public ApiResponse business(BusinessFailure e) { return new ApiResponse(e.code(),e.getMessage(),null); }
     @ExceptionHandler(AuthenticationFailure.class)
