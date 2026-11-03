@@ -295,6 +295,7 @@ export default {
 
 	},
 	beforeDestroy() {
+		clearTimeout(this._typingTimer)
 		window.removeEventListener('notification-read', this.loadUnreadCount)
 	},
 	computed: {
@@ -304,10 +305,10 @@ export default {
 	},
 	mounted() { //页面元素加载完成
 		if (this.compact) return
-		var that = this;
-		var timer = setTimeout(function() {
-			Typeit(that.$store.state.themeObj.user_start, "#luke"); //打字机效果
-			clearTimeout(timer);
+		this._typingTimer = setTimeout(() => {
+			this._typingTimer = null
+			const target = this.$el.querySelector('#luke')
+			if (target) Typeit(this.$store.state.themeObj.user_start, target)
 		}, 500);
 	}
 }
