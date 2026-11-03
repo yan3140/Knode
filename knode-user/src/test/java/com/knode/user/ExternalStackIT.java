@@ -437,6 +437,12 @@ class ExternalStackIT {
         nacos.publish(ExternalNacosMode.RELAY,"{\"sessionEventRelayBatchSize\":3}");
         awaitCondition(() -> request(userPort,"GET","/health/ready",null,null).statusCode()==200,60,"Relay configuration recovery failed");
         awaitCondition(() -> publishedCount()==3,80,"Remaining actual logout event was not published");
+        stage("user-governance-missing");
+        nacos.removeFlow();
+        awaitCondition(() -> request(userPort,"GET","/health/ready",null,null).statusCode()==503,60,"Missing governance rules did not degrade readiness");
+        assertTrue(userInfoOk(userPort,tokens[3]),"Missing rule must retain the previous empty rule set");
+        nacos.publish(ExternalNacosMode.FLOW,"[]");
+        awaitCondition(() -> request(userPort,"GET","/health/ready",null,null).statusCode()==200,60,"Missing governance readiness did not recover");
         stage("user-governance-invalid");
         nacos.publish(ExternalNacosMode.FLOW,"{\"invalid\":true}");
         awaitCondition(() -> request(userPort,"GET","/health/ready",null,null).statusCode()==503,60,"Invalid governance rules did not degrade readiness");

@@ -99,22 +99,47 @@ final class ExternalNacosMode implements AutoCloseable {
         entry.put("before",before);entry.put("after",after);entry.put("state",state);
         journal.add(entry);persist.run();
     }
+    private boolean knownCurrent(String id,String namespace,String value) {
+        for (int i=journal.size()-1;i>=0;i--) {
+            var entry=journal.get(i);
+            if (!id.equals(entry.get("dataId")) || !namespace.equals(entry.get("namespace"))) continue;
+            String state=(String)entry.get("state"),action=(String)entry.get("action");
+            if ((action.startsWith("publish") || action.startsWith("remove") || action.startsWith("restore"))
+                    && ("planned".equals(state) || "verified".equals(state))) {
+                return Objects.equals(value,entry.get("after"))
+                        || ("planned".equals(state) && Objects.equals(value,entry.get("before")));
+            }
+        }
+        return false;
+    }
     void publish(String id,String value) throws Exception {
         if (!id.equals(RELAY) && !id.equals(FLOW)) throw new IllegalArgumentException("Data ID not authorized");
         String group=id.equals(RELAY)?inputs.configGroup():inputs.governanceGroup();
         String before=read(config,id,group);
-        boolean knownBefore=Objects.equals(before,original.get(id)) || journal.stream().anyMatch(e ->
-                id.equals(e.get("dataId")) && "publish".equals(e.get("action")) && Objects.equals(before,e.get("after")));
+        boolean knownBefore=Objects.equals(before,original.get(id)) || knownCurrent(id,inputs.namespace(),before);
         boolean allowedValue=id.equals(RELAY)
                 ? List.of("{\"sessionEventRelayBatchSize\":0}","{\"sessionEventRelayBatchSize\":2}","{\"sessionEventRelayBatchSize\":3}").contains(value)
                 : List.of(RULE,"[]","{\"invalid\":true}").contains(value);
-        if (!original.containsKey(id) || before==null || !knownBefore || !allowedValue)
+        if (!original.containsKey(id) || !knownBefore || !allowedValue)
             throw new IllegalStateException("Unexpected config; refusing publication for "+id);
         note("publish",id,group,before,value,"planned");
         try {if (!config.publishConfig(id,group,value)) throw new IllegalStateException("Nacos publish refused");}
         catch (Exception failure) {throw new IllegalStateException("Nacos publish failed for "+id);}
         if (!value.equals(read(config,id,group))) throw new IllegalStateException("Nacos publish readback mismatch");
         note("publish",id,group,before,value,"verified");
+    }
+    void removeFlow() throws Exception {
+        String group=inputs.governanceGroup();
+        String before=read(config,FLOW,group);
+        boolean known=original.containsKey(FLOW) && (Objects.equals(before,original.get(FLOW))
+                || knownCurrent(FLOW,inputs.namespace(),before));
+        if (!known || before==null) throw new IllegalStateException("Unexpected flow config; refusing removal");
+        emptyRules(before);
+        note("remove",FLOW,group,before,null,"planned");
+        try {if (!config.removeConfig(FLOW,group)) throw new IllegalStateException("Removal refused");}
+        catch (Exception failure) {throw new IllegalStateException("Nacos flow removal failed");}
+        if (read(config,FLOW,group)!=null) throw new IllegalStateException("Nacos flow removal readback mismatch");
+        note("remove",FLOW,group,before,null,"verified");
     }
     void publishOtherInvalidRelay() throws Exception {
         String before=read(otherConfig,RELAY,inputs.configGroup());
@@ -132,7 +157,7 @@ final class ExternalNacosMode implements AutoCloseable {
         if (before==null) return;
         String current=read(otherConfig,RELAY,inputs.configGroup());
         if (!Objects.equals(before,current)) {
-            boolean known=journal.stream().anyMatch(e -> "publish-other".equals(e.get("action")) && Objects.equals(current,e.get("after")));
+            boolean known=knownCurrent(RELAY,inputs.otherNamespace(),current);
             if (!known) {
                 note("restore-other",RELAY,inputs.configGroup(),null,null,"refused-unexpected-value");
                 throw new IllegalStateException("Unexpected third-party other namespace config; refusing restore");
@@ -178,8 +203,7 @@ final class ExternalNacosMode implements AutoCloseable {
                 String group=id.equals(RELAY)?inputs.configGroup():inputs.governanceGroup();
                 String current=read(config,id,group);
                 if (!Objects.equals(before,current)) {
-                    boolean known=journal.stream().anyMatch(e -> id.equals(e.get("dataId")) && Objects.equals(current,e.get("after"))
-                            && "publish".equals(e.get("action")));
+                    boolean known=knownCurrent(id,inputs.namespace(),current);
                     if (!known) {
                         note("restore",id,group,null,null,"refused-unexpected-value");
                         throw new IllegalStateException("Unexpected third-party config; refusing restore for "+id);

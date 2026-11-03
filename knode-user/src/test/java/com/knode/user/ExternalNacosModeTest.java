@@ -33,12 +33,24 @@ class ExternalNacosModeTest {
             assertEquals("planned",latest.get("state"));assertTrue(saves.get()>0);
             primary.put(i.getArgument(0),i.getArgument(2));return true;
         });
+        when(config.removeConfig(anyString(),anyString())).thenAnswer(i -> {
+            var changes=(List<?>)mode.manifest().get("changes");
+            var latest=(Map<?,?>)changes.get(changes.size()-1);
+            assertEquals("remove",latest.get("action"));assertEquals("planned",latest.get("state"));
+            primary.remove(i.getArgument(0));return true;
+        });
         when(otherConfig.publishConfig(anyString(),anyString(),anyString())).thenAnswer(i -> {
             var changes=(List<?>)mode.manifest().get("changes");
             assertEquals("planned",((Map<?,?>)changes.get(changes.size()-1)).get("state"));
             other.put(i.getArgument(0),i.getArgument(2));return true;
         });
         mode.preflight();
+        mode.removeFlow();assertNull(primary.get(ExternalNacosMode.FLOW));
+        mode.publish(ExternalNacosMode.FLOW,"[]");assertEquals("[]",primary.get(ExternalNacosMode.FLOW));
+        primary.remove(ExternalNacosMode.FLOW);
+        assertThrows(IllegalStateException.class,() -> mode.publish(ExternalNacosMode.FLOW,"[]"));
+        primary.put(ExternalNacosMode.FLOW,"[]");
+        mode.removeFlow();mode.restore();assertEquals("[]",primary.get(ExternalNacosMode.FLOW));
         mode.publish(ExternalNacosMode.RELAY,"{\"sessionEventRelayBatchSize\":2}");
         mode.publishOtherInvalidRelay();
         mode.publish(ExternalNacosMode.FLOW,ExternalNacosMode.RULE);
