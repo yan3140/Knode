@@ -1,12 +1,12 @@
 {
   "name": "STREAM-OBSERVABILITY-FIXTURE",
   "version": "0.1-candidate",
-  "status": "test-only fixture; synthetic Redis consumer verified by controller; User-side v2 producer delivered, pending controller integration and real combined chain",
+  "status": "test-only fixture; controller verified real User logout v2 relay via Redis, fixture crash/reclaim and Jaeger parent chain",
   "boundary": "Test classes and test-scope dependencies only. This is not an Agent consumer, and never runs as part of the production artifact. It has no User database access, pause implementation or business run state.",
   "event": {
     "streamField": "Exactly one field named event, containing the JSON envelope.",
     "v1": "contracts/user/session-revoked-v1.schema.json, strict, no traceContext",
-    "v2": "User-side G8 delivery provides SessionRevoked v2 with all v1 business fields and optional traceContext containing only SDK-validated traceparent; controller integration and real combined verification are pending. No tracestate or baggage.",
+    "v2": "Integrated User G8 SessionRevoked v2 contains all v1 business fields and optional traceContext containing only SDK-validated traceparent. Controller verified original context across User restart in the real combined chain. No tracestate or baggage.",
     "unknown": "Extra/missing fields, malformed envelope, unknown version or conflicting immutable fact: durable UNSUPPORTED or CONFLICT; no ACK. Missing or malformed traceparent on an otherwise valid v2 is accepted with a new root.",
     "facts": "Exact eventId identifies the effect; a canonical SHA-256 digest of the envelope excluding traceContext detects conflicting facts. Only hashes and bounded status/attempt counts are persisted, never sid/userId or event payload."
   },
@@ -109,9 +109,8 @@
     "h2": "H2 and Lettuce are Maven test dependencies of knode-observability; no Docker or WSL required."
   },
   "pending": [
-    "Integrate the delivered User v2 producer and confirm original-intent traceparent and byte-for-byte v1 replay in the controller-owned real combined test.",
-    "Controller must provide the authorized exact stream, dedicated verify credentials and real User application/runtime inputs; run the opt-in Redis scenario and real Logout-to-Jaeger chain.",
-    "Validate deployed Redis ACL command details and native TLS independently; local RESP substitution does not prove either.",
-    "No claim is made about Agent business consumption, pause/checkpoint behavior, or downstream completion."
+    "Existing stored v1 byte-for-byte replay was not demonstrated by the controller real v2 chain; validate legacy persisted data separately when needed.",
+    "Validate deployed Redis ACL command details and native TLS independently; the controller G8 verification used its explicitly authorized Redis instance and does not establish production TLS.",
+    "Actual Agent business consumption, pause/checkpoint behavior, and downstream completion remain unverified."
   ]
 }

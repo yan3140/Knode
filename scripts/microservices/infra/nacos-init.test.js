@@ -153,6 +153,9 @@ test('local runbook binds matching discovery groups, loopback registration and m
   assert.equal(runbook.defaults.prometheus,19091);
   for(const name of ['gateway','user'])
     assert(service(name).argv.includes('--spring.cloud.nacos.discovery.ip=127.0.0.1'));
+  assert(service('nacos').argv.includes('-Dnacos.server.main.port=<nacos-port>'));
+  assert(!service('nacos').argv.some(x=>x.startsWith('-Dserver.port=')));
+  assert(service('gateway').environment.includes('NACOS_DISCOVERY_NAMESPACE'));
   assert(service('gateway').environment.includes('NACOS_DISCOVERY_GROUP'));
   assert(service('user').environment.includes('USER_NACOS_GROUP'));
   assert(service('user').environment.includes('USER_NACOS_CONFIG_GROUP'));

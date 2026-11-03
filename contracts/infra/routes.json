@@ -1,6 +1,6 @@
 {
   "version": "0.3-draft",
-  "status": "unfrozen",
+  "status": "controller-frozen protocol semantics; Gateway-User validated; other destination business services and individual method classifications remain subject to owner integration and confirmation",
   "prefix": "preserved",
   "routeMatchingMethods": "all; business service enforces methods",
   "productionAccess": "credentials and designated anonymous methods allowed; protected methods validate user token and authoritative session; unconfigured auth returns 503 for token-dependent requests",
@@ -327,5 +327,5 @@
     "/api/admin/**": "admin"
   },
   "clientIpPolicy": "external forwarding headers stripped; server forward headers strategy none",
-  "allRulesStatus": "approved input; implementation integration pending review"
+  "allRulesStatus": "Controller approved Gateway route and priority semantics; Gateway-User chain validated. Non-User destination services, legacy aliases and endpoint-specific method classifications remain subject to owner evidence."
 }

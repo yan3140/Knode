@@ -1,5 +1,5 @@
 {
-  "status": "G8 initializer verified against isolated Nacos 3.0.3; R1 User relay template verified with HTTP substitute, awaiting real combined validation",
+  "status": "Initializer including the User relay template verified against an exclusive isolated Nacos 3.0.3 instance; actual User Nacos wiring remains a separate integration gate.",
   "scope": "Only Nacos 3.0.3 standalone with authenticated admin API on an explicit 127.0.0.1 non-default test port, reserved exclusively for this initialization. This initializes a new verify namespace; it is not a production initializer.",
   "tool": "scripts/microservices/infra/nacos-init.js",
   "invocation": {
@@ -15,7 +15,7 @@
     "knode-user.degrade.json": "deploy/microservices/nacos/service.degrade.json",
     "knode-user.relay.json": "deploy/microservices/nacos/knode-user.relay.json"
   },
-  "contract": "At least one explicitly named Gateway and one explicitly named User Data ID are required. The fixed User relay template contains only sessionEventRelayBatchSize, an integer in 1..100 (default 50). User flow and degrade initialization are empty arrays. User configuration implementation is delivered but awaits controller integration and real combined verification.",
+  "contract": "At least one explicitly named Gateway and one explicitly named User Data ID are required. The fixed User relay template contains only sessionEventRelayBatchSize, an integer in 1..100 (default 50). User flow and degrade initialization are empty arrays. The User implementation is integrated; its actual Nacos configuration loading remains a separate validation gate.",
   "plan": "Reads only the fixed non-secret templates, validates input, prints Data IDs and SHA-256 hashes, performs no network access and creates no manifest.",
   "apply": [
     "Requires an external NACOS_INIT_ACCESS_TOKEN and NACOS_INIT_EXCLUSIVE_INSTANCE=confirm; acquires a same-control-port local lock and writes a no-secret manifest before any network request.",
