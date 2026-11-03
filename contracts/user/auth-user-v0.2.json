@@ -42,6 +42,6 @@
   "internal_types": "new internal DTO IDs are decimal strings, bounded integers are JSON numbers, times ISO-8601 UTC unless JWT/session specifies Unix seconds",
   "service_delegation": "future distinct token_use=service/delegation; single target audience, independent machine authorization and actor-bound restricted delegation. No implementation or endpoint in this slice.",
   "retry_idempotency": "read retry bounded by caller budget; revocation should be idempotent; no blind write retry without durable guarantees",
-  "validation": "G2 shared core and Redis adapter tests pending; no real Redis or cross-service validation",
+  "validation": "User and Gateway validation includes the controller G9 real Gateway/User/Redis and isolated MySQL run 68a6f0745be1; see reports/microservices/g9-real-observed-68a6f0745be1/result.json. This evidence does not establish integration with Agent or other business domains.",
   "authorization_order": "Verify signature and claims, fetch and validate authoritative session, then check route scope. Revoked token must yield 401 even for a different route scope."
 }

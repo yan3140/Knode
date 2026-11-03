@@ -1,6 +1,6 @@
 {
   "name": "external-stack-opt-in-test",
-  "status": "Controller G8 run 7e74b8359bcd passed with real Gateway, User, isolated MySQL and shared Redis using separately approved temporary ACLs. Two real v2 logout events, a test consumer and Jaeger trace linkage were validated; see reports/microservices/g8-real-observed-7e74b8359bcd/result.json. G9 rerun is in progress and Agent or business consumers were not validated.",
+  "status": "Controller G8 run 7e74b8359bcd and G9 run 68a6f0745be1 passed with real Gateway, User, isolated MySQL and approved Redis identities. G9 produced two real v2 logout events, exercised test-consumer crash and recovery and verified Jaeger parent linkage and User resource attributes; see reports/microservices/g9-real-observed-68a6f0745be1/result.json. Real Agent and business consumers were not validated.",
   "test": "knode-user/src/test/java/com/knode/user/ExternalStackIT.java",
   "execution": "Build the user JAR first. From knode-user run Maven test with -Dtest=ExternalStackIT -Dknode.it.real.enabled=true -Dknode.it.gateway.jar=<absolute-built-gateway-jar>; invoke Maven through Python. Never place credentials in Maven arguments.",
   "safety_guards": [
@@ -60,8 +60,8 @@
     "client_handshake": "The Redis client may also issue HELLO, CLIENT SETINFO and connection setup commands depending on server and driver version; verify necessary connection commands separately without widening key access."
   },
   "limitations": [
-    "This file is an opt-in test specification; the controller report is evidence for the specific G8 run, not all versions or environments.",
-    "The G8 report covers the approved stack and temporary ACLs used in that run; G9 rerun, other TLS configurations and real Agent/business consumer integration remain pending.",
+    "This file is an opt-in test specification; the controller reports are evidence for the specific G8 and G9 runs, not all versions or environments.",
+    "The G8 and G9 reports cover only the approved stack and temporary ACLs used in those runs; other TLS configurations and real Agent/business consumer integration remain pending.",
     "Only locally built User and controller-provided Gateway JARs are launched."
   ]
 }

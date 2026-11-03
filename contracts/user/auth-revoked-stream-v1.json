@@ -1,7 +1,7 @@
 {
   "name": "AUTH-REVOKED-STREAM",
   "version": "1.0",
-  "status": "User producer integrated; controller G8 run 7e74b8359bcd validated real Gateway/User/Redis, v2 events and trace linkage through a test consumer. Real Agent and business consumers remain pending; G9 rerun is in progress. See reports/microservices/g8-real-observed-7e74b8359bcd/result.json and session-revoked-v2.schema.json.",
+  "status": "User producer integrated; controller G9 run 68a6f0745be1 validated real Gateway/User/Redis, two v2 events, test-consumer crash/recovery and Jaeger parent linkage. Real Agent and business consumers remain pending. See reports/microservices/g9-real-observed-68a6f0745be1/result.json and session-revoked-v2.schema.json.",
   "stream": {
     "default": "knode:<environment>:v1:events:session",
     "entry": "Exactly one UTF-8 field event containing the full SessionRevoked JSON envelope.",

@@ -1,7 +1,7 @@
 {
   "name": "USER-G8-RUNTIME",
   "version": "0.1-candidate",
-  "status": "User G8 integrated; controller G8 run 7e74b8359bcd validated actual Gateway, User, Redis, v2 events, test consumer and Jaeger trace linkage. Real Agent and business consumer integration remains pending; G9 rerun is in progress.",
+  "status": "User G8 integrated; controller G9 run 68a6f0745be1 validated real Gateway, User, Redis and isolated MySQL, two v2 events, test-consumer crash/recovery, Jaeger parent linkage and User resource attributes. See reports/microservices/g9-real-observed-68a6f0745be1/result.json. Real Agent and business consumer integration remains pending.",
   "ports": {
     "service": "USER_PORT default 18090",
     "management": "USER_MANAGEMENT_PORT default 19092, bound 127.0.0.1; independent of service",
