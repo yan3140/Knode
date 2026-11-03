@@ -4,7 +4,8 @@
   "status": "User-side implementation; real Redis/Agent chain requires controller integration",
   "ports": {
     "service": "USER_PORT default 18090",
-    "management": "USER_MANAGEMENT_PORT default 19092, bound 127.0.0.1; independent of service"
+    "management": "USER_MANAGEMENT_PORT default 19092, bound 127.0.0.1; independent of service",
+    "forwardedHeaders": "server.forward-headers-strategy=none; proxy trust is not configured"
   },
   "toggles": {
     "discovery": "USER_NACOS_DISCOVERY_ENABLED default false",
@@ -22,7 +23,7 @@
     "configShape": {
       "sessionEventRelayBatchSize": "integer 1..100"
     },
-    "configBehavior": "Only this field changes scheduled relay batch size. Missing, malformed or unavailable configuration makes readiness unavailable; last valid value remains in use. Nacos generic config import is disabled.",
+    "configBehavior": "Only this field changes scheduled relay batch size. Missing, malformed or unavailable configuration makes readiness unavailable; last valid value remains in use. The generic Nacos ConfigData resolver is absent; arbitrary Nacos imports are rejected before any remote load.",
     "governanceGroup": "USER_GOVERNANCE_GROUP required when governance enabled"
   },
   "tracing": {
@@ -30,7 +31,15 @@
     "version": "USER_OBSERVABILITY_VERSION required when enabled",
     "endpoint": "USER_OTLP_ENDPOINT must be HTTPS except loopback HTTP",
     "sampling": "USER_TRACING_SAMPLE_RATE default 0.1",
-    "event": "session-revoked-v2.schema.json; traceparent-only captured on original durable intent transaction"
+    "event": "session-revoked-v2.schema.json; traceparent-only captured on original durable intent transaction",
+    "exportBounds": {
+      "maxQueueSize": 512,
+      "maxBatchSize": 128,
+      "scheduleDelay": "1s",
+      "exportTimeout": "2s",
+      "connectTimeout": "1s"
+    },
+    "propagation": "W3C trace context only; baggage and baggage correlation disabled"
   },
   "legacyCompatibility": "Existing stored v1 event_json is replayed byte-for-byte. Existing intents use version 1 and retain no captured producer context; old unmaterialized outbox facts serialize v1. Newly recorded intents produce v2, with optional producer traceparent. Recovery and replay do not recapture relay context.",
   "governance": {
@@ -48,6 +57,7 @@
       "KNODE_IT_EVENTS_STREAM",
       "KNODE_IT_EVENTS_PROBE_PREFIX",
       "KNODE_IT_OTLP_HTTP",
+      "KNODE_IT_JAEGER_QUERY_HTTP",
       "KNODE_IT_AUTH_ENVIRONMENT",
       "KNODE_IT_DB_URL",
       "KNODE_IT_DB_USERNAME",
@@ -65,7 +75,8 @@
       "KNODE_IT_REDIS_BUSINESS_PREFIX",
       "knode.it.gateway.jar"
     ],
-    "scope": "Explicit verify namespace, loopback non-3306 empty MySQL and loopback OTLP. Manifest is fsynced before network and records exact stream, probe prefix, known session keys, owned process IDs and validated producer traceparent. An interruption during login is marked loginInProgress; an unreturned session ID cannot be precisely cleaned from this manifest and expires naturally. Stream remains for controller consumer. An interruption between process creation and PID persistence is marked processStarting; review exact executable and port before intervening.",
-    "redisCommands": "Session read: GET. Session writer: SET NX EX and DEL. Business verification: SET NX EX, GET, DEL. Relay: XADD exact stream; probe: MULTI, XADD, PEXPIRE, EXEC, DEL against exact probe prefix. Connection handshake AUTH/HELLO and CLIENT SETINFO as required. No SCAN, XTRIM or ACL mutation."
+    "scope": "Explicit verify namespace, loopback non-3306 empty MySQL and loopback OTLP. Events mode enables Gateway and User observability with independent loopback management ports; the first successful logout goes through Gateway and the failure/restart case goes directly to User. Manifest is fsynced before network and records exact stream, probe prefix, known session keys, owned process IDs, both management ports and validated User producer traceparents with route labels. An interruption during login is marked loginInProgress; an unreturned session ID cannot be precisely cleaned from this manifest and expires naturally. Stream remains for controller consumer. An interruption between process creation and PID persistence is marked processStarting; review exact executable and port before intervening.",
+    "redisCommands": "Session read: GET. Session writer: SET NX EX and DEL. Business verification: SET NX EX, GET, DEL. Relay: XADD exact stream; probe: MULTI, XADD, PEXPIRE, EXEC, DEL against exact probe prefix. Connection handshake AUTH/HELLO and CLIENT SETINFO as required. No SCAN, XTRIM or ACL mutation.",
+    "jaegerQuery": "Explicit HTTP origin with literal 127.0.0.1 and port; no credentials, query, fragment or non-root path. The test appends /api/traces/{traceId}, limits response bytes and request time, retries 404/empty data, and waits for the exact User producer span (plus a Gateway span for the Gateway-routed logout) before process restart."
   }
 }

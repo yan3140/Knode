@@ -62,6 +62,9 @@ class SessionRevocationTracingHttpTest {
     @Autowired ObjectProvider<EventTraceContext> traces;
     @Autowired io.micrometer.core.instrument.MeterRegistry meters;
     @Autowired com.knode.governance.GovernanceRules governanceRules;
+    @Autowired org.springframework.boot.actuate.autoconfigure.tracing.TracingProperties tracingProperties;
+    @Autowired org.springframework.boot.actuate.autoconfigure.tracing.otlp.OtlpTracingProperties otlpProperties;
+    @Autowired org.springframework.boot.autoconfigure.web.ServerProperties serverProperties;
     @MockitoBean SessionEventTransport transport;@MockitoBean SessionStore.Reader reader;@MockitoBean SessionStore.Writer writer;
     @MockitoBean(name="authReadConnection") LettuceConnectionFactory readConnection;
     @MockitoBean(name="authWriteConnection") LettuceConnectionFactory writeConnection;
@@ -142,6 +145,40 @@ class SessionRevocationTracingHttpTest {
                 }
             }
         }
+    }
+
+    @Test void exporterAndPropagationUseBoundedPrivacyPreservingConfiguration() {
+        var export=tracingProperties.getOpentelemetry().getExport();
+        assertEquals(512,export.getMaxQueueSize());assertEquals(128,export.getMaxBatchSize());
+        assertEquals(java.time.Duration.ofSeconds(1),export.getScheduleDelay());
+        assertEquals(java.time.Duration.ofSeconds(2),export.getTimeout());
+        assertEquals(java.time.Duration.ofSeconds(2),otlpProperties.getTimeout());
+        assertEquals(java.time.Duration.ofSeconds(1),otlpProperties.getConnectTimeout());
+        var propagation=tracingProperties.getPropagation();
+        var w3c=org.springframework.boot.actuate.autoconfigure.tracing.TracingProperties.Propagation.PropagationType.W3C;
+        assertEquals(List.of(w3c),propagation.getConsume());assertEquals(List.of(w3c),propagation.getProduce());
+        assertFalse(tracingProperties.getBaggage().isEnabled());assertFalse(tracingProperties.getBaggage().getCorrelation().isEnabled());
+        assertEquals(org.springframework.boot.autoconfigure.web.ServerProperties.ForwardHeadersStrategy.NONE,serverProperties.getForwardHeadersStrategy());
+        var carrier=new HashMap<String,String>();
+        var remote=io.opentelemetry.api.trace.SpanContext.createFromRemoteParent(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbb",io.opentelemetry.api.trace.TraceFlags.getSampled(),
+                io.opentelemetry.api.trace.TraceState.getDefault());
+        var context=io.opentelemetry.context.Context.root().with(io.opentelemetry.api.trace.Span.wrap(remote))
+                .with(io.opentelemetry.api.baggage.Baggage.builder().put("private","synthetic").build());
+        telemetry.getPropagators().getTextMapPropagator().inject(context,carrier,Map::put);
+        assertTrue(carrier.containsKey("traceparent"));assertFalse(carrier.containsKey("baggage"));
+        assertFalse(carrier.containsKey("b3"));assertFalse(carrier.containsKey("X-B3-TraceId"));
+        var getter=new io.opentelemetry.context.propagation.TextMapGetter<Map<String,String>>() {
+            @Override public Iterable<String> keys(Map<String,String> value) {return value.keySet();}
+            @Override public String get(Map<String,String> value,String key) {return value.get(key);}
+        };
+        var received=new HashMap<>(carrier);received.put("baggage","private=synthetic");
+        var extracted=telemetry.getPropagators().getTextMapPropagator().extract(io.opentelemetry.context.Context.root(),received,getter);
+        assertEquals(remote.getTraceId(),io.opentelemetry.api.trace.Span.fromContext(extracted).getSpanContext().getTraceId());
+        assertEquals(0,io.opentelemetry.api.baggage.Baggage.fromContext(extracted).size());
+        var b3Only=Map.of("b3","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-1");
+        var ignored=telemetry.getPropagators().getTextMapPropagator().extract(io.opentelemetry.context.Context.root(),b3Only,getter);
+        assertFalse(io.opentelemetry.api.trace.Span.fromContext(ignored).getSpanContext().isValid());
     }
 
     @Test void managementEndpointsAreBoundToTheirOwnLoopbackPort() throws Exception {

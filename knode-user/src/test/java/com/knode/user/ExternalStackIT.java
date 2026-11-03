@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @EnabledIfSystemProperty(named="knode.it.real.enabled", matches="true")
 class ExternalStackIT {
     private final ObjectMapper json = new ObjectMapper();
-    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+    private final HttpClient http = HttpClient.newBuilder().proxy(ProxySelector.of(null)).connectTimeout(Duration.ofSeconds(3)).build();
     private final List<Process> processes = new ArrayList<>();
     private final Set<String> sessionKeys = new LinkedHashSet<>();
     private final Set<String> explicitProbeKeys = new LinkedHashSet<>();
@@ -36,9 +36,11 @@ class ExternalStackIT {
     private String readUser, readPassword, writeUser, writePassword, businessUser, businessPassword, businessPrefix;
     private Path userJar, gatewayJar, keyDir, privateFile, publicFile;
     private int userPort, gatewayPort,managementPort;
+    private Integer gatewayManagementPort;
     private boolean databaseInitialized,eventsEnabled,loginInProgress;
     private String processStarting;
-    private String eventStream,eventProbePrefix,otlpEndpoint;
+    private String eventStream,eventProbePrefix,otlpEndpoint,jaegerEndpoint,lastLogoutIngressTraceparent;
+    private ExternalTraceProbe traceProbe;
     private Path manifest;
     private final List<Map<String,String>> eventHandoffs=new ArrayList<>();
     private LettuceConnectionFactory readFactory, writeFactory, businessFactory;
@@ -75,9 +77,13 @@ class ExternalStackIT {
         managementPort=port();while (managementPort==userPort || managementPort==gatewayPort) managementPort=port();
         eventsEnabled=Boolean.getBoolean("knode.it.events.enabled");
         if (eventsEnabled) {
+            gatewayManagementPort=port();
+            while (gatewayManagementPort==userPort || gatewayManagementPort==gatewayPort || gatewayManagementPort==managementPort) gatewayManagementPort=port();
             eventStream=setting("KNODE_IT_EVENTS_STREAM");eventProbePrefix=setting("KNODE_IT_EVENTS_PROBE_PREFIX");
-            otlpEndpoint=setting("KNODE_IT_OTLP_HTTP");
+            otlpEndpoint=setting("KNODE_IT_OTLP_HTTP");jaegerEndpoint=setting("KNODE_IT_JAEGER_QUERY_HTTP");
             ExternalEventGuard.check(environment,businessPrefix,eventStream,eventProbePrefix,otlpEndpoint);
+            jaegerEndpoint=ExternalEventGuard.checkJaegerEndpoint(jaegerEndpoint);
+            traceProbe=new ExternalTraceProbe(jaegerEndpoint);
         }
         Path manifestDir=Files.createTempDirectory(Path.of("target"),"external-stack-manifest-");
         manifest=manifestDir.resolve("manifest.json");
@@ -88,8 +94,9 @@ class ExternalStackIT {
         var body=new LinkedHashMap<String,Object>();
         body.put("environment",environment);body.put("dbUrl",dbUrl);body.put("redisHost",redisHost);body.put("redisPort",redisPort);
         body.put("userPort",userPort);body.put("gatewayPort",gatewayPort);body.put("managementPort",managementPort);
+        body.put("gatewayManagementPort",gatewayManagementPort);
         body.put("eventsEnabled",eventsEnabled);body.put("stream",eventStream);body.put("probePrefix",eventProbePrefix);
-        body.put("otlpEndpoint",otlpEndpoint);body.put("sessionKeys",List.copyOf(sessionKeys));
+        body.put("otlpEndpoint",otlpEndpoint);body.put("jaegerQueryOrigin",jaegerEndpoint);body.put("sessionKeys",List.copyOf(sessionKeys));
         body.put("explicitProbeKeys",List.copyOf(explicitProbeKeys));body.put("loginInProgress",loginInProgress);
         body.put("ownedProcesses",processes.stream().map(p -> Map.of("pid",p.pid(),"alive",p.isAlive())).toList());
         body.put("processStarting",processStarting);
@@ -142,10 +149,16 @@ class ExternalStackIT {
     private Process start(boolean gateway,boolean badRead,boolean badWrite) throws Exception {
         var java=Path.of(System.getProperty("java.home"),"bin",System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win")?"java.exe":"java").toString();
         List<String> cmd=new ArrayList<>(List.of(java,"-jar",(gateway?gatewayJar:userJar).toString(),"--server.address=127.0.0.1"));
-        if (gateway) cmd.add("--spring.cloud.discovery.client.simple.instances.knode-user[0].uri=http://127.0.0.1:"+userPort);
+        if (gateway) {
+            cmd.add("--spring.cloud.discovery.client.simple.instances.knode-user[0].uri=http://127.0.0.1:"+userPort);
+            if (eventsEnabled) {
+                cmd.add("--management.server.address=127.0.0.1");
+                cmd.add("--management.server.port="+gatewayManagementPort);
+            }
+        }
         ProcessBuilder b=new ProcessBuilder(cmd);Map<String,String> e=b.environment();
-        e.keySet().removeIf(k -> k.startsWith("KNODE_") || k.startsWith("SPRING_") || k.startsWith("NACOS_") || k.startsWith("USER_")
-                || Set.of("JAVA_TOOL_OPTIONS","JDK_JAVA_OPTIONS","SERVER_PORT","USER_PORT","GATEWAY_PORT").contains(k));
+        e.keySet().removeIf(k -> k.startsWith("KNODE_") || k.startsWith("SPRING_") || k.startsWith("NACOS_") || k.startsWith("USER_") || k.startsWith("OTEL_") || k.startsWith("MANAGEMENT_") || k.startsWith("SERVER_")
+                || Set.of("JAVA_TOOL_OPTIONS","JDK_JAVA_OPTIONS","_JAVA_OPTIONS","SERVER_PORT","USER_PORT","GATEWAY_PORT").contains(k));
         if (gateway) {
             e.put("SERVER_PORT",Integer.toString(gatewayPort));e.put("GATEWAY_PORT",Integer.toString(gatewayPort));
             e.put("KNODE_GATEWAY_AUTH_CONFIGURED","true");e.put("KNODE_GATEWAY_AUTH_PUBLIC_KEYS","it-key="+publicFile.toAbsolutePath());
@@ -153,6 +166,11 @@ class ExternalStackIT {
             e.put("KNODE_GATEWAY_AUTH_REDIS_PORT",redisPort);e.put("KNODE_GATEWAY_AUTH_REDIS_DATABASE",redisDb);
             e.put("KNODE_GATEWAY_AUTH_REDIS_USERNAME",readUser);e.put("KNODE_GATEWAY_AUTH_REDIS_PASSWORD",badRead?UUID.randomUUID().toString():readPassword);
             e.put("KNODE_GATEWAY_AUTH_REDIS_TLS",redisTls);e.put("NACOS_DISCOVERY_ENABLED","false");e.put("NACOS_CONFIG_ENABLED","false");e.put("KNODE_GOV_NACOS_ENABLED","false");
+            if (eventsEnabled) {
+                e.put("KNODE_OBSERVABILITY_ENABLED","true");e.put("KNODE_ENVIRONMENT",environment);
+                e.put("KNODE_SERVICE_VERSION","verify");e.put("KNODE_OTLP_TRACES_ENDPOINT",otlpEndpoint);
+                e.put("KNODE_TRACE_SAMPLE_RATIO","1.0");
+            }
         } else {
             e.put("USER_PORT",Integer.toString(userPort));e.put("USER_MANAGEMENT_PORT",Integer.toString(managementPort));e.put("KNODE_USER_DB_URL",dbUrl);e.put("KNODE_USER_DB_USERNAME",dbUser);e.put("KNODE_USER_DB_PASSWORD",dbPassword);
             e.put("KNODE_AUTH_ENVIRONMENT",environment);e.put("KNODE_AUTH_SIGNING_KID","it-key");
@@ -178,7 +196,9 @@ class ExternalStackIT {
         // The subprocess may log request or connection details: discard it, never persist secrets or tokens.
         b.redirectOutput(ProcessBuilder.Redirect.DISCARD);b.redirectError(ProcessBuilder.Redirect.DISCARD);
         processStarting=gateway?"gateway":"user";saveManifest();
-        Process p=b.start();processes.add(p);processStarting=null;saveManifest();awaitPort(p,gateway?gatewayPort:userPort);return p;
+        Process p=b.start();processes.add(p);processStarting=null;saveManifest();awaitPort(p,gateway?gatewayPort:userPort);
+        if (gateway && eventsEnabled) awaitPort(p,gatewayManagementPort);
+        return p;
     }
     private void awaitPort(Process p,int port) throws Exception {
         long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(90);
@@ -198,7 +218,10 @@ class ExternalStackIT {
     private HttpResponse<String> request(int port,String method,String path,String body,String token) throws Exception {
         var b=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+path)).timeout(Duration.ofSeconds(10)).header("Content-Type","application/json");
         if (token!=null) b.header("token",token);
-        if (eventsEnabled && path.endsWith("/auth/logout")) b.header("traceparent","00-"+UUID.randomUUID().toString().replace("-","")+"-"+UUID.randomUUID().toString().replace("-","").substring(0,16)+"-01");
+        if (eventsEnabled && path.endsWith("/auth/logout")) {
+            lastLogoutIngressTraceparent="00-"+UUID.randomUUID().toString().replace("-","")+"-"+UUID.randomUUID().toString().replace("-","").substring(0,16)+"-01";
+            b.header("traceparent",lastLogoutIngressTraceparent);
+        }
         return http.send(b.method(method,body==null?HttpRequest.BodyPublishers.noBody():HttpRequest.BodyPublishers.ofString(body)).build(),HttpResponse.BodyHandlers.ofString());
     }
     private String login() throws Exception {
@@ -255,7 +278,7 @@ class ExternalStackIT {
             p.setString(1,sid);try (ResultSet rs=p.executeQuery()) {if (!rs.next()) throw new IllegalStateException("Missing persisted intent");return rs.getString(1);}
         }
     }
-    private void awaitPublished(String token,String expectedTrace) throws Exception {
+    private void awaitPublished(String token,String expectedTrace,String route) throws Exception {
         String sid=json.readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1])).path("sid").asText();
         long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(45);
         while (System.nanoTime()<end) {
@@ -265,9 +288,9 @@ class ExternalStackIT {
                         JsonNode event=json.readTree(rs.getString(2));String trace=event.path("traceContext").path("traceparent").asText();
                         var verifier=new com.knode.observability.EventTraceContext(io.opentelemetry.api.OpenTelemetry.noop());
                         assertEquals(trace,verifier.fromStored(trace,null).orElseThrow().traceparent());
-                        if (expectedTrace!=null) assertEquals(expectedTrace,trace);
+                        assertEquals(Objects.requireNonNull(expectedTrace),trace);
                         assertEquals(2,event.path("schemaVersion").asInt());assertEquals(rs.getString(3),event.path("eventId").asText());
-                        eventHandoffs.add(Map.of("eventId",rs.getString(3),"traceparent",trace));saveManifest();return;
+                        eventHandoffs.add(Map.of("eventId",rs.getString(3),"traceparent",trace,"route",route));saveManifest();return;
                     }
                 }
             }
@@ -284,8 +307,13 @@ class ExternalStackIT {
             String a=login(),b=login();assertFalse(a.equals(b),"Sessions must issue distinct tokens");
             assertEquals(200,status(userPort,a));assertEquals(200,status(gatewayPort,a));
             assertEquals(403,request(gatewayPort,"GET","/api/admin/auth/me",null,a).statusCode());
-            assertEquals(200,request(userPort,"POST","/api/blog/auth/logout",null,a).statusCode());
-            if (eventsEnabled) awaitPublished(a,null);
+            assertEquals(200,request(eventsEnabled?gatewayPort:userPort,"POST","/api/blog/auth/logout",null,a).statusCode());
+            if (eventsEnabled) {
+                String producerTrace=traceFromIntent(a);
+                ExternalEventGuard.checkProducerTrace(producerTrace,lastLogoutIngressTraceparent);
+                awaitPublished(a,producerTrace,"gateway");
+                traceProbe.awaitProducer(producerTrace,true,Duration.ofSeconds(60));
+            }
             assertEquals(401,status(userPort,a));assertEquals(401,status(gatewayPort,a));
             assertEquals(200,status(userPort,b));assertEquals(200,status(gatewayPort,b));
             String c=login();assertEquals(401,status(userPort,a));assertEquals(401,status(gatewayPort,a));assertEquals(200,status(gatewayPort,c));
@@ -295,9 +323,12 @@ class ExternalStackIT {
             stop(user);user=start(false,false,true);
             assertEquals(503,request(userPort,"POST","/api/blog/auth/logout",null,c).statusCode());assertEquals("PENDING",intent(c));
             String originalTrace=eventsEnabled?traceFromIntent(c):null;
-            if (eventsEnabled) assertNotNull(originalTrace);
+            if (eventsEnabled) {
+                ExternalEventGuard.checkProducerTrace(originalTrace,lastLogoutIngressTraceparent);
+                traceProbe.awaitProducer(originalTrace,false,Duration.ofSeconds(60));
+            }
             stop(user);user=start(false,false,false);awaitRevoked(c);
-            if (eventsEnabled) awaitPublished(c,originalTrace);
+            if (eventsEnabled) awaitPublished(c,originalTrace,"direct-recovery");
             assertEquals(401,status(userPort,c));assertEquals(401,status(gatewayPort,c));assertEquals(200,status(userPort,b));assertEquals(200,status(gatewayPort,b));
         } finally {
             int cleanupFailures=0;

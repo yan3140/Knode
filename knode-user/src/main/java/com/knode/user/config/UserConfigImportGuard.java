@@ -6,12 +6,16 @@ import org.springframework.boot.env.EnvironmentPostProcessor;
 import org.springframework.core.Ordered;
 import org.springframework.core.env.ConfigurableEnvironment;
 
-/** Reject generic Nacos imports before ConfigData can load arbitrary remote properties. */
+/** Reject generic Nacos settings after local ConfigData; its remote resolver is absent from User. */
 public final class UserConfigImportGuard implements EnvironmentPostProcessor,Ordered {
-    @Override public int getOrder() {return Ordered.HIGHEST_PRECEDENCE;}
+    @Override public int getOrder() {return Ordered.HIGHEST_PRECEDENCE+11;}
     @Override public void postProcessEnvironment(ConfigurableEnvironment env,SpringApplication application) {
-        String imports=env.getProperty("spring.config.import","");
-        if (imports.toLowerCase(Locale.ROOT).contains("nacos:") || env.getProperty("spring.cloud.nacos.config.enabled",Boolean.class,false))
+        for (var source:env.getPropertySources()) {
+            Object imports=source.getProperty("spring.config.import");
+            if (imports!=null && imports.toString().toLowerCase(Locale.ROOT).contains("nacos:"))
+                throw new IllegalStateException("Use only the fixed User Nacos relay configuration");
+        }
+        if (env.getProperty("spring.cloud.nacos.config.enabled",Boolean.class,false))
             throw new IllegalStateException("Use only the fixed User Nacos relay configuration");
         boolean discovery=env.getProperty("USER_NACOS_DISCOVERY_ENABLED",Boolean.class,false)
                 || env.getProperty("spring.cloud.nacos.discovery.enabled",Boolean.class,false);

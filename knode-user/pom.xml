@@ -11,7 +11,7 @@
     <dependency><groupId>com.lx</groupId><artifactId>knode-governance</artifactId><version>1.0-SNAPSHOT</version></dependency>
     <dependency><groupId>com.lx</groupId><artifactId>knode-observability</artifactId><version>1.0-SNAPSHOT</version></dependency>
     <dependency><groupId>com.alibaba.cloud</groupId><artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId></dependency>
-    <dependency><groupId>com.alibaba.cloud</groupId><artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId></dependency>
+    <dependency><groupId>com.alibaba.nacos</groupId><artifactId>nacos-client</artifactId></dependency>
     <dependency><groupId>io.opentelemetry</groupId><artifactId>opentelemetry-sdk-testing</artifactId><scope>test</scope></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-redis</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
