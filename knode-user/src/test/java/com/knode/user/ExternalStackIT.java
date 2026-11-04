@@ -46,8 +46,8 @@ class ExternalStackIT {
     private Path browserRuntime;
     private int blogPort,adminPort,browserDebugPort;
     private Map<String,Object> browserCleanup;
-    private JsonNode browserEvidence;
-    private String browserFailureStage,browserStage;
+    private JsonNode browserEvidence,browserFailureEvidence;
+    private String browserFailureStage,browserFailureEvidenceState,browserStage;
     private final List<String> browserStages=new ArrayList<>();
     private final Map<String,Map<String,Object>> browserProbes=new LinkedHashMap<>();
     private ExternalNacosGuard.Inputs nacosInputs;
@@ -159,6 +159,7 @@ class ExternalStackIT {
                 "driverDirectory",browserRuntime.resolve("browser-driver").toString()));
         body.put("browserFrontendRevision",browserInputs==null?null:browserInputs.revision());
         body.put("browserCleanup",browserCleanup);body.put("browserEvidence",browserEvidence);body.put("browserFailureStage",browserFailureStage);
+        body.put("browserFailureEvidence",browserFailureEvidence);body.put("browserFailureEvidenceState",browserFailureEvidenceState);
         body.put("browserStage",browserStage);body.put("browserStages",List.copyOf(browserStages));
         body.put("browserProbes",new LinkedHashMap<>(browserProbes));
         body.put("nacosEnabled",nacosEnabled);body.put("nacos",nacos==null?null:nacos.manifest());
@@ -619,16 +620,17 @@ class ExternalStackIT {
         while (driver.isAlive() && System.nanoTime()<deadline) {driver.waitFor(1,TimeUnit.SECONDS);saveManifest();}
         if (driver.isAlive()) throw new IllegalStateException("Browser journey timed out");
         if (driver.exitValue()!=0) {
-            if (Files.isRegularFile(evidence) && Files.size(evidence)<1024) {
+            if (!Files.isRegularFile(evidence,LinkOption.NOFOLLOW_LINKS)) browserFailureEvidenceState="missing";
+            else {
                 try {
-                    JsonNode failure=json.readTree(evidence.toFile());String stage=failure==null?"":failure.path("stage").asText();
-                    if (failure!=null && failure.size()==2 && failure.path("failed").asBoolean()
-                            && Set.of("connect","blog-login","blog-update","blog-logout","admin-login",
-                            "admin-logout","admin-relogin","admin-user-edit","admin-role-edit","admin-menu-edit","network-assertions").contains(stage))
-                        browserFailureStage=stage;
-                } catch (IOException ignored) { }
+                    browserFailureEvidence=ExternalBrowserFailureEvidence.read(evidence,json);
+                    browserFailureStage=browserFailureEvidence.path("stage").textValue();
+                    browserFailureEvidenceState="accepted";
+                } catch (IOException | IllegalArgumentException invalid) {
+                    browserFailureEvidenceState="rejected";
+                }
             }
-            throw new IllegalStateException("Browser journey failed; see the sanitized manifest stage");
+            throw new IllegalStateException("Browser journey failed; see sanitized manifest evidence");
         }
         if (!Files.isRegularFile(evidence) || Files.size(evidence)>200000) throw new IllegalStateException("Invalid browser evidence size");
         browserStage("driver-complete");
