@@ -1,6 +1,6 @@
 {
   "version": "0.3",
-  "status": "Infra governance verified; User G8 integration delivered and integrated. Actual User Nacos governance rule loading and end-to-end enforcement remain separately unverified.",
+  "status": "Infra governance and actual User Nacos flow-rule loading and enforcement verified in controller G11 with real Gateway/User and Nacos 3.0.3; active User degrade-rule enforcement remains unverified. Evidence: reports/microservices/g11-real-nacos-c5e6b6dbdc1c/result.json",
   "namespace": "explicit isolated namespace required",
   "group": "KNODE_SENTINEL",
   "dataIds": [
@@ -20,13 +20,13 @@
       "id": "knode-<service>.flow.json",
       "type": "flow",
       "resource": "actual registered resource name",
-      "serviceClient": "opt-in knode-governance; User G8 implementation integrated; actual User Nacos governance rule loading and enforcement remain separately unverified"
+      "serviceClient": "opt-in knode-governance; controller G11 verified actual User flow-rule missing/invalid readiness degradation and recovery, direct and Gateway HTTP 429 enforcement, and recovery after clearing the rule"
     },
     {
       "id": "knode-<service>.degrade.json",
       "type": "degrade",
       "resource": "actual registered resource name",
-      "serviceClient": "opt-in knode-governance; User G8 implementation integrated; actual User Nacos governance rule loading and enforcement remain separately unverified"
+      "serviceClient": "opt-in knode-governance; controller G11 loaded an empty User degrade initialization as part of the ready baseline; active degrade-rule enforcement was not exercised"
     }
   ],
   "loading": {

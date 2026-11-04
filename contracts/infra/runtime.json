@@ -1,6 +1,6 @@
 {
   "version": "0.4",
-  "status": "Gateway and User G8 integrated; controller verified real Gateway/User logout and trace chain with Redis and a test-only consumer. Actual User Nacos discovery/configuration combination remains separately unverified.",
+  "status": "Controller G11 verified actual Gateway/User Nacos discovery, fixed configuration and governance with Redis and private MySQL; G9 separately verified the real logout trace chain with a test-only consumer.",
   "serviceName": "knode-gateway",
   "health": "/actuator/health",
   "liveness": "/actuator/health/liveness",
@@ -24,7 +24,7 @@
     "configurationImport": "NACOS_CONFIG_IMPORT is resolved before Spring Config Data; explicit SPRING_CONFIG_IMPORT takes precedence.",
     "routeRefresh": "Refresh scope and gateway route cache are refreshed on configuration change.",
     "groups": "NACOS_DISCOVERY_GROUP maps to spring.cloud.nacos.discovery.group, default DEFAULT_GROUP; it must equal the User registration group USER_NACOS_GROUP. NACOS_GROUP applies only to Gateway config and defaults KNODE_SERVICE; KNODE_GOV_NACOS_GROUP applies only to Gateway governance. These groups do not implicitly share a value.",
-    "validation": "Nacos 3.0.3 and the actual Gateway JAR routed to an SDK-registered loopback HTTP fixture only in the exact custom discovery group; healthy DEFAULT_GROUP and another group were not routed. Explicit deregistration, re-registration and fixture restart recovered; the test disabled the Spring Cloud load-balancer cache. The fixture is not User and does not establish User Nacos wiring."
+    "validation": "Nacos 3.0.3 and the actual Gateway JAR routed to an SDK-registered loopback HTTP fixture only in the exact custom discovery group; healthy DEFAULT_GROUP and another group were not routed. Explicit deregistration, re-registration and fixture restart recovered; the test disabled the Spring Cloud load-balancer cache. The fixture is not User and does not establish User Nacos wiring. Controller G11 separately verified authenticated Nacos 3.0.3 with actual Gateway/User JARs, two isolated namespaces and different discovery, config and governance groups. Real login and readiness passed; other-namespace changes were isolated. Invalid User relay config caused 503 readiness and recovery; the last valid batch size 2 released two of three real logout events until recovery at 3. User flow-rule missing/invalid readiness and direct/Gateway 429 enforcement and clearing were verified. Gateway load-balancer cache was disabled. G11 evidence: reports/microservices/g11-real-nacos-c5e6b6dbdc1c/result.json"
   },
   "auth": "Shared SDK v0.2 plus nonblocking authoritative session GET; no positive cache",
   "governanceEnvironment": [

@@ -1,6 +1,6 @@
 {
   "version": "0.2",
-  "status": "Infra and User G8 observability integrated; controller verified real Gateway/User logout and Redis relay with a test-only consumer and Jaeger.",
+  "status": "Controller G11 verified actual User readiness during exporter failure in the Nacos-enabled Gateway/User stack; G9 separately verified the real Gateway/User logout trace chain with a test-only consumer and Jaeger.",
   "requestId": {
     "header": "X-Request-Id",
     "pattern": "[A-Za-z0-9._-]{1,64}",
@@ -40,5 +40,5 @@
     "overflow": "drop or reject telemetry; no business request should wait on exporter"
   },
   "local": "Collector, Jaeger and Prometheus config and pinned official Windows-native sources: deploy/microservices/observability/; binaries and test evidence remain untracked.",
-  "health": "Gateway and service health do not depend on telemetry export. Collector health_check reports its own process state and is not proof that Jaeger has received spans."
+  "health": "Gateway and service health do not depend on telemetry export. Collector health_check reports its own process state and is not proof that Jaeger has received spans. Controller G11 observed 184 failed User exporter connection attempts without making User unready; that run did not validate User Jaeger export or a consumer. Evidence: reports/microservices/g11-real-nacos-c5e6b6dbdc1c/result.json. The separate prior G9 trace/consumer evidence is reports/microservices/g9-real-observed-68a6f0745be1/result.json."
 }
