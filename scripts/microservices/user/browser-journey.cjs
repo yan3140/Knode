@@ -133,6 +133,17 @@ async function main() {
   await until("document.querySelector('.navbar .user-copy strong') && document.querySelector('.navbar .user-copy strong').textContent.trim()==='IT Administrator'", 'admin identity')
   await until("document.querySelector('.navbar .user-avatar') && document.querySelector('.navbar .user-avatar').complete && document.querySelector('.navbar .user-avatar').naturalWidth>0", 'admin default avatar')
   await until("document.body.textContent.includes('IT System')", 'dynamic menu')
+  stage = 'admin-logout'
+  await perform(click('.avatar-wrapper'), stage)
+  await perform("(() => {const e=[...document.querySelectorAll('.user-dropdown .el-dropdown-menu__item')].find(x=>x.textContent.includes('\\u9000\\u51fa\\u767b\\u5f55'));if(!e)return false;e.click();return true})()", stage)
+  await perform(click('.el-message-box__btns .el-button--primary'), stage)
+  await until("location.hash.startsWith('#/login') && !document.cookie.includes('Admin-Token=') && !!document.querySelector('.login-form')", stage)
+  stage = 'admin-relogin'
+  await perform(setInput('.login-form input[name=userName]', 'it-admin'), stage)
+  await perform(setInput('.login-form input[name=password]', 'synthetic-test-password'), stage)
+  await perform(click('.login-button'), stage)
+  await until("document.querySelector('.navbar .user-copy strong') && document.querySelector('.navbar .user-copy strong').textContent.trim()==='IT Administrator'", stage)
+  await until("document.body.textContent.includes('IT System')", stage)
   stage = 'admin-user-edit'
   await navigate(admin + '/#/system/user')
   await perform(editRow('9007199254740993'), stage)
@@ -163,8 +174,8 @@ async function main() {
   for (const [path, method, count] of [
     ['/api/blog/auth/login','POST',1], ['/api/blog/user/userInfo','GET',2],
     ['/api/blog/user/userInfo','PUT',1], ['/api/blog/auth/logout','POST',1],
-    ['/dev-api/api/admin/auth/login','POST',1], ['/dev-api/api/admin/auth/me','GET',1],
-    ['/dev-api/api/admin/auth/routers','GET',1], ['/dev-api/api/admin/system/user/9007199254740993','GET',1],
+    ['/dev-api/api/admin/auth/login','POST',2], ['/dev-api/api/admin/auth/logout','POST',1], ['/dev-api/api/admin/auth/me','GET',2],
+    ['/dev-api/api/admin/auth/routers','GET',2], ['/dev-api/api/admin/system/user/9007199254740993','GET',1],
     ['/dev-api/api/admin/system/user','PUT',1], ['/dev-api/api/admin/system/role/9007199254740995','GET',1],
     ['/dev-api/api/admin/system/menu/roleMenuTreeselect/9007199254740995','GET',1],
     ['/dev-api/api/admin/system/role','PUT',1], ['/dev-api/api/admin/system/menu/9007199254740997','GET',1],

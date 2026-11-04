@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ExternalStackIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder().proxy(ProxySelector.of(null)).connectTimeout(Duration.ofSeconds(3)).build();
+    private final ExternalFrontendProbe frontendProbe=new ExternalFrontendProbe();
     private final List<Process> processes = new java.util.concurrent.CopyOnWriteArrayList<>();
     private record OwnedChild(ProcessHandle handle,java.time.Instant started) {}
     private final Map<Long,OwnedChild> observedChildren=new java.util.concurrent.ConcurrentHashMap<>();
@@ -46,7 +47,9 @@ class ExternalStackIT {
     private int blogPort,adminPort,browserDebugPort;
     private Map<String,Object> browserCleanup;
     private JsonNode browserEvidence;
-    private String browserFailureStage;
+    private String browserFailureStage,browserStage;
+    private final List<String> browserStages=new ArrayList<>();
+    private final Map<String,Map<String,Object>> browserProbes=new LinkedHashMap<>();
     private ExternalNacosGuard.Inputs nacosInputs;
     private ExternalNacosMode nacos;
     private Path nacosCache;
@@ -156,6 +159,8 @@ class ExternalStackIT {
                 "driverDirectory",browserRuntime.resolve("browser-driver").toString()));
         body.put("browserFrontendRevision",browserInputs==null?null:browserInputs.revision());
         body.put("browserCleanup",browserCleanup);body.put("browserEvidence",browserEvidence);body.put("browserFailureStage",browserFailureStage);
+        body.put("browserStage",browserStage);body.put("browserStages",List.copyOf(browserStages));
+        body.put("browserProbes",new LinkedHashMap<>(browserProbes));
         body.put("nacosEnabled",nacosEnabled);body.put("nacos",nacos==null?null:nacos.manifest());
         body.put("nacosStage",nacosStage);body.put("cleanupFailures",failureAudit.cleanupCount());
         body.put("cleanupComplete",cleanupFinished && failureAudit.cleanupCount()==0 && (nacosCacheCleanup==null
@@ -550,31 +555,53 @@ class ExternalStackIT {
         String status=gitOutput("frontend-status",List.of("status","--porcelain","--untracked-files=normal","--","frond/sg-blog-vue","frond/sg-vue-admin"));
         if (!status.isBlank()) throw new IllegalStateException("Frontend checkout contains uncommitted changes");
     }
-    private void awaitFrontend(Process process,int port) throws Exception {
-        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(180);
+    private void browserStage(String value) throws IOException {
+        browserStage=value;browserStages.add(value);saveManifest();
+    }
+    private String auditStage() {return browserEnabled?browserStage:nacosStage;}
+    private void awaitFrontend(String name,Process process,int port) throws Exception {
+        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(180),lastSaved=0;
+        int attempts=0;
         while (System.nanoTime()<end) {
-            if (!process.isAlive()) throw new IllegalStateException("A frontend exited during startup");
-            try {
-                var req=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/")).timeout(Duration.ofSeconds(2)).GET().build();
-                if (http.send(req,HttpResponse.BodyHandlers.discarding()).statusCode()==200) return;
-            } catch (IOException ignored) { }
+            if (!process.isAlive()) {
+                var previous=new LinkedHashMap<>(browserProbes.getOrDefault(name,Map.of()));
+                previous.put("selectedPort",port);previous.put("processAlive",false);
+                previous.putIfAbsent("lastExceptionType","ProcessExited");
+                previous.put("selectedPortListening",frontendProbe.listening(port));
+                browserProbes.put(name,previous);saveManifest();
+                throw new IllegalStateException("A frontend exited during startup");
+            }
+            var observation=frontendProbe.observe(port);attempts++;
+            var detail=new LinkedHashMap<String,Object>();
+            detail.put("selectedPort",port);detail.put("attempts",attempts);
+            detail.put("lastHttpStatus",observation.status());detail.put("lastExceptionType",observation.errorType());
+            detail.put("selectedPortListening",observation.listening());detail.put("processAlive",true);
+            browserProbes.put(name,detail);
+            long now=System.nanoTime();
+            if (observation.status()!=null && observation.status()==200) {saveManifest();return;}
+            if (lastSaved==0 || now-lastSaved>=TimeUnit.SECONDS.toNanos(5)) {saveManifest();lastSaved=now;}
             Thread.sleep(500);
         }
-        throw new IllegalStateException("A frontend did not become ready");
+        saveManifest();throw new IllegalStateException("A frontend did not become ready");
     }
     private void browserScenario() throws Exception {
+        browserStage("frontends-starting");
         var common=new HashMap<String,String>();
         common.put("NODE_OPTIONS","--openssl-legacy-provider");common.put("BROWSER","none");
         common.put("KNODE_IT_BROWSER_MODE","true");common.put("KNODE_GATEWAY_TARGET","http://127.0.0.1:"+gatewayPort);
         var blogEnv=new HashMap<>(common);blogEnv.put("HOST","127.0.0.1");blogEnv.put("PORT",Integer.toString(blogPort));
         Path blogDir=browserInputs.root().resolve("frond/sg-blog-vue");
+        browserStage("blog-frontend-starting");
         Process blog=browserProcess("blog-frontend",List.of(browserInputs.node().toString(),browserInputs.blogService().toString(),
                 "--inline","--config","build/webpack.dev.conf.js"),blogDir,blogEnv,null);
         var adminEnv=new HashMap<>(common);adminEnv.put("VUE_APP_BASE_API","/dev-api/api/admin");
         Path adminDir=browserInputs.root().resolve("frond/sg-vue-admin");
+        browserStage("admin-frontend-starting");
         Process admin=browserProcess("admin-frontend",List.of(browserInputs.node().toString(),browserInputs.adminService().toString(),
                 "serve","--host","127.0.0.1","--port",Integer.toString(adminPort)),adminDir,adminEnv,null);
-        awaitFrontend(blog,blogPort);awaitFrontend(admin,adminPort);
+        browserStage("blog-frontend-wait");awaitFrontend("blog",blog,blogPort);browserStage("blog-frontend-ready");
+        browserStage("admin-frontend-wait");awaitFrontend("admin",admin,adminPort);browserStage("admin-frontend-ready");
+        browserStage("edge-starting");
         Path profile=browserRuntime.resolve("isolated-edge/profile");Files.createDirectories(profile);
         Process edge=browserProcess("isolated-edge",List.of(browserInputs.edge().toString(),"--headless=new","--disable-gpu",
                 "--disable-background-networking","--disable-component-update","--disable-extensions","--no-first-run",
@@ -582,11 +609,12 @@ class ExternalStackIT {
                 "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
                 "--remote-debugging-address=127.0.0.1","--remote-debugging-port="+browserDebugPort,
                 "--user-data-dir="+profile,"--incognito","about:blank"),browserRuntime,Map.of(),null);
-        awaitPort(edge,browserDebugPort);saveManifest();
-        loginInProgress=true;saveManifest();
+        browserStage("edge-wait");awaitPort(edge,browserDebugPort);browserStage("edge-ready");
+        loginInProgress=true;browserStage("driver-starting");
         Path evidence=browserRuntime.resolve("evidence.json");
         Process driver=browserProcess("browser-driver",List.of(browserInputs.node().toString(),browserInputs.driver().toString(),
                 Integer.toString(browserDebugPort),Integer.toString(blogPort),Integer.toString(adminPort)),browserRuntime,Map.of("KNODE_IT_BROWSER_CHILD","true"),evidence);
+        browserStage("driver-running");
         long deadline=System.nanoTime()+TimeUnit.MINUTES.toNanos(6);
         while (driver.isAlive() && System.nanoTime()<deadline) {driver.waitFor(1,TimeUnit.SECONDS);saveManifest();}
         if (driver.isAlive()) throw new IllegalStateException("Browser journey timed out");
@@ -596,18 +624,20 @@ class ExternalStackIT {
                     JsonNode failure=json.readTree(evidence.toFile());String stage=failure==null?"":failure.path("stage").asText();
                     if (failure!=null && failure.size()==2 && failure.path("failed").asBoolean()
                             && Set.of("connect","blog-login","blog-update","blog-logout","admin-login",
-                            "admin-user-edit","admin-role-edit","admin-menu-edit","network-assertions").contains(stage))
+                            "admin-logout","admin-relogin","admin-user-edit","admin-role-edit","admin-menu-edit","network-assertions").contains(stage))
                         browserFailureStage=stage;
                 } catch (IOException ignored) { }
             }
             throw new IllegalStateException("Browser journey failed; see the sanitized manifest stage");
         }
         if (!Files.isRegularFile(evidence) || Files.size(evidence)>200000) throw new IllegalStateException("Invalid browser evidence size");
+        browserStage("driver-complete");
         JsonNode result=json.readTree(evidence.toFile());validateBrowserEvidence(result);
+        browserStage("database-verification");
         try (Connection c=DriverManager.getConnection(dbUrl,dbUser,dbPassword)) {ExternalBrowserFixture.verify(c);}
-        browserEvidence=result;saveManifest();
+        browserEvidence=result;browserStage("completed");
     }
-    private void validateBrowserEvidence(JsonNode result) {
+    void validateBrowserEvidence(JsonNode result) {
         if (result==null || result.size()!=4 || result.path("version").asInt()!=1 || !result.path("checks").isObject()
                 || result.path("checks").size()!=5 || !result.path("events").isArray() || result.path("events").size()>2000)
             throw new IllegalStateException("Invalid browser evidence structure");
@@ -640,8 +670,9 @@ class ExternalStackIT {
         Map<String,Integer> required=Map.ofEntries(
                 Map.entry("POST /api/blog/auth/login",1),Map.entry("GET /api/blog/user/userInfo",2),
                 Map.entry("PUT /api/blog/user/userInfo",1),Map.entry("POST /api/blog/auth/logout",1),
-                Map.entry("POST /dev-api/api/admin/auth/login",1),Map.entry("GET /dev-api/api/admin/auth/me",1),
-                Map.entry("GET /dev-api/api/admin/auth/routers",1),
+                Map.entry("POST /dev-api/api/admin/auth/login",2),Map.entry("POST /dev-api/api/admin/auth/logout",1),
+                Map.entry("GET /dev-api/api/admin/auth/me",2),
+                Map.entry("GET /dev-api/api/admin/auth/routers",2),
                 Map.entry("GET /dev-api/api/admin/system/user/9007199254740993",1),Map.entry("PUT /dev-api/api/admin/system/user",1),
                 Map.entry("GET /dev-api/api/admin/system/role/9007199254740995",1),Map.entry("PUT /dev-api/api/admin/system/role",1),
                 Map.entry("GET /dev-api/api/admin/system/menu/roleMenuTreeselect/9007199254740995",1),
@@ -658,9 +689,11 @@ class ExternalStackIT {
             if (nacosEnabled) {
                 stage("nacos-preflight");nacos.connect();nacos.preflight();nacos.assertEmptyGroup();startExporterFailureSink();
             }
-            if (browserEnabled) verifyFrontendRevision();
+            if (browserEnabled) {browserStage("frontend-revision-check");verifyFrontendRevision();browserStage("database-and-redis-setup");}
             initializeDatabase();makeKeys();connectTestAccounts();aclAssertions();
+            if (browserEnabled) browserStage("services-starting");
             Process user=start(false,false,false),gateway=start(true,false,false);
+            if (browserEnabled) browserStage("services-ready");
             if (nacosEnabled) {nacosScenario(user,gateway);return;}
             if (browserEnabled) {browserScenario();return;}
             String a=login(),b=login();assertFalse(a.equals(b),"Sessions must issue distinct tokens");
@@ -690,12 +723,12 @@ class ExternalStackIT {
             if (eventsEnabled) awaitPublished(c,originalTrace,"direct-recovery");
             assertEquals(401,status(userPort,c));assertEquals(401,status(gatewayPort,c));assertEquals(200,status(userPort,b));assertEquals(200,status(gatewayPort,b));
         } catch (Throwable failure) {
-            primaryFailure=failureAudit.capturePrimary(failure,nacosStage);
-            if (manifest!=null) try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("primary-manifest",nacosStage,ex);}
+            primaryFailure=failureAudit.capturePrimary(failure,auditStage());
+            if (manifest!=null) try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("primary-manifest",auditStage(),ex);}
             throw primaryFailure;
         } finally {
             var reverse=new ArrayList<>(processes);Collections.reverse(reverse);
-            for (Process p:reverse) try {stop(p);} catch (Throwable ex) {failureAudit.cleanupFailure("stop-process",nacosStage,ex);}
+            for (Process p:reverse) try {stop(p);} catch (Throwable ex) {failureAudit.cleanupFailure("stop-process",auditStage(),ex);}
             for (OwnedChild child:observedChildren.values()) try {
                 ProcessHandle h=child.handle();
                 if (h.isAlive()) {
@@ -703,42 +736,42 @@ class ExternalStackIT {
                         throw new IllegalStateException("Cannot verify ownership of an observed child");
                     h.destroyForcibly();h.onExit().get(10,TimeUnit.SECONDS);
                 }
-            } catch (Throwable ex) {failureAudit.cleanupFailure("browser-child-stop",nacosStage,ex);}
+            } catch (Throwable ex) {failureAudit.cleanupFailure("browser-child-stop",auditStage(),ex);}
             if (browserRuntime!=null) {
                 try {browserCleanup=ExternalBrowserCleanup.attempt(Path.of("target"),browserRuntime);}
                 catch (Throwable ex) {
                     browserCleanup=Map.of("ownedPath",browserRuntime.toString(),"state","validation-failed","postForkCleanupRequired",true);
-                    failureAudit.cleanupFailure("browser-runtime-path",nacosStage,ex);
+                    failureAudit.cleanupFailure("browser-runtime-path",auditStage(),ex);
                 }
             }
             if (nacos!=null) {
-                try {nacos.restore();} catch (Throwable ex) {failureAudit.cleanupFailure("nacos-restore",nacosStage,ex);}
-                try {nacos.close();} catch (Throwable ex) {failureAudit.cleanupFailure("nacos-close",nacosStage,ex);}
+                try {nacos.restore();} catch (Throwable ex) {failureAudit.cleanupFailure("nacos-restore",auditStage(),ex);}
+                try {nacos.close();} catch (Throwable ex) {failureAudit.cleanupFailure("nacos-close",auditStage(),ex);}
             }
-            try {if (exporterSink!=null) exporterSink.close();} catch (Throwable ex) {failureAudit.cleanupFailure("exporter-sink",nacosStage,ex);}
+            try {if (exporterSink!=null) exporterSink.close();} catch (Throwable ex) {failureAudit.cleanupFailure("exporter-sink",auditStage(),ex);}
             if (nacosCache!=null) {
                 try {nacosCacheCleanup=ExternalNacosCacheCleanup.attempt(Path.of("target"),nacosCache);}
                 catch (Throwable ex) {
                     nacosCacheCleanup=Map.of("ownedPath",nacosCache.toString(),"state","validation-failed","postForkCleanupRequired",true);
-                    failureAudit.cleanupFailure("nacos-cache-path",nacosStage,ex);
+                    failureAudit.cleanupFailure("nacos-cache-path",auditStage(),ex);
                 }
             }
             if (databaseInitialized && writer!=null) {
                 try (Connection c=DriverManager.getConnection(dbUrl,dbUser,dbPassword);PreparedStatement p=c.prepareStatement("SELECT sid FROM auth_login_session WHERE user_id IN (42,44)");ResultSet rs=p.executeQuery()) {
                     while (rs.next()) {String sid=rs.getString(1);UUID.fromString(sid);sessionKeys.add(prefix()+sid);}
                     loginInProgress=false;
-                } catch (Throwable ex) {failureAudit.cleanupFailure("session-enumeration",nacosStage,ex);}
-                try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("session-manifest",nacosStage,ex);}
-                for (String key:sessionKeys) try {writer.delete(key);} catch (Throwable ex) {failureAudit.cleanupFailure("session-delete",nacosStage,ex);}
+                } catch (Throwable ex) {failureAudit.cleanupFailure("session-enumeration",auditStage(),ex);}
+                try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("session-manifest",auditStage(),ex);}
+                for (String key:sessionKeys) try {writer.delete(key);} catch (Throwable ex) {failureAudit.cleanupFailure("session-delete",auditStage(),ex);}
             }
-            try {if (readFactory!=null) readFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-read-close",nacosStage,ex);}
-            try {if (writeFactory!=null) writeFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-write-close",nacosStage,ex);}
-            try {if (businessFactory!=null) businessFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-business-close",nacosStage,ex);}
-            try {if (privateFile!=null) Files.deleteIfExists(privateFile);} catch (Throwable ex) {failureAudit.cleanupFailure("private-key-delete",nacosStage,ex);}
-            try {if (publicFile!=null) Files.deleteIfExists(publicFile);} catch (Throwable ex) {failureAudit.cleanupFailure("public-key-delete",nacosStage,ex);}
-            try {if (keyDir!=null) Files.deleteIfExists(keyDir);} catch (Throwable ex) {failureAudit.cleanupFailure("key-directory-delete",nacosStage,ex);}
+            try {if (readFactory!=null) readFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-read-close",auditStage(),ex);}
+            try {if (writeFactory!=null) writeFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-write-close",auditStage(),ex);}
+            try {if (businessFactory!=null) businessFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-business-close",auditStage(),ex);}
+            try {if (privateFile!=null) Files.deleteIfExists(privateFile);} catch (Throwable ex) {failureAudit.cleanupFailure("private-key-delete",auditStage(),ex);}
+            try {if (publicFile!=null) Files.deleteIfExists(publicFile);} catch (Throwable ex) {failureAudit.cleanupFailure("public-key-delete",auditStage(),ex);}
+            try {if (keyDir!=null) Files.deleteIfExists(keyDir);} catch (Throwable ex) {failureAudit.cleanupFailure("key-directory-delete",auditStage(),ex);}
             cleanupFinished=true;
-            if (manifest!=null) try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("cleanup-manifest",nacosStage,ex);}
+            if (manifest!=null) try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("cleanup-manifest",auditStage(),ex);}
             failureAudit.finish(primaryFailure);
         }
     }
