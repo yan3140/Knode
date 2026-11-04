@@ -29,7 +29,9 @@ import static org.junit.jupiter.api.Assertions.*;
 class ExternalStackIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder().proxy(ProxySelector.of(null)).connectTimeout(Duration.ofSeconds(3)).build();
-    private final List<Process> processes = new ArrayList<>();
+    private final List<Process> processes = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private record OwnedChild(ProcessHandle handle,java.time.Instant started) {}
+    private final Map<Long,OwnedChild> observedChildren=new java.util.concurrent.ConcurrentHashMap<>();
     private final Set<String> sessionKeys = new LinkedHashSet<>();
     private final Set<String> explicitProbeKeys = new LinkedHashSet<>();
     private String environment, dbUrl, dbUser, dbPassword, redisHost, redisPort, redisDb, redisTls;
@@ -38,6 +40,13 @@ class ExternalStackIT {
     private int userPort, gatewayPort,managementPort;
     private Integer gatewayManagementPort;
     private boolean databaseInitialized,eventsEnabled,loginInProgress,nacosEnabled;
+    private boolean browserEnabled;
+    private ExternalBrowserGuard.Inputs browserInputs;
+    private Path browserRuntime;
+    private int blogPort,adminPort,browserDebugPort;
+    private Map<String,Object> browserCleanup;
+    private JsonNode browserEvidence;
+    private String browserFailureStage;
     private ExternalNacosGuard.Inputs nacosInputs;
     private ExternalNacosMode nacos;
     private Path nacosCache;
@@ -86,6 +95,10 @@ class ExternalStackIT {
         if (!Files.isRegularFile(userJar) || !Files.isRegularFile(gatewayJar)) throw new IllegalArgumentException("Built JAR files required");
         eventsEnabled=Boolean.getBoolean("knode.it.events.enabled");
         nacosEnabled=Boolean.getBoolean("knode.it.nacos.combined.enabled");
+        String browserFlag=System.getProperty("knode.it.browser.enabled","false");
+        if (!Set.of("true","false").contains(browserFlag)) throw new IllegalArgumentException("Invalid browser mode flag");
+        browserEnabled=Boolean.parseBoolean(browserFlag);
+        if (browserEnabled) browserInputs=ExternalBrowserGuard.check(System.getenv(),Path.of(".."),eventsEnabled,nacosEnabled);
         if (nacosEnabled) {
             if (!eventsEnabled) throw new IllegalArgumentException("Nacos combined mode requires the explicit events mode");
             nacosInputs=ExternalNacosGuard.check(System.getenv());
@@ -108,6 +121,12 @@ class ExternalStackIT {
             exporterFailurePort=port();
             while (Set.of(userPort,gatewayPort,managementPort,gatewayManagementPort).contains(exporterFailurePort)) exporterFailurePort=port();
         }
+        if (browserEnabled) {
+            Set<Integer> used=new HashSet<>(List.of(userPort,gatewayPort,managementPort));
+            blogPort=distinctPort(used);adminPort=distinctPort(used);browserDebugPort=distinctPort(used);
+            browserRuntime=Files.createTempDirectory(Path.of("target"),"external-browser-").toAbsolutePath().normalize();
+            browserCleanup=Map.of("ownedPath",browserRuntime.toString(),"state","in-use","postForkCleanupRequired",true);
+        }
         Path manifestDir=Files.createTempDirectory(Path.of("target"),"external-stack-manifest-");
         manifest=manifestDir.resolve("manifest.json");
         if (nacosEnabled) {
@@ -120,16 +139,28 @@ class ExternalStackIT {
         saveManifest();
         System.out.println("External stack manifest: "+manifest.toAbsolutePath());
     }
-    private void saveManifest() throws IOException {
+    private synchronized void saveManifest() throws IOException {
         var body=new LinkedHashMap<String,Object>();
         body.put("environment",environment);body.put("dbUrl",dbUrl);body.put("redisHost",redisHost);body.put("redisPort",redisPort);
         body.put("userPort",userPort);body.put("gatewayPort",gatewayPort);body.put("managementPort",managementPort);
         body.put("gatewayManagementPort",gatewayManagementPort);
         body.put("eventsEnabled",eventsEnabled);body.put("stream",eventStream);body.put("probePrefix",eventProbePrefix);
+        body.put("browserEnabled",browserEnabled);
+        body.put("browserPorts",browserEnabled?Map.of("blog",blogPort,"admin",adminPort,"debug",browserDebugPort):null);
+        body.put("browserRuntime",browserRuntime==null?null:browserRuntime.toString());
+        body.put("browserPaths",browserRuntime==null?null:Map.of(
+                "blogDirectory",browserRuntime.resolve("blog-frontend").toString(),
+                "adminDirectory",browserRuntime.resolve("admin-frontend").toString(),
+                "browserDirectory",browserRuntime.resolve("isolated-edge").toString(),
+                "browserProfile",browserRuntime.resolve("isolated-edge/profile").toString(),
+                "driverDirectory",browserRuntime.resolve("browser-driver").toString()));
+        body.put("browserFrontendRevision",browserInputs==null?null:browserInputs.revision());
+        body.put("browserCleanup",browserCleanup);body.put("browserEvidence",browserEvidence);body.put("browserFailureStage",browserFailureStage);
         body.put("nacosEnabled",nacosEnabled);body.put("nacos",nacos==null?null:nacos.manifest());
         body.put("nacosStage",nacosStage);body.put("cleanupFailures",failureAudit.cleanupCount());
         body.put("cleanupComplete",cleanupFinished && failureAudit.cleanupCount()==0 && (nacosCacheCleanup==null
-                || Boolean.FALSE.equals(nacosCacheCleanup.get("postForkCleanupRequired"))));
+                || Boolean.FALSE.equals(nacosCacheCleanup.get("postForkCleanupRequired")))
+                && (browserCleanup==null || Boolean.FALSE.equals(browserCleanup.get("postForkCleanupRequired"))));
         body.put("testForkPid",ProcessHandle.current().pid());
         body.put("testForkParentPid",ProcessHandle.current().parent().map(ProcessHandle::pid).orElse(null));
         body.put("primaryFailure",failureAudit.primary());body.put("cleanupIssues",failureAudit.cleanup());
@@ -138,7 +169,13 @@ class ExternalStackIT {
         body.put("failedExporterConnections",failedExports.get());
         body.put("otlpEndpoint",otlpEndpoint);body.put("jaegerQueryOrigin",jaegerEndpoint);body.put("sessionKeys",List.copyOf(sessionKeys));
         body.put("explicitProbeKeys",List.copyOf(explicitProbeKeys));body.put("loginInProgress",loginInProgress);
-        body.put("ownedProcesses",processes.stream().map(p -> Map.of("pid",p.pid(),"alive",p.isAlive())).toList());
+        body.put("ownedProcesses",processes.stream().map(p -> Map.of("pid",p.pid(),"alive",p.isAlive(),
+                "start",p.info().startInstant().map(Object::toString).orElse(""))).toList());
+        if (browserEnabled) processes.stream().filter(Process::isAlive).flatMap(p -> p.toHandle().descendants()).forEach(h ->
+                observedChildren.computeIfAbsent(h.pid(),ignored -> new OwnedChild(h,h.info().startInstant().orElse(null))));
+        body.put("ownedDescendants",observedChildren.values().stream().map(child ->
+                Map.of("pid",child.handle().pid(),"alive",child.handle().isAlive(),
+                        "start",child.started()==null?"":child.started().toString())).toList());
         body.put("processStarting",processStarting);
         body.put("keyDirectory",keyDir==null?null:keyDir.toAbsolutePath().toString());
         body.put("keyFiles",privateFile==null?List.of():List.of(privateFile.toAbsolutePath().toString(),publicFile.toAbsolutePath().toString()));
@@ -153,6 +190,9 @@ class ExternalStackIT {
         }
         Files.move(staged,manifest,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
     }
+    private int distinctPort(Set<Integer> used) throws IOException {
+        int value;do {value=port();} while (!used.add(value));return value;
+    }
     private int port() throws IOException {try (var socket=new ServerSocket(0,1,InetAddress.getByName("127.0.0.1"))) {return socket.getLocalPort();}}
     private void initializeDatabase() throws Exception {
         var ds=new DriverManagerDataSource(dbUrl,dbUser,dbPassword);
@@ -166,6 +206,7 @@ class ExternalStackIT {
                 "INSERT INTO sys_user(id,user_name,nick_name,password,email,type,status,sex,del_flag) VALUES(42,'it-user','IT User',?,'it@example.invalid','0','0','2',0)")) {
             p.setString(1,hash);p.executeUpdate();
         }
+        if (browserEnabled) try (Connection c=ds.getConnection()) {ExternalBrowserFixture.seed(c,hash);}
     }
     private void makeKeys() throws Exception {
         keyDir=Files.createTempDirectory(Path.of("target"),"external-stack-keys-");
@@ -282,7 +323,15 @@ class ExternalStackIT {
     }
     private void stop(Process p) throws Exception {
         if (p==null || !p.isAlive()) return;
+        List<ProcessHandle> children=p.toHandle().descendants().toList();
+        if (manifest!=null) saveManifest();
+        for (ProcessHandle child:children) if (child.isAlive()) child.destroy();
         p.destroy();if (!p.waitFor(15,TimeUnit.SECONDS)) {p.destroyForcibly();p.waitFor(10,TimeUnit.SECONDS);}
+        for (ProcessHandle child:children) if (child.isAlive()) {
+            child.destroyForcibly();try {child.onExit().get(10,TimeUnit.SECONDS);} catch (java.util.concurrent.TimeoutException timeout) {
+                throw new IllegalStateException("Failed to stop an owned child process");
+            }
+        }
         if (p.isAlive()) throw new IllegalStateException("Failed to stop owned test process");
         if (manifest!=null) saveManifest();
     }
@@ -468,6 +517,140 @@ class ExternalStackIT {
         nacos.assertOtherUnchanged();stage("completed");
     }
 
+    /** Launches only a named child, with a fresh home and no test credentials in its environment. */
+    private Process browserProcess(String name,List<String> command,Path workdir,Map<String,String> additions,Path output) throws Exception {
+        var b=new ProcessBuilder(command).directory(workdir.toFile());
+        Map<String,String> env=b.environment();env.clear();
+        for (String key:List.of("SystemRoot","WINDIR","ComSpec","PATH","PATHEXT")) {
+            String value=System.getenv(key);if (value!=null) env.put(key,value);
+        }
+        Path processDirectory=browserRuntime.resolve(name);
+        Path home=processDirectory.resolve("home"),temp=processDirectory.resolve("temp");
+        Files.createDirectories(home);Files.createDirectories(temp);
+        env.put("HOME",home.toString());env.put("USERPROFILE",home.toString());
+        env.put("APPDATA",home.toString());env.put("LOCALAPPDATA",home.toString());
+        env.put("TEMP",temp.toString());env.put("TMP",temp.toString());
+        env.putAll(additions);
+        b.redirectOutput(output==null?ProcessBuilder.Redirect.DISCARD:ProcessBuilder.Redirect.to(output.toFile()));
+        b.redirectError(ProcessBuilder.Redirect.DISCARD);
+        processStarting=name;saveManifest();
+        Process result=b.start();processes.add(result);processStarting=null;saveManifest();return result;
+    }
+    private String gitOutput(String name,List<String> args) throws Exception {
+        Path out=browserRuntime.resolve(name+".out");
+        var command=new ArrayList<String>();command.add(browserInputs.git().toString());command.addAll(args);
+        Process p=browserProcess(name,command,browserInputs.root(),Map.of("GIT_OPTIONAL_LOCKS","0"),out);
+        if (!p.waitFor(30,TimeUnit.SECONDS) || p.exitValue()!=0) throw new IllegalStateException("Frontend revision check failed");
+        if (Files.size(out)>65536) throw new IllegalStateException("Frontend status output exceeded limit");
+        String value=Files.readString(out,StandardCharsets.UTF_8);Files.delete(out);return value;
+    }
+    private void verifyFrontendRevision() throws Exception {
+        String actual=gitOutput("frontend-head",List.of("rev-parse","HEAD")).trim();
+        if (!actual.equals(browserInputs.revision())) throw new IllegalStateException("Frontend revision differs from the supplied integration revision");
+        String status=gitOutput("frontend-status",List.of("status","--porcelain","--untracked-files=normal","--","frond/sg-blog-vue","frond/sg-vue-admin"));
+        if (!status.isBlank()) throw new IllegalStateException("Frontend checkout contains uncommitted changes");
+    }
+    private void awaitFrontend(Process process,int port) throws Exception {
+        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(180);
+        while (System.nanoTime()<end) {
+            if (!process.isAlive()) throw new IllegalStateException("A frontend exited during startup");
+            try {
+                var req=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/")).timeout(Duration.ofSeconds(2)).GET().build();
+                if (http.send(req,HttpResponse.BodyHandlers.discarding()).statusCode()==200) return;
+            } catch (IOException ignored) { }
+            Thread.sleep(500);
+        }
+        throw new IllegalStateException("A frontend did not become ready");
+    }
+    private void browserScenario() throws Exception {
+        var common=new HashMap<String,String>();
+        common.put("NODE_OPTIONS","--openssl-legacy-provider");common.put("BROWSER","none");
+        common.put("KNODE_IT_BROWSER_MODE","true");common.put("KNODE_GATEWAY_TARGET","http://127.0.0.1:"+gatewayPort);
+        var blogEnv=new HashMap<>(common);blogEnv.put("HOST","127.0.0.1");blogEnv.put("PORT",Integer.toString(blogPort));
+        Path blogDir=browserInputs.root().resolve("frond/sg-blog-vue");
+        Process blog=browserProcess("blog-frontend",List.of(browserInputs.node().toString(),browserInputs.blogService().toString(),
+                "--inline","--config","build/webpack.dev.conf.js"),blogDir,blogEnv,null);
+        var adminEnv=new HashMap<>(common);adminEnv.put("VUE_APP_BASE_API","/dev-api/api/admin");
+        Path adminDir=browserInputs.root().resolve("frond/sg-vue-admin");
+        Process admin=browserProcess("admin-frontend",List.of(browserInputs.node().toString(),browserInputs.adminService().toString(),
+                "serve","--host","127.0.0.1","--port",Integer.toString(adminPort)),adminDir,adminEnv,null);
+        awaitFrontend(blog,blogPort);awaitFrontend(admin,adminPort);
+        Path profile=browserRuntime.resolve("isolated-edge/profile");Files.createDirectories(profile);
+        Process edge=browserProcess("isolated-edge",List.of(browserInputs.edge().toString(),"--headless=new","--disable-gpu",
+                "--disable-background-networking","--disable-component-update","--disable-extensions","--no-first-run",
+                "--no-default-browser-check","--no-proxy-server","--remote-allow-origins=*",
+                "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+                "--remote-debugging-address=127.0.0.1","--remote-debugging-port="+browserDebugPort,
+                "--user-data-dir="+profile,"--incognito","about:blank"),browserRuntime,Map.of(),null);
+        awaitPort(edge,browserDebugPort);saveManifest();
+        loginInProgress=true;saveManifest();
+        Path evidence=browserRuntime.resolve("evidence.json");
+        Process driver=browserProcess("browser-driver",List.of(browserInputs.node().toString(),browserInputs.driver().toString(),
+                Integer.toString(browserDebugPort),Integer.toString(blogPort),Integer.toString(adminPort)),browserRuntime,Map.of("KNODE_IT_BROWSER_CHILD","true"),evidence);
+        long deadline=System.nanoTime()+TimeUnit.MINUTES.toNanos(6);
+        while (driver.isAlive() && System.nanoTime()<deadline) {driver.waitFor(1,TimeUnit.SECONDS);saveManifest();}
+        if (driver.isAlive()) throw new IllegalStateException("Browser journey timed out");
+        if (driver.exitValue()!=0) {
+            if (Files.isRegularFile(evidence) && Files.size(evidence)<1024) {
+                try {
+                    JsonNode failure=json.readTree(evidence.toFile());String stage=failure==null?"":failure.path("stage").asText();
+                    if (failure!=null && failure.size()==2 && failure.path("failed").asBoolean()
+                            && Set.of("connect","blog-login","blog-update","blog-logout","admin-login",
+                            "admin-user-edit","admin-role-edit","admin-menu-edit","network-assertions").contains(stage))
+                        browserFailureStage=stage;
+                } catch (IOException ignored) { }
+            }
+            throw new IllegalStateException("Browser journey failed; see the sanitized manifest stage");
+        }
+        if (!Files.isRegularFile(evidence) || Files.size(evidence)>200000) throw new IllegalStateException("Invalid browser evidence size");
+        JsonNode result=json.readTree(evidence.toFile());validateBrowserEvidence(result);
+        try (Connection c=DriverManager.getConnection(dbUrl,dbUser,dbPassword)) {ExternalBrowserFixture.verify(c);}
+        browserEvidence=result;saveManifest();
+    }
+    private void validateBrowserEvidence(JsonNode result) {
+        if (result==null || result.size()!=4 || result.path("version").asInt()!=1 || !result.path("checks").isObject()
+                || result.path("checks").size()!=5 || !result.path("events").isArray() || result.path("events").size()>2000)
+            throw new IllegalStateException("Invalid browser evidence structure");
+        for (String name:List.of("me","checkedKeys","userRelation","roleRelation","rootParent"))
+            if (!result.path("checks").path(name).isBoolean() || !result.path("checks").path(name).asBoolean())
+                throw new IllegalStateException("Browser evidence check failed");
+        JsonNode other=result.path("otherFailureStatuses");
+        if (!other.isObject() || other.size()>500) throw new IllegalStateException("Invalid unrelated failure evidence");
+        other.fields().forEachRemaining(entry -> {
+            if (!entry.getKey().matches("[45][0-9]{2}") || !entry.getValue().isInt() || entry.getValue().asInt()<1)
+                throw new IllegalStateException("Invalid unrelated failure count");
+        });
+        Set<String> paths=Set.of("/api/blog/auth/login","/api/blog/auth/logout","/api/blog/user/userInfo",
+                "/dev-api/api/admin/auth/login","/dev-api/api/admin/auth/logout","/dev-api/api/admin/auth/me",
+                "/dev-api/api/admin/auth/routers","/dev-api/api/admin/system/user","/dev-api/api/admin/system/user/list",
+                "/dev-api/api/admin/system/user/9007199254740993","/dev-api/api/admin/system/role",
+                "/dev-api/api/admin/system/role/list","/dev-api/api/admin/system/role/listAllRole",
+                "/dev-api/api/admin/system/role/9007199254740995","/dev-api/api/admin/system/menu",
+                "/dev-api/api/admin/system/menu/list","/dev-api/api/admin/system/menu/treeselect",
+                "/dev-api/api/admin/system/menu/9007199254740997",
+                "/dev-api/api/admin/system/menu/roleMenuTreeselect/9007199254740995");
+        Map<String,Integer> observed=new HashMap<>();
+        for (JsonNode event:result.path("events")) {
+            if (!event.isObject() || event.size()!=3 || !Set.of("GET","POST","PUT","DELETE").contains(event.path("method").asText())
+                    || !paths.contains(event.path("path").asText())
+                    || !event.path("status").isInt() || event.path("status").asInt()<100 || event.path("status").asInt()>599)
+                throw new IllegalStateException("Invalid browser request evidence");
+            if (event.path("status").asInt()==200) observed.merge(event.path("method").asText()+" "+event.path("path").asText(),1,Integer::sum);
+        }
+        Map<String,Integer> required=Map.ofEntries(
+                Map.entry("POST /api/blog/auth/login",1),Map.entry("GET /api/blog/user/userInfo",2),
+                Map.entry("PUT /api/blog/user/userInfo",1),Map.entry("POST /api/blog/auth/logout",1),
+                Map.entry("POST /dev-api/api/admin/auth/login",1),Map.entry("GET /dev-api/api/admin/auth/me",1),
+                Map.entry("GET /dev-api/api/admin/auth/routers",1),
+                Map.entry("GET /dev-api/api/admin/system/user/9007199254740993",1),Map.entry("PUT /dev-api/api/admin/system/user",1),
+                Map.entry("GET /dev-api/api/admin/system/role/9007199254740995",1),Map.entry("PUT /dev-api/api/admin/system/role",1),
+                Map.entry("GET /dev-api/api/admin/system/menu/roleMenuTreeselect/9007199254740995",1),
+                Map.entry("GET /dev-api/api/admin/system/menu/9007199254740997",1),Map.entry("PUT /dev-api/api/admin/system/menu",1));
+        required.forEach((key,count) -> {
+            if (observed.getOrDefault(key,0)<count) throw new IllegalStateException("Required browser request evidence is missing");
+        });
+    }
+
     @Test void realUserGatewayAndExplicitRedisAcl() throws Exception {
         configure(); // All guards run before opening the dedicated DB or Redis.
         AssertionError primaryFailure=null;
@@ -475,9 +658,11 @@ class ExternalStackIT {
             if (nacosEnabled) {
                 stage("nacos-preflight");nacos.connect();nacos.preflight();nacos.assertEmptyGroup();startExporterFailureSink();
             }
+            if (browserEnabled) verifyFrontendRevision();
             initializeDatabase();makeKeys();connectTestAccounts();aclAssertions();
             Process user=start(false,false,false),gateway=start(true,false,false);
             if (nacosEnabled) {nacosScenario(user,gateway);return;}
+            if (browserEnabled) {browserScenario();return;}
             String a=login(),b=login();assertFalse(a.equals(b),"Sessions must issue distinct tokens");
             assertEquals(200,status(userPort,a));assertEquals(200,status(gatewayPort,a));
             assertEquals(403,request(gatewayPort,"GET","/api/admin/auth/me",null,a).statusCode());
@@ -509,7 +694,23 @@ class ExternalStackIT {
             if (manifest!=null) try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("primary-manifest",nacosStage,ex);}
             throw primaryFailure;
         } finally {
-            for (Process p:processes) try {stop(p);} catch (Throwable ex) {failureAudit.cleanupFailure("stop-process",nacosStage,ex);}
+            var reverse=new ArrayList<>(processes);Collections.reverse(reverse);
+            for (Process p:reverse) try {stop(p);} catch (Throwable ex) {failureAudit.cleanupFailure("stop-process",nacosStage,ex);}
+            for (OwnedChild child:observedChildren.values()) try {
+                ProcessHandle h=child.handle();
+                if (h.isAlive()) {
+                    if (child.started()==null || !child.started().equals(h.info().startInstant().orElse(null)))
+                        throw new IllegalStateException("Cannot verify ownership of an observed child");
+                    h.destroyForcibly();h.onExit().get(10,TimeUnit.SECONDS);
+                }
+            } catch (Throwable ex) {failureAudit.cleanupFailure("browser-child-stop",nacosStage,ex);}
+            if (browserRuntime!=null) {
+                try {browserCleanup=ExternalBrowserCleanup.attempt(Path.of("target"),browserRuntime);}
+                catch (Throwable ex) {
+                    browserCleanup=Map.of("ownedPath",browserRuntime.toString(),"state","validation-failed","postForkCleanupRequired",true);
+                    failureAudit.cleanupFailure("browser-runtime-path",nacosStage,ex);
+                }
+            }
             if (nacos!=null) {
                 try {nacos.restore();} catch (Throwable ex) {failureAudit.cleanupFailure("nacos-restore",nacosStage,ex);}
                 try {nacos.close();} catch (Throwable ex) {failureAudit.cleanupFailure("nacos-close",nacosStage,ex);}
@@ -523,9 +724,11 @@ class ExternalStackIT {
                 }
             }
             if (databaseInitialized && writer!=null) {
-                try (Connection c=DriverManager.getConnection(dbUrl,dbUser,dbPassword);PreparedStatement p=c.prepareStatement("SELECT sid FROM auth_login_session WHERE user_id=42");ResultSet rs=p.executeQuery()) {
+                try (Connection c=DriverManager.getConnection(dbUrl,dbUser,dbPassword);PreparedStatement p=c.prepareStatement("SELECT sid FROM auth_login_session WHERE user_id IN (42,44)");ResultSet rs=p.executeQuery()) {
                     while (rs.next()) {String sid=rs.getString(1);UUID.fromString(sid);sessionKeys.add(prefix()+sid);}
+                    loginInProgress=false;
                 } catch (Throwable ex) {failureAudit.cleanupFailure("session-enumeration",nacosStage,ex);}
+                try {saveManifest();} catch (Throwable ex) {failureAudit.cleanupFailure("session-manifest",nacosStage,ex);}
                 for (String key:sessionKeys) try {writer.delete(key);} catch (Throwable ex) {failureAudit.cleanupFailure("session-delete",nacosStage,ex);}
             }
             try {if (readFactory!=null) readFactory.destroy();} catch (Throwable ex) {failureAudit.cleanupFailure("redis-read-close",nacosStage,ex);}
