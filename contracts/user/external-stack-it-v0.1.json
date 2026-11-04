@@ -1,6 +1,6 @@
 {
   "name": "external-stack-opt-in-test",
-  "status": "Controller G8 run 7e74b8359bcd and G9 run 68a6f0745be1 passed with real Gateway, User, isolated MySQL and approved Redis identities. G9 produced two real v2 logout events, exercised test-consumer crash and recovery and verified Jaeger parent linkage and User resource attributes; see reports/microservices/g9-real-observed-68a6f0745be1/result.json. Real Agent and business consumers were not validated.",
+  "status": "Controller G8 run 7e74b8359bcd and G9 run 68a6f0745be1 passed with real Gateway, User, isolated MySQL and approved Redis identities. G9 produced two real v2 logout events, exercised test-consumer crash and recovery and verified Jaeger parent linkage and User resource attributes; see reports/microservices/g9-real-observed-68a6f0745be1/result.json. Controller G12 run fac55a5b3dbe PASS exercised the actual blog and admin Vue pages through their development proxies to actual Gateway and User with an initially empty private MySQL schema and approved temporary Redis identities; providerMocks=false. It verified blog login, profile PUT with HTTP and business 200, success message, reread and logout; admin login, actual me nickname/default avatar, dynamic menu, logout and relogin; and user/role/menu edits with long IDs, checkedKeys, relations and root parentId 0. Required identity requests returned 200 and six database writeback facts matched. Four 503 responses from other unmigrated domains remained unchanged. The original manifest recorded browser runtime pending-post-fork; reports/microservices/g12-real-browser-fac55a5b3dbe/post-fork-browser-cleanup.json independently confirms exact-path Windows long-path removal after owned processes exited. See result.json in that directory for the run and cleanup facts. Real Agent and business consumers were not validated.",
   "test": "knode-user/src/test/java/com/knode/user/ExternalStackIT.java",
   "execution": "Build the user JAR first. From knode-user run Maven test with -Dtest=ExternalStackIT -Dknode.it.real.enabled=true -Dknode.it.gateway.jar=<absolute-built-gateway-jar>; invoke Maven through Python. Never place credentials in Maven arguments.",
   "safety_guards": [
@@ -60,8 +60,8 @@
     "client_handshake": "The Redis client may also issue HELLO, CLIENT SETINFO and connection setup commands depending on server and driver version; verify necessary connection commands separately without widening key access."
   },
   "limitations": [
-    "This file is an opt-in test specification; the controller reports are evidence for the specific G8 and G9 runs, not all versions or environments.",
-    "The G8 and G9 reports cover only the approved stack and temporary ACLs used in those runs; other TLS configurations and real Agent/business consumer integration remain pending.",
+    "This file is an opt-in test specification; the controller reports are evidence for the specific G8, G9 and G12 runs, not all versions or environments. Earlier G12 runs d534a9bf041f and baa0fd825fad remain historical FAIL results; their reports remain under reports/microservices/g12-real-browser-d534a9bf041f and reports/microservices/g12-real-browser-baa0fd825fad.",
+    "The G8, G9 and G12 reports cover only the approved stacks and temporary ACLs used in those runs. G12 verifies the User/Gateway identity journey, not full-site functionality or browser 401/403/429/503 failure scenarios. Real Agent/Knowledge and business consumer integration, other TLS configurations including VM native TLS, and production migration remain unverified and are outside the current 01/02 local acceptance scope.",
     "Only locally built User and controller-provided Gateway JARs are launched."
   ]
 }
