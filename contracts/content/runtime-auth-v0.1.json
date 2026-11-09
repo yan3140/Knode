@@ -1,0 +1,56 @@
+{
+  "name": "CONTENT-RUNTIME-AUTH",
+  "version": "0.1",
+  "status": "implemented in content; local fixture verification only; integration pending",
+  "requiredEnvironment": [
+    "KNODE_ENVIRONMENT",
+    "KNODE_CONTENT_JDBC_URL",
+    "KNODE_CONTENT_DB_USERNAME",
+    "KNODE_CONTENT_DB_PASSWORD",
+    "KNODE_AUTH_REDIS_HOST",
+    "KNODE_AUTH_REDIS_PORT",
+    "KNODE_AUTH_REDIS_USERNAME",
+    "KNODE_AUTH_REDIS_PASSWORD",
+    "KNODE_AUTH_PUBLIC_KEY_FILE",
+    "KNODE_AUTH_PUBLIC_KEY_ID",
+    "KNODE_MANAGEMENT_PORT",
+    "KNODE_CONTENT_PORT"
+  ],
+  "runtime": {
+    "http": "separate application port KNODE_CONTENT_PORT on 127.0.0.1",
+    "management": "separate loopback port; expose health only",
+    "readiness": "database connection and authoritative session Redis GET must succeed",
+    "schema": "automatic SQL, Flyway and Liquibase disabled by default",
+    "redis": "TLS required, configure trusted CA with JVM truststore; standalone host and port; username restricted to GET on session key namespace",
+    "redisKey": "knode:<environment>:v1:auth:session:<sid>",
+    "readTimeout": "800ms reactive timeout, 1000ms blocking upper bound; no positive cache",
+    "publicKey": "single configured kid and X.509 RSA public key file, minimum 2048 bits; rotation requires coordinated restart",
+    "startup": "required auth and DB settings, public key and TLS must be valid or startup fails"
+  },
+  "auth": {
+    "reference": "contracts/shared/auth/auth-api-v0.2.json",
+    "principal": "UserTokenVerifier.Principal stored under AuthenticationFilter.PRINCIPAL",
+    "routes": "all application routes protected by default; blog or admin scope selected from path; health endpoint exempt",
+    "errors": "HTTP 401/business 401 invalid token/session; HTTP 403/business 403 scope; HTTP 503/business 500 unavailable or malformed session state",
+    "authorization": "scope is not authorization for administrative actions; future business controllers must enforce object ownership and separately approved admin permissions"
+  },
+  "build": {
+    "parent": "mvn -N -DskipTests install",
+    "sdk": "mvn -f knode-auth/pom.xml -DskipTests install",
+    "service": "mvn -f knode-content/pom.xml package",
+    "rootIntegration": "controller to request infra add <module>knode-content</module> to root pom.xml"
+  },
+  "notImplemented": [
+    "article endpoints and ownership enforcement",
+    "article transaction",
+    "immutable event and relay",
+    "community/search/knowledge integration",
+    "production event protocol",
+    "admin permission checks",
+    "counter and comment tasks",
+    "Nacos",
+    "real User/Redis/MySQL integration",
+    "full OpenTelemetry tracing integration"
+  ],
+  "verification": "loopback HTTP with signed synthetic RSA keys and session substitute; H2 and mocked Redis reader checks. Not a real User/Redis/MySQL integration."
+}
