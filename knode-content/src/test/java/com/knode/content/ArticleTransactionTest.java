@@ -220,6 +220,24 @@ class ArticleTransactionTest {
             assertEquals(status==503?500:status,response.getBody().get("code"));
         }
     }
+    @Test void storageFailureUsesSafeResponseAndRollsBackEverything() throws Exception {
+        db.execute("ALTER TABLE content_article_event ADD CONSTRAINT forbid_publication CHECK (event_type <> 'ArticlePublished')");
+        String body=json.writeValueAsString(java.util.Map.of("title","sensitive-payload", "content","private-body",
+                "status","0","isComment","1","categoryId","2","tags",List.of("3")));
+        HttpResponse<String> response=post("/api/blog/article",AuthenticationHttpTest.token("blog",600),body);
+        assertEquals(500,response.statusCode());
+        JsonNode result=json.readTree(response.body());
+        assertEquals(500,result.path("code").asInt());
+        assertEquals("\u7cfb\u7edf\u9519\u8bef",result.path("msg").asText());
+        assertEquals(2,result.size());
+        assertFalse(response.body().contains("sensitive-payload"));
+        assertFalse(response.body().contains("private-body"));
+        assertFalse(response.body().contains("forbid_publication"));
+        assertFalse(response.body().contains("INSERT"));
+        assertEquals(0,count("content_article"));
+        assertEquals(0,count("content_article_tag"));
+        assertEquals(0,count("content_article_event"));
+    }
     private HttpResponse<String> post(String path,String token,String body) throws Exception {
         HttpRequest request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+path))
             .header("token",token).header("Content-Type","application/json")

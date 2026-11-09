@@ -39,7 +39,8 @@
       "articleInvalid": "HTTP 200, code 514",
       "articleMissing": "HTTP 200, code 513",
       "authOrResourceDenied": "HTTP 401/403; dependency failure HTTP 503 with code 500",
-      "malformedJson": "HTTP 400; no article business validation occurs"
+      "malformedJson": "HTTP 400; no article business validation occurs",
+      "articleSystemFailure": "HTTP 500, code 500 and generic message; no exception details"
     }
   },
   "authorization": {
