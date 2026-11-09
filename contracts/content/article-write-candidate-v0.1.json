@@ -1,0 +1,143 @@
+{
+  "name": "CONTENT-ARTICLE-WRITE-AND-EVENTS",
+  "version": "0.1",
+  "status": "candidate; not frozen; implementation and consumer integration pending",
+  "legacy": {
+    "create": {
+      "method": "POST",
+      "paths": [
+        "/api/blog/article",
+        "/article"
+      ],
+      "fields": [
+        "title",
+        "thumbnail",
+        "isComment",
+        "content",
+        "tags",
+        "categoryId",
+        "summary",
+        "status"
+      ],
+      "forcedIsTop": "0",
+      "success": {
+        "code": 200,
+        "msg": "操作成功"
+      }
+    },
+    "adminPaths": [
+      "/api/admin/content/article",
+      "/content/article"
+    ],
+    "statusValues": {
+      "0": "published",
+      "1": "draft"
+    },
+    "serialization": "public Java Long values are decimal strings",
+    "retry": "no automatic retry without a durable idempotency protocol"
+  },
+  "authorization": {
+    "reference": "contracts/shared/auth/auth-api-v0.2.json",
+    "status": "required; implementation pending",
+    "flow": [
+      "verify token",
+      "read authoritative session by sid",
+      "decode using SessionCodec",
+      "validate session and blog scope",
+      "enforce ownership"
+    ],
+    "failures": {
+      "401": "invalid token or session",
+      "403": "scope or ownership denied",
+      "503": "session backend unavailable or malformed"
+    },
+    "identity": "verified principal supplies author and audit fields; client cannot set view count, revision or first-publication fact"
+  },
+  "candidateRules": {
+    "transaction": "article, tags, sourceRevision, publicationFactId and immutable event commit or roll back together",
+    "draft": "never include draft body in public events",
+    "publicationFact": "create once on first publication; do not create again on edit or republishing",
+    "tombstone": "withdrawal and deletion carry visibility and sourceRevision without body",
+    "eventFields": [
+      "eventId",
+      "eventType",
+      "schemaVersion",
+      "aggregateType",
+      "aggregateId",
+      "sourceRevision",
+      "occurredAt",
+      "producer",
+      "visibility",
+      "payload"
+    ],
+    "redelivery": "preserve original eventId, sourceRevision and payload",
+    "transport": "relay disabled until shared protocol and isolated transport are approved",
+    "counter": "counterRevision is separate from content sourceRevision"
+  },
+  "candidateSnapshot": [
+    "articleId",
+    "authorId",
+    "title",
+    "summary",
+    "content",
+    "thumbnail",
+    "isComment",
+    "categoryId",
+    "categoryName",
+    "tags",
+    "createTime",
+    "publishedAt",
+    "viewCount",
+    "counterRevision"
+  ],
+  "consumerReview": {
+    "community": [
+      "publicationFactId",
+      "articleId",
+      "authorId",
+      "publishedAt",
+      "eventId",
+      "notification deduplication"
+    ],
+    "search": [
+      "articleId",
+      "sourceRevision",
+      "visibility",
+      "title",
+      "summary",
+      "content",
+      "category",
+      "tags",
+      "createTime",
+      "viewCount",
+      "counterRevision",
+      "delete barrier"
+    ],
+    "knowledge": [
+      "articleId",
+      "sourceRevision",
+      "visibility",
+      "title",
+      "content",
+      "authorId",
+      "delete barrier",
+      "retention"
+    ],
+    "controller": [
+      "shared envelope",
+      "trace context",
+      "snapshot to incremental consistency",
+      "payload limits and retention",
+      "versioning",
+      "transport security"
+    ]
+  },
+  "deliveryStatus": {
+    "events": "candidate only; immutable outbox not implemented",
+    "visibility": "future",
+    "snapshot": "future",
+    "ops": "future",
+    "commentsCountingFrontend": "future",
+    "validation": "document only; no tests or integration performed"
+  }
+}
