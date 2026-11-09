@@ -56,7 +56,7 @@ class AuthenticationHttpTest {
         p.add("KNODE_AUTH_REDIS_PORT", () -> "1");
         p.add("KNODE_AUTH_REDIS_USERNAME", () -> "test");
         p.add("KNODE_AUTH_REDIS_PASSWORD", () -> "test");
-        p.add("KNODE_CONTENT_JDBC_URL", () -> "jdbc:h2:mem:content;DB_CLOSE_DELAY=-1");
+        p.add("KNODE_CONTENT_JDBC_URL", () -> "jdbc:h2:mem:content;MODE=MySQL;DB_CLOSE_DELAY=-1");
         p.add("KNODE_CONTENT_DB_USERNAME", () -> "sa");
         p.add("KNODE_CONTENT_DB_PASSWORD", () -> "test");
         p.add("KNODE_AUTH_PUBLIC_KEY_FILE", () -> PUBLIC_KEY.toString());
@@ -154,7 +154,7 @@ class AuthenticationHttpTest {
         if (name != null) b.header(name, value);
         return HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString());
     }
-    private static String token(String scope, int seconds) {
+    static String token(String scope, int seconds) {
         Instant now = Instant.now();
         return Jwts.builder().header().keyId("test-key").and().issuer("knode-user").subject("9007199254740993")
                 .audience().add("knode-api").and().claim("sid", SID).claim("scope", scope).claim("token_use", "user")

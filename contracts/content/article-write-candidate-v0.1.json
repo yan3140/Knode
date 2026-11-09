@@ -1,7 +1,7 @@
 {
   "name": "CONTENT-ARTICLE-WRITE-AND-EVENTS",
   "version": "0.1",
-  "status": "candidate; not frozen; implementation and consumer integration pending",
+  "status": "candidate; local persistence and blog create implemented; consumer review and production transport pending",
   "legacy": {
     "create": {
       "method": "POST",
@@ -38,7 +38,7 @@
   },
   "authorization": {
     "reference": "contracts/shared/auth/auth-api-v0.2.json",
-    "status": "required; implementation pending",
+    "status": "blog create filter chain implemented; ownership enforced in internal commands; administrative HTTP authorization pending",
     "flow": [
       "verify token",
       "read authoritative session by sid",
@@ -55,8 +55,8 @@
   },
   "candidateRules": {
     "transaction": "article, tags, sourceRevision, publicationFactId and immutable event commit or roll back together",
-    "draft": "never include draft body in public events",
-    "publicationFact": "create once on first publication; do not create again on edit or republishing",
+    "draft": "Draft creation, draft editing, and deletion of never-published drafts emit no public event. Withdrawal and deletion of previously published articles emit no body.",
+    "publicationFact": "publicationFactId is non-null on every locally persisted public fact and assigned once on first publication; publishedAt remains the first publication time",
     "tombstone": "withdrawal and deletion carry visibility and sourceRevision without body",
     "eventFields": [
       "eventId",
@@ -65,14 +65,21 @@
       "aggregateType",
       "aggregateId",
       "sourceRevision",
+      "publicationFactId",
       "occurredAt",
       "producer",
       "visibility",
+      "correlationId (optional)",
       "payload"
     ],
     "redelivery": "preserve original eventId, sourceRevision and payload",
     "transport": "relay disabled until shared protocol and isolated transport are approved",
-    "counter": "counterRevision is separate from content sourceRevision"
+    "counter": "counterRevision is separate from content sourceRevision",
+    "correlation": "correlationId is optional and must match [A-Za-z0-9._-]{1,64}; it is the validated X-Request-Id. traceContext is omitted in this slice, not a fabricated span.",
+    "snapshot": "Public facts contain category:{id,name}, tags:[{id,name}]; viewCount and counterRevision come from the persisted row. Dates are ISO-8601 UTC.",
+    "bounds": "title <=256 chars, content <=1000000 chars, summary <=1024 chars, thumbnail <=2048 chars, tags <=50 distinct positive IDs; Jackson document <=8000000 input units and string <=2000000 chars; serialized event <=8000000 UTF-8 bytes",
+    "outbox": "content_article_event is insert-only in application; production DB account must have SELECT/INSERT only on this table, no UPDATE/DELETE. No delivery worker exists.",
+    "ddl": "db/content-article-schema.sql is manual MySQL-oriented DDL; tests use H2 MySQL mode. Native MySQL validation and migration are pending. Provision UTF8MB4 database and use UTC JDBC/session time zone."
   },
   "candidateSnapshot": [
     "articleId",
@@ -82,9 +89,8 @@
     "content",
     "thumbnail",
     "isComment",
-    "categoryId",
-    "categoryName",
-    "tags",
+    "category:{id,name}",
+    "tags:[{id,name}]",
     "createTime",
     "publishedAt",
     "viewCount",
@@ -133,11 +139,12 @@
     ]
   },
   "deliveryStatus": {
-    "events": "candidate only; immutable outbox not implemented",
+    "events": "local immutable event rows implemented and tested; still candidate, no relay or consumer integration",
     "visibility": "future",
     "snapshot": "future",
     "ops": "future",
     "commentsCountingFrontend": "future",
-    "validation": "document only; no tests or integration performed"
+    "validation": "H2 transaction tests and local HTTP with signed synthetic keys and session substitute; native MySQL/Redis and real services unverified",
+    "articleWrite": "POST /api/blog/article and /article implemented; edit/status/delete are internal service methods only, enforce ownership"
   }
 }

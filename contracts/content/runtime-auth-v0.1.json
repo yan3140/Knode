@@ -41,16 +41,16 @@
     "rootIntegration": "controller to request infra add <module>knode-content</module> to root pom.xml"
   },
   "notImplemented": [
-    "article endpoints and ownership enforcement",
-    "article transaction",
-    "immutable event and relay",
     "community/search/knowledge integration",
     "production event protocol",
     "admin permission checks",
     "counter and comment tasks",
     "Nacos",
     "real User/Redis/MySQL integration",
-    "full OpenTelemetry tracing integration"
+    "full OpenTelemetry tracing integration",
+    "public article lists and details; backend HTTP and admin permissions",
+    "production event relay and consumer integration"
   ],
-  "verification": "loopback HTTP with signed synthetic RSA keys and session substitute; H2 and mocked Redis reader checks. Not a real User/Redis/MySQL integration."
+  "verification": "loopback HTTP with signed synthetic RSA keys and session substitute; H2 and mocked Redis reader checks. Not a real User/Redis/MySQL integration.",
+  "articleSlice": "Blog POST uses verified principal; internal command service enforces ownership for edit/status/delete. Local transaction and immutable fact inserts implemented; no other article HTTP endpoint."
 }

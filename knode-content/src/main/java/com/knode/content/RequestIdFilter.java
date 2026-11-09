@@ -23,6 +23,7 @@ public final class RequestIdFilter extends OncePerRequestFilter {
         String id = values.size() == 1 && values.get(0).matches("[A-Za-z0-9._-]{1,64}")
                 ? values.get(0) : UUID.randomUUID().toString();
         resp.setHeader("X-Request-Id", id);
+        req.setAttribute("knode.requestId", id);
         MDC.put("requestId", id);
         try { chain.doFilter(req, resp); } finally { MDC.remove("requestId"); }
     }
