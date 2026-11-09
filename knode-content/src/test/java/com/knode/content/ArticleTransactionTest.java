@@ -188,6 +188,38 @@ class ArticleTransactionTest {
         assertEquals(503,post("/article",token,body).statusCode());
         assertEquals(1,count("content_article")); assertEquals(1,count("content_article_tag")); assertEquals(1,count("content_article_event"));
     }
+    @Test void invalidFieldsAndReferencesUseLegacyBodyWithoutWrites() throws Exception {
+        String token=AuthenticationHttpTest.token("blog",600);
+        for (String body : List.of(
+                json.writeValueAsString(java.util.Map.of("title","", "content","body","status","0",
+                        "isComment","1","categoryId","2","tags",List.of("3"))),
+                json.writeValueAsString(java.util.Map.of("title","title", "content","body","status","0",
+                        "isComment","1","categoryId","999","tags",List.of("3"))),
+                json.writeValueAsString(java.util.Map.of("title","title", "content","body","status","0",
+                        "isComment","1","categoryId","2","tags",List.of("999"))))) {
+            HttpResponse<String> response=post("/api/blog/article",token,body);
+            assertEquals(200,response.statusCode());
+            JsonNode result=json.readTree(response.body());
+            assertEquals(514,result.path("code").asInt());
+            assertEquals("\u6587\u7ae0\u53c2\u6570\u4e0d\u5408\u6cd5",result.path("msg").asText());
+            assertFalse(result.has("data"));
+        }
+        assertEquals(0,count("content_article"));
+        assertEquals(0,count("content_article_tag"));
+        assertEquals(0,count("content_article_event"));
+    }
+    @Test void exceptionMappingRetainsLegacyNotFoundAndRealAuthorizationStatuses() {
+        var controller=new com.knode.content.article.ArticleController(service);
+        var absent=controller.error(new ArticleFailure(404,"internal"));
+        assertEquals(200,absent.getStatusCode().value());
+        assertEquals(513,absent.getBody().get("code"));
+        assertEquals("\u6587\u7ae0\u4e0d\u5b58\u5728",absent.getBody().get("msg"));
+        for (int status : List.of(401,403,503)) {
+            var response=controller.error(new ArticleFailure(status,"internal"));
+            assertEquals(status,response.getStatusCode().value());
+            assertEquals(status==503?500:status,response.getBody().get("code"));
+        }
+    }
     private HttpResponse<String> post(String path,String token,String body) throws Exception {
         HttpRequest request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+path))
             .header("token",token).header("Content-Type","application/json")

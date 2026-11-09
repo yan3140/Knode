@@ -34,7 +34,13 @@
       "1": "draft"
     },
     "serialization": "public Java Long values are decimal strings",
-    "retry": "no automatic retry without a durable idempotency protocol"
+    "retry": "no automatic retry without a durable idempotency protocol",
+    "businessErrors": {
+      "articleInvalid": "HTTP 200, code 514",
+      "articleMissing": "HTTP 200, code 513",
+      "authOrResourceDenied": "HTTP 401/403; dependency failure HTTP 503 with code 500",
+      "malformedJson": "HTTP 400; no article business validation occurs"
+    }
   },
   "authorization": {
     "reference": "contracts/shared/auth/auth-api-v0.2.json",

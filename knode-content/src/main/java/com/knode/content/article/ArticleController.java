@@ -24,6 +24,11 @@ public class ArticleController {
 
     @ExceptionHandler(ArticleFailure.class)
     public ResponseEntity<Map<String,Object>> error(ArticleFailure failure) {
-        return ResponseEntity.status(failure.status()).body(Map.of("code", failure.status(), "msg", failure.getMessage()));
+        if (failure.status() == 400)
+            return ResponseEntity.ok(Map.of("code", 514, "msg", "\u6587\u7ae0\u53c2\u6570\u4e0d\u5408\u6cd5"));
+        if (failure.status() == 404)
+            return ResponseEntity.ok(Map.of("code", 513, "msg", "\u6587\u7ae0\u4e0d\u5b58\u5728"));
+        int code = failure.status() == 503 ? 500 : failure.status();
+        return ResponseEntity.status(failure.status()).body(Map.of("code", code, "msg", failure.getMessage()));
     }
 }
