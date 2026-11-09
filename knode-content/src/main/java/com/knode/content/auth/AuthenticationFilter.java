@@ -39,6 +39,10 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
         try {
             if (Collections.list(request.getHeaderNames()).stream().anyMatch(AuthenticationFilter::forbiddenHeader))
                 throw new AuthFailure(401);
+            if (isPublicRead(request)) {
+                chain.doFilter(request, response);
+                return;
+            }
             List<String> headers = Collections.list(request.getHeaders("token"));
             if (headers.size() != 1 || headers.get(0).isBlank() || headers.get(0).contains(","))
                 throw new AuthFailure(401);
@@ -57,6 +61,16 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
             return;
         }
         chain.doFilter(request, response);
+    }
+
+    private static boolean isPublicRead(HttpServletRequest request) {
+        if (!"GET".equals(request.getMethod())) return false;
+        String p = request.getRequestURI();
+        return p.equals("/api/blog/article/articleList") || p.equals("/article/articleList")
+                || p.equals("/api/blog/article/hotArticleList") || p.equals("/article/hotArticleList")
+                || p.equals("/api/blog/category/getCategoryList") || p.equals("/category/getCategoryList")
+                || p.equals("/api/blog/tag/listAllTag") || p.equals("/tag/listAllTag")
+                || p.matches("/(?:api/blog/)?article/-?[0-9]+");
     }
 
     private Optional<Session> readSession(String sid) {
