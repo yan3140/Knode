@@ -1,0 +1,78 @@
+{
+  "name": "CONTENT-TAG-LINK-METADATA",
+  "version": "0.1",
+  "status": "implemented candidate; H2 and local User/session fixtures only; native MySQL and real dependencies unverified",
+  "adminBasePaths": [
+    "/api/admin/content",
+    "/content"
+  ],
+  "authorization": "Every operation verifies admin session, fetches current permissions from User /api/admin/auth/me with the same token, validates subject, and checks explicit permission or *:*:*; no permission cache. See admin-article-category-v0.1.json. Permission arrays are alternatives: any one listed permission is sufficient.",
+  "permissions": {
+    "GET /tag/list": [
+      "content:tag:list"
+    ],
+    "GET /tag/listAllTag": [
+      "content:tag:list",
+      "content:article:add",
+      "content:article:edit",
+      "content:article:query"
+    ],
+    "GET /tag/{id}": [
+      "content:tag:query"
+    ],
+    "POST /tag": [
+      "content:tag:add"
+    ],
+    "PUT /tag": [
+      "content:tag:edit"
+    ],
+    "DELETE /tag/{ids}": [
+      "content:tag:remove"
+    ],
+    "GET /link/list": [
+      "content:link:list"
+    ],
+    "GET /link/{id}": [
+      "content:link:query"
+    ],
+    "POST /link": [
+      "content:link:add"
+    ],
+    "PUT /link": [
+      "content:link:edit"
+    ],
+    "PUT /link/changeLinkStatus": [
+      "content:link:edit"
+    ],
+    "DELETE /link/{ids}": [
+      "content:link:remove"
+    ]
+  },
+  "tag": {
+    "fields": "name <=256, remark <=1024; create requires both nonblank (code 506); duplicate names allowed. Edit ignores blank fields, requires a nonblank update. Audit actor comes from verified principal.",
+    "list": "active only; name and remark filters joined with OR in parentheses under del_flag=0. LIKE treats !, % and underscore literally. listAllTag returns all active tags.",
+    "delete": "soft delete, preserve historical article-tag relations. Batch up to 100 IDs is deduplicated, locked ascending and all-or-nothing.",
+    "queryMissing": "HTTP 200 success without data."
+  },
+  "link": {
+    "fields": "name required <=256, description <=1024; address required and optional logo are <=2048 HTTP(S) URIs with host, no userinfo or control characters. No URL is fetched. Status 0 approved, 1 rejected, 2 pending; default 2. Audit actor comes from verified principal.",
+    "delete": "soft delete with ascending locks and all-or-nothing batch up to 100 IDs.",
+    "public": "Anonymous GET /api/blog/link/getAllLink and /link/getAllLink return only active approved records with id,name,logo,description,address; omit status and audit. Changes take effect via database reads; no cache."
+  },
+  "common": "IDs and total are decimal strings in responses; body IDs accept canonical positive signed-64-bit integers or decimal strings, and reject fractions, overflow and malformed values as HTTP 200/code 515. Dates GMT+8 yyyy-MM-dd HH:mm:ss; page default 1 size 10, size <=100 and offset <=10000000. Other invalid input or missing mutation target is HTTP 200/code 515; malformed JSON 400; unexpected error 500 with generic message.",
+  "projection": {
+    "writeProtocol": "All article and tag mutations, and each projection target, acquire content_write_fence row 1 first inside READ COMMITTED transaction. An incompatible or unspecified enclosing isolation is rejected; new writers must follow the same protocol. Serialization is global and may reduce write throughput.",
+    "enqueue": "Rename and soft delete atomically persist a job and targets for all currently public linked articles using INSERT SELECT under the fence. Remark-only edit does not enqueue.",
+    "process": "Bounded worker locks the same fence, target, and article; re-reads latest article and active tags. Public articles receive a new immutable candidate ArticleContentChanged schema v2 with independent incremented sourceRevision, existing publicationFactId, first publishedAt, current author/body/counters. Draft, withdrawn or deleted articles are marked DONE without public projection. No ArticlePublished is emitted; old event payloads are untouched.",
+    "retry": "One transaction commits event and DONE together. Failure rolls back and a separate transaction persists attempts, generic PROCESSING_FAILURE and exponential retry starting at 2 seconds capped at 3600 seconds. Due checks, initial eligibility and retry scheduling use the same database CURRENT_TIMESTAMP(6), with UTC JDBC/session configuration. Other due targets proceed; no lease or external relay.",
+    "configuration": {
+      "KNODE_CONTENT_METADATA_WORKER_ENABLED": "false by default",
+      "KNODE_CONTENT_METADATA_WORKER_BATCH_SIZE": "20 default, 1..100",
+      "KNODE_CONTENT_METADATA_WORKER_DELAY_MS": "5000 default, 1000..60000"
+    },
+    "limits": "No global snapshot/commit watermark, transport, cache, consumer, or production cutover is claimed. Consumer protocol and version compatibility need review."
+  },
+  "schema": "New installs use manual knode-content/src/main/resources/db/content-article-schema.sql. Existing 02B installs require separately planned content-metadata-02c-upgrade.sql; it is not automatic or idempotent. Native MySQL execution and migration are unverified.",
+  "verification": "Local H2 MySQL-mode transactions and loopback provider fixture only. Deterministic interleavings exercise uncommitted create/rename lock order; a fixed nanosecond sample reproduces the prior H2 TIMESTAMP(6) rounding mismatch, and database-clock due and retry windows are tested. No real User, Redis, MySQL, OSS or external relay.",
+  "indexes": "Manual DDL includes article public list (status,deleted,is_top,created_at,id), hot list (status,deleted,view_count,id), and reverse tag lookup (tag_id,article_id). H2 verifies DDL; native MySQL EXPLAIN and load behavior remain unverified."
+}

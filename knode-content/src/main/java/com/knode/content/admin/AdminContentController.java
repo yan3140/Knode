@@ -4,8 +4,6 @@ import com.knode.auth.AuthFailure;
 import com.knode.auth.UserTokenVerifier;
 import com.knode.content.article.ArticleCommandService;
 import com.knode.content.article.ArticleFailure;
-import com.knode.content.auth.AuthenticationFilter;
-import com.knode.content.profile.UserProfileClient;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.*;
 import org.springframework.http.ResponseEntity;
@@ -14,18 +12,14 @@ import org.springframework.web.bind.annotation.*;
 
 @RestController
 public class AdminContentController {
-    private final UserProfileClient users;
+    private final AdminGuard guard;
     private final AdminContentQuery queries;
     private final ArticleCommandService commands;
-    public AdminContentController(UserProfileClient users,AdminContentQuery queries,ArticleCommandService commands) {
-        this.users=users; this.queries=queries; this.commands=commands;
+    public AdminContentController(AdminGuard guard,AdminContentQuery queries,ArticleCommandService commands) {
+        this.guard=guard; this.queries=queries; this.commands=commands;
     }
     private UserTokenVerifier.Principal require(HttpServletRequest request,String... allowed) {
-        UserTokenVerifier.Principal principal=(UserTokenVerifier.Principal)request.getAttribute(AuthenticationFilter.PRINCIPAL);
-        if (principal==null || !"admin".equals(principal.scope())) throw new AuthFailure(403);
-        Set<String> permissions=users.adminPermissions(request.getHeader("token"),principal.userId());
-        if (!permissions.contains("*:*:*") && Arrays.stream(allowed).noneMatch(permissions::contains)) throw new AuthFailure(403);
-        return principal;
+        return guard.require(request,allowed);
     }
     private static Map<String,Object> ok() { return Map.of("code",200,"msg","\u64cd\u4f5c\u6210\u529f"); }
     private static Map<String,Object> ok(Object data) { return Map.of("code",200,"msg","\u64cd\u4f5c\u6210\u529f","data",data); }

@@ -14,14 +14,17 @@
       "/api/blog/category/getCategoryList",
       "/category/getCategoryList",
       "/api/blog/tag/listAllTag",
-      "/tag/listAllTag"
+      "/tag/listAllTag",
+      "/api/blog/link/getAllLink",
+      "/link/getAllLink"
     ],
     "visibility": "published and not deleted only; draft, withdrawn, deleted and absent return HTTP 200 code 513 without body",
     "pagination": "pageNum default 1, pageSize default 10, max 100, max offset 10000000; categoryId <= 0 means all; invalid values HTTP 200 code 514",
     "response": "code/msg/data; page data contains only rows and total; Java long IDs/counts/total as decimal strings; dates yyyy-MM-dd HH:mm:ss GMT+8",
     "author": "authorName and authorAvatar are null for MISSING or UNAVAILABLE; authorInfoStatus distinguishes FOUND/MISSING/UNAVAILABLE",
     "counter": "hot and article viewCount use persisted database values; no Redis live increment in this slice",
-    "authorization": "Only exact listed GET routes are anonymous; spoofed identity headers rejected; client token never used as author identity or forwarded to User"
+    "authorization": "Only exact listed GET routes are anonymous; spoofed identity headers rejected; client token never used as author identity or forwarded to User",
+    "links": "Only status 0 and non-deleted links; fields id, name, logo, description, address; no status or audit."
   },
   "userClient": {
     "environment": [
@@ -37,9 +40,9 @@
     "limits": "Connect 400ms, each request <=1000ms, entire two-call lookup <=2000ms; each response <=3145728 bytes; 100 IDs maximum; no retries or token cache. A 3 MiB response budget covers 100 profiles with both 2048-unit fields JSON escaped, plus envelope.",
     "privacy": "No browser token, passwords, email, raw upstream body or credential in public output or intentional logs"
   },
-  "schema": "New installs use db/content-article-schema.sql; existing R2 schemas require separately planned db/content-metadata-upgrade.sql. Neither runs automatically. Native MySQL migration is unverified.",
+  "schema": "New installs use manual db/content-article-schema.sql; 02B installs require manual db/content-metadata-02c-upgrade.sql after existing earlier upgrades. Neither runs automatically. Native MySQL migration is unverified.",
   "deferred": [
-    "private/admin permission checks and writes",
+    "other private/admin operations beyond implemented article/category/tag/link scope",
     "relation aggregation",
     "comments",
     "view count updates",

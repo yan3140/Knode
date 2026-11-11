@@ -17,17 +17,20 @@ import org.springframework.transaction.annotation.Transactional;
 public class ArticleCommandService {
     private final JdbcTemplate db;
     private final ObjectMapper json;
-    public ArticleCommandService(JdbcTemplate db, ObjectMapper json) { this.db = db; this.json = json; }
+    private final com.knode.content.metadata.ContentWriteFence fence;
+    public ArticleCommandService(JdbcTemplate db, ObjectMapper json, com.knode.content.metadata.ContentWriteFence fence) { this.db = db; this.json = json; this.fence=fence; }
     private record Row(long id, String title, String content, String summary, String thumbnail,
                        long category, String top, String comment, String status, String author, Instant created,
                        long revision, String fact, Instant published, boolean deleted, long viewCount, long counterRevision) {}
 
-    @Transactional
+    @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public long create(String actor, ArticleCommand input, String correlationId) {
+        fence.lock();
         return createInternal(actor,input,"0",correlationId);
     }
-    @Transactional
+    @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public long adminCreate(String actor, ArticleCommand input, String top, String correlationId) {
+        fence.lock();
         if (!binary(top)) throw new ArticleFailure(400,"Invalid article parameters");
         return createInternal(actor,input,top,correlationId);
     }
@@ -51,14 +54,16 @@ public class ArticleCommandService {
         return id;
     }
 
-    @Transactional
+    @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public void edit(String actor, long id, ArticleCommand input, String correlationId) {
+        fence.lock();
         validate(actor,input);
         Row old=owned(actor,id);
         updateLocked(actor,old,input,old.top(),correlationId);
     }
-    @Transactional
+    @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public void adminEdit(String actor, long id, ArticleCommand input, String top, String correlationId) {
+        fence.lock();
         validate(actor,input);
         if (!binary(top)) throw new ArticleFailure(400,"Invalid article parameters");
         updateLocked(actor,existing(id),input,top,correlationId);
@@ -82,13 +87,15 @@ public class ArticleCommandService {
         else if ("0".equals(input.status())) emit(current, "ArticleContentChanged", "PUBLIC", correlationId);
     }
 
-    @Transactional
+    @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public void setStatus(String actor, long id, String status, String correlationId) {
+        fence.lock();
         if (!validActor(actor) || !binary(status)) throw new ArticleFailure(400,"Invalid article parameters");
         updateStatus(actor,owned(actor,id),status,correlationId);
     }
-    @Transactional
+    @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public void adminStatus(String actor,long id,String status,String correlationId) {
+        fence.lock();
         if (!validActor(actor) || !binary(status)) throw new ArticleFailure(400,"Invalid article parameters");
         updateStatus(actor,existing(id),status,correlationId);
     }
@@ -111,13 +118,15 @@ public class ArticleCommandService {
         else if (fact != null) emit(current, "ArticleVisibilityChanged", "0".equals(status) ? "PUBLIC" : "WITHDRAWN", correlationId);
     }
 
-    @Transactional
+    @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public void delete(String actor, long id, String correlationId) {
+        fence.lock();
         if (!validActor(actor)) throw new ArticleFailure(400,"Invalid actor");
         deleteLocked(actor,owned(actor,id),correlationId);
     }
-    @Transactional
+    @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public void adminDeleteBatch(String actor,List<Long> ids,String correlationId) {
+        fence.lock();
         if (!validActor(actor) || ids==null || ids.isEmpty() || ids.size()>100 || ids.stream().anyMatch(id -> id==null || id<=0))
             throw new ArticleFailure(400,"Invalid article parameters");
         List<Row> locked=new ArrayList<>();
@@ -129,6 +138,16 @@ public class ArticleCommandService {
         db.update("UPDATE content_article SET deleted=1,updated_at=?,updated_by=?,source_revision=? WHERE id=?",
             Timestamp.from(Instant.now()), actor, Math.addExact(old.revision(),1), id);
         if (old.fact() != null) emit(load(id, false), "ArticleDeleted", "DELETED", correlationId);
+    }
+
+    @Transactional(propagation=org.springframework.transaction.annotation.Propagation.MANDATORY)
+    public boolean refreshMetadataProjection(long id) {
+        fence.lock();
+        Row row=load(id,true);
+        if (row==null || row.deleted() || !"0".equals(row.status())) return false;
+        db.update("UPDATE content_article SET source_revision=? WHERE id=?",Math.addExact(row.revision(),1),id);
+        emit(load(id,false),"ArticleContentChanged","PUBLIC",null);
+        return true;
     }
 
     private Row owned(String actor, long id) {
@@ -184,7 +203,7 @@ public class ArticleCommandService {
         payload.put("articleId",Long.toString(row.id()));
         if ("PUBLIC".equals(visibility)) {
             String category = db.queryForObject("SELECT name FROM content_category WHERE id=?",String.class,row.category());
-            List<Map<String,Object>> tags = db.query("SELECT t.id,t.name FROM content_tag t JOIN content_article_tag at ON at.tag_id=t.id WHERE at.article_id=? ORDER BY t.id",
+            List<Map<String,Object>> tags = db.query("SELECT t.id,t.name FROM content_tag t JOIN content_article_tag at ON at.tag_id=t.id WHERE at.article_id=? AND t.del_flag=0 ORDER BY t.id",
                 (rs,n) -> Map.of("id",Long.toString(rs.getLong("id")),"name",rs.getString("name")),row.id());
             payload.put("authorId",row.author()); payload.put("title",row.title()); payload.put("summary",row.summary());
             payload.put("content",row.content()); payload.put("thumbnail",row.thumbnail()); payload.put("isTop",row.top()); payload.put("isComment",row.comment());

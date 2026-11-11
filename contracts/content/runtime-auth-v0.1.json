@@ -30,9 +30,9 @@
   "auth": {
     "reference": "contracts/shared/auth/auth-api-v0.2.json",
     "principal": "UserTokenVerifier.Principal stored under AuthenticationFilter.PRINCIPAL",
-    "routes": "Exact GET article list/hot/detail and category/tag public paths are anonymous; other application routes are protected by default. Spoofed identity headers are rejected on public paths.",
+    "routes": "Exact GET article list/hot/detail, category/tag public paths and /api/blog/link/getAllLink or /link/getAllLink are anonymous; other routes are protected by default. Spoofed identity headers are rejected on public paths.",
     "errors": "HTTP 401/business 401 invalid token/session; HTTP 403/business 403 scope; HTTP 503/business 500 unavailable or malformed session state",
-    "authorization": "Admin article/category routes revalidate current permission and subject through User /api/admin/auth/me on every request; *:*:* only if explicitly returned. Blog author methods retain ownership checks."
+    "authorization": "Admin article/category/tag/link routes revalidate current permission and subject through User /api/admin/auth/me on every request; *:*:* only if explicitly returned. Blog author methods retain ownership checks."
   },
   "build": {
     "parent": "mvn -N -DskipTests install",
@@ -43,7 +43,6 @@
   "notImplemented": [
     "community/search/knowledge integration",
     "production event protocol",
-    "admin permission checks",
     "counter and comment tasks",
     "Nacos",
     "real User/Redis/MySQL integration",
@@ -51,7 +50,8 @@
     "production event relay and consumer integration"
   ],
   "verification": "loopback HTTP with signed synthetic RSA keys and session substitute; H2 and mocked Redis reader checks. Not a real User/Redis/MySQL integration.",
-  "articleSlice": "Blog POST uses verified principal; internal command service enforces ownership for edit/status/delete. Local transaction and immutable fact inserts implemented; no other article HTTP endpoint.",
+  "articleSlice": "Blog POST and authorized admin article create/edit/status/delete implemented; internal author methods enforce ownership. Local immutable facts only.",
   "publicQueryContract": "contracts/content/public-content-query-v0.1.json",
-  "adminContract": "contracts/content/admin-article-category-v0.1.json"
+  "adminContract": "contracts/content/admin-article-category-v0.1.json",
+  "metadataContract": "contracts/content/tag-link-metadata-v0.1.json"
 }
