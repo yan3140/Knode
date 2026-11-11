@@ -1,6 +1,7 @@
 package com.knode.content.article;
 
 import com.fasterxml.jackson.core.StreamReadConstraints;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -8,7 +9,7 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class JsonBudget {
     @Bean Jackson2ObjectMapperBuilderCustomizer articleJsonConstraints() {
-        return builder -> builder.postConfigurer(mapper -> mapper.getFactory().setStreamReadConstraints(
+        return builder -> builder.featuresToDisable(DeserializationFeature.ACCEPT_FLOAT_AS_INT).postConfigurer(mapper -> mapper.getFactory().setStreamReadConstraints(
                 StreamReadConstraints.builder().maxDocumentLength(8_000_000L).maxStringLength(2_000_000).build()));
     }
 }

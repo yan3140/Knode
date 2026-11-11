@@ -150,6 +150,28 @@ class ArticleTransactionTest {
         assertEquals(Long.toString(category),event.path("payload").path("category").path("id").asText());
         assertEquals(Long.toString(tag),event.path("payload").path("tags").get(0).path("id").asText());
     }
+    @Test void fractionalCategoryCannotCreateAnArticle() throws Exception {
+        String body="{\"title\":\"bad\",\"content\":\"body\",\"status\":\"0\",\"isComment\":\"1\",\"categoryId\":2.5,\"tags\":[3]}";
+        HttpResponse<String> response=post("/article",AuthenticationHttpTest.token("blog",600),body);
+        assertEquals(400,response.statusCode(),"fractional category response: "+response.body());
+        assertEquals(400,json.readTree(response.body()).path("code").asInt());
+        assertEquals(0,count("content_article")); assertEquals(0,count("content_article_event"));
+    }
+    @Test void fractionalTagCannotCreateAnArticle() throws Exception {
+        String body="{\"title\":\"bad\",\"content\":\"body\",\"status\":\"0\",\"isComment\":\"1\",\"categoryId\":2,\"tags\":[3.5]}";
+        HttpResponse<String> response=post("/api/blog/article",AuthenticationHttpTest.token("blog",600),body);
+        assertEquals(400,response.statusCode(),"fractional tag response: "+response.body());
+        assertEquals(400,json.readTree(response.body()).path("code").asInt());
+        assertEquals(0,count("content_article")); assertEquals(0,count("content_article_event"));
+    }
+    @Test void integerReferenceNumbersRemainCompatible() throws Exception {
+        String body="{\"title\":\"valid\",\"content\":\"body\",\"status\":\"0\",\"isComment\":\"1\",\"categoryId\":2,\"tags\":[3]}";
+        HttpResponse<String> response=post("/article",AuthenticationHttpTest.token("blog",600),body);
+        assertEquals(200,response.statusCode()); assertEquals(200,json.readTree(response.body()).path("code").asInt());
+        assertEquals(2,db.queryForObject("SELECT category_id FROM content_article",Long.class));
+        assertEquals(3,db.queryForObject("SELECT tag_id FROM content_article_tag",Long.class));
+        assertEquals(1,count("content_article_event"));
+    }
     @Test void oversizedJsonStringIsRejectedWithoutWriting() throws Exception {
         String body=json.writeValueAsString(java.util.Map.of("title","x","content","x".repeat(2000001),
                 "status","0","isComment","1","categoryId","2","tags",List.of("3")));

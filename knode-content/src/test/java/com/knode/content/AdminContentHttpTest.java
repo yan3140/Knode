@@ -82,6 +82,26 @@ class AdminContentHttpTest {
         m.put("createBy","1"); m.put("authorId","1"); m.put("viewCount","999"); m.put("publicationFactId","fake");
         return JSON.writeValueAsString(m);
     }
+    @Test void fractionalArticleIdCannotMutateAnExistingArticle() throws Exception {
+        long id=draft("original");
+        PERMS.set(List.of("content:article:edit"));
+        var input=(com.fasterxml.jackson.databind.node.ObjectNode)JSON.readTree(body(id,"wrong target","0","0"));
+        input.put("id",id+0.5);
+        var response=request("PUT","/content/article",JSON.writeValueAsString(input),TOKEN.get(),false);
+        assertEquals(400,response.statusCode(),"fractional id response: "+response.body());
+        assertEquals(400,json(response).path("code").asInt());
+        assertEquals("original",db.queryForObject("SELECT title FROM content_article WHERE id=?",String.class,id));
+        assertEquals(0,count("content_article_event"));
+    }
+    @Test void integerArticleIdRemainsCompatible() throws Exception {
+        long id=draft("original");
+        PERMS.set(List.of("content:article:edit"));
+        var input=(com.fasterxml.jackson.databind.node.ObjectNode)JSON.readTree(body(id,"updated","0","0"));
+        input.put("id",id);
+        var response=request("PUT","/content/article",JSON.writeValueAsString(input),TOKEN.get(),false);
+        assertEquals(200,response.statusCode()); assertEquals(200,json(response).path("code").asInt());
+        assertEquals("updated",db.queryForObject("SELECT title FROM content_article WHERE id=?",String.class,id));
+    }
     @Test void localAuthAndLivePermissionsFailClosedBeforePrivateReads() throws Exception {
         long id=draft("secret");
         assertEquals(401,request("GET","/content/article/"+id,null,null,false).statusCode());
