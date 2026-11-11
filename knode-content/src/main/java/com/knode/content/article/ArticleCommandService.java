@@ -19,21 +19,29 @@ public class ArticleCommandService {
     private final ObjectMapper json;
     public ArticleCommandService(JdbcTemplate db, ObjectMapper json) { this.db = db; this.json = json; }
     private record Row(long id, String title, String content, String summary, String thumbnail,
-                       long category, String comment, String status, String author, Instant created,
+                       long category, String top, String comment, String status, String author, Instant created,
                        long revision, String fact, Instant published, boolean deleted, long viewCount, long counterRevision) {}
 
     @Transactional
     public long create(String actor, ArticleCommand input, String correlationId) {
+        return createInternal(actor,input,"0",correlationId);
+    }
+    @Transactional
+    public long adminCreate(String actor, ArticleCommand input, String top, String correlationId) {
+        if (!binary(top)) throw new ArticleFailure(400,"Invalid article parameters");
+        return createInternal(actor,input,top,correlationId);
+    }
+    private long createInternal(String actor, ArticleCommand input, String top, String correlationId) {
         validate(actor, input);
         validateReferences(input);
         Instant now = Instant.now();
         String fact = "0".equals(input.status()) ? UUID.randomUUID().toString() : null;
         KeyHolder key = new GeneratedKeyHolder();
         db.update(connection -> {
-            PreparedStatement p = connection.prepareStatement("INSERT INTO content_article(title,content,summary,thumbnail,category_id,is_top,is_comment,status,author_id,created_at,updated_at,updated_by,view_count,counter_revision,source_revision,publication_fact_id,published_at,deleted) VALUES(?,?,?,?,?,'0',?,?,?,?,?,?,0,0,1,?,?,0)", Statement.RETURN_GENERATED_KEYS);
+            PreparedStatement p = connection.prepareStatement("INSERT INTO content_article(title,content,summary,thumbnail,category_id,is_top,is_comment,status,author_id,created_at,updated_at,updated_by,view_count,counter_revision,source_revision,publication_fact_id,published_at,deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,1,?,?,0)", Statement.RETURN_GENERATED_KEYS);
             int i=1; p.setString(i++,input.title()); p.setString(i++,input.content());
             p.setString(i++,input.summary()); p.setString(i++,input.thumbnail()); p.setLong(i++,input.categoryId());
-            p.setString(i++,input.isComment()); p.setString(i++,input.status()); p.setString(i++,actor);
+            p.setString(i++,top); p.setString(i++,input.isComment()); p.setString(i++,input.status()); p.setString(i++,actor);
             p.setTimestamp(i++,Timestamp.from(now)); p.setTimestamp(i++,Timestamp.from(now)); p.setString(i++,actor);
             p.setString(i++,fact); p.setTimestamp(i, fact == null ? null : Timestamp.from(now)); return p;
         }, key);
@@ -45,16 +53,26 @@ public class ArticleCommandService {
 
     @Transactional
     public void edit(String actor, long id, ArticleCommand input, String correlationId) {
-        validate(actor, input);
-        Row old = owned(actor, id);
+        validate(actor,input);
+        Row old=owned(actor,id);
+        updateLocked(actor,old,input,old.top(),correlationId);
+    }
+    @Transactional
+    public void adminEdit(String actor, long id, ArticleCommand input, String top, String correlationId) {
+        validate(actor,input);
+        if (!binary(top)) throw new ArticleFailure(400,"Invalid article parameters");
+        updateLocked(actor,existing(id),input,top,correlationId);
+    }
+    private void updateLocked(String actor, Row old, ArticleCommand input, String top, String correlationId) {
+        long id=old.id();
         validateReferences(input);
         Instant now = Instant.now();
         boolean first = old.fact() == null && "0".equals(input.status());
         String fact = first ? UUID.randomUUID().toString() : old.fact();
         Instant published = first ? now : old.published();
         long revision = Math.addExact(old.revision(), 1);
-        db.update("UPDATE content_article SET title=?,content=?,summary=?,thumbnail=?,category_id=?,is_comment=?,status=?,updated_at=?,updated_by=?,source_revision=?,publication_fact_id=?,published_at=? WHERE id=?",
-            input.title(), input.content(), input.summary(), input.thumbnail(), input.categoryId(), input.isComment(), input.status(),
+        db.update("UPDATE content_article SET title=?,content=?,summary=?,thumbnail=?,category_id=?,is_top=?,is_comment=?,status=?,updated_at=?,updated_by=?,source_revision=?,publication_fact_id=?,published_at=? WHERE id=?",
+            input.title(), input.content(), input.summary(), input.thumbnail(), input.categoryId(), top, input.isComment(), input.status(),
             Timestamp.from(now), actor, revision, fact, published == null ? null : Timestamp.from(published), id);
         replaceTags(id, input.tags());
         Row current = load(id, false);
@@ -67,7 +85,15 @@ public class ArticleCommandService {
     @Transactional
     public void setStatus(String actor, long id, String status, String correlationId) {
         if (!validActor(actor) || !binary(status)) throw new ArticleFailure(400,"Invalid article parameters");
-        Row old = owned(actor, id);
+        updateStatus(actor,owned(actor,id),status,correlationId);
+    }
+    @Transactional
+    public void adminStatus(String actor,long id,String status,String correlationId) {
+        if (!validActor(actor) || !binary(status)) throw new ArticleFailure(400,"Invalid article parameters");
+        updateStatus(actor,existing(id),status,correlationId);
+    }
+    private void updateStatus(String actor,Row old,String status,String correlationId) {
+        long id=old.id();
         if (old.status().equals(status)) return;
         if ("0".equals(status)) {
             List<Long> tags = db.queryForList("SELECT tag_id FROM content_article_tag WHERE article_id=?", Long.class, id);
@@ -88,23 +114,39 @@ public class ArticleCommandService {
     @Transactional
     public void delete(String actor, long id, String correlationId) {
         if (!validActor(actor)) throw new ArticleFailure(400,"Invalid actor");
-        Row old = owned(actor,id);
+        deleteLocked(actor,owned(actor,id),correlationId);
+    }
+    @Transactional
+    public void adminDeleteBatch(String actor,List<Long> ids,String correlationId) {
+        if (!validActor(actor) || ids==null || ids.isEmpty() || ids.size()>100 || ids.stream().anyMatch(id -> id==null || id<=0))
+            throw new ArticleFailure(400,"Invalid article parameters");
+        List<Row> locked=new ArrayList<>();
+        for (long id:new TreeSet<>(ids)) locked.add(existing(id));
+        for (Row row:locked) deleteLocked(actor,row,correlationId);
+    }
+    private void deleteLocked(String actor,Row old,String correlationId) {
+        long id=old.id();
         db.update("UPDATE content_article SET deleted=1,updated_at=?,updated_by=?,source_revision=? WHERE id=?",
             Timestamp.from(Instant.now()), actor, Math.addExact(old.revision(),1), id);
         if (old.fact() != null) emit(load(id, false), "ArticleDeleted", "DELETED", correlationId);
     }
 
     private Row owned(String actor, long id) {
-        Row row = load(id, true);
-        if (row == null || row.deleted()) throw new ArticleFailure(404,"Article not found");
+        Row row=existing(id);
         if (!row.author().equals(actor)) throw new ArticleFailure(403,"Forbidden");
+        return row;
+    }
+    private Row existing(long id) {
+        if (id<=0) throw new ArticleFailure(400,"Invalid article parameters");
+        Row row=load(id,true);
+        if (row==null || row.deleted()) throw new ArticleFailure(404,"Article not found");
         return row;
     }
 
     private Row load(long id, boolean lock) {
         List<Row> rows = db.query("SELECT * FROM content_article WHERE id=?" + (lock ? " FOR UPDATE" : ""), (r,n) ->
             new Row(r.getLong("id"), r.getString("title"), r.getString("content"), r.getString("summary"), r.getString("thumbnail"),
-                r.getLong("category_id"), r.getString("is_comment"), r.getString("status"), r.getString("author_id"),
+                r.getLong("category_id"), r.getString("is_top"), r.getString("is_comment"), r.getString("status"), r.getString("author_id"),
                 r.getTimestamp("created_at").toInstant(), r.getLong("source_revision"), r.getString("publication_fact_id"),
                 r.getTimestamp("published_at") == null ? null : r.getTimestamp("published_at").toInstant(), r.getBoolean("deleted"),
                 r.getLong("view_count"), r.getLong("counter_revision")), id);
@@ -145,13 +187,13 @@ public class ArticleCommandService {
             List<Map<String,Object>> tags = db.query("SELECT t.id,t.name FROM content_tag t JOIN content_article_tag at ON at.tag_id=t.id WHERE at.article_id=? ORDER BY t.id",
                 (rs,n) -> Map.of("id",Long.toString(rs.getLong("id")),"name",rs.getString("name")),row.id());
             payload.put("authorId",row.author()); payload.put("title",row.title()); payload.put("summary",row.summary());
-            payload.put("content",row.content()); payload.put("thumbnail",row.thumbnail()); payload.put("isComment",row.comment());
+            payload.put("content",row.content()); payload.put("thumbnail",row.thumbnail()); payload.put("isTop",row.top()); payload.put("isComment",row.comment());
             payload.put("category",Map.of("id",Long.toString(row.category()),"name",category)); payload.put("tags",tags);
             payload.put("createTime",row.created().toString()); payload.put("publishedAt",row.published().toString());
             payload.put("viewCount",Long.toString(row.viewCount())); payload.put("counterRevision",Long.toString(row.counterRevision()));
         }
         Map<String,Object> event = new LinkedHashMap<>();
-        event.put("eventId",eventId); event.put("eventType",type); event.put("schemaVersion",1);
+        event.put("eventId",eventId); event.put("eventType",type); event.put("schemaVersion",2);
         event.put("producer","knode-content"); event.put("aggregateType","ARTICLE");
         event.put("aggregateId",Long.toString(row.id())); event.put("sourceRevision",Long.toString(row.revision()));
         event.put("publicationFactId",row.fact()); event.put("occurredAt",Instant.now().toString()); event.put("visibility",visibility);

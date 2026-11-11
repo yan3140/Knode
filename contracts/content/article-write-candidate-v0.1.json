@@ -86,7 +86,8 @@
     "snapshot": "Public facts contain category:{id,name}, tags:[{id,name}]; viewCount and counterRevision come from the persisted row. Dates are ISO-8601 UTC.",
     "bounds": "title <=256 chars, content <=1000000 chars, summary <=1024 chars, thumbnail <=2048 chars, tags <=50 distinct positive IDs; Jackson document <=8000000 input units and string <=2000000 chars; serialized event <=8000000 UTF-8 bytes",
     "outbox": "content_article_event is insert-only in application; production DB account must have SELECT/INSERT only on this table, no UPDATE/DELETE. No delivery worker exists.",
-    "ddl": "db/content-article-schema.sql is manual MySQL-oriented DDL; tests use H2 MySQL mode. Native MySQL validation and migration are pending. Provision UTF8MB4 database and use UTC JDBC/session time zone."
+    "ddl": "db/content-article-schema.sql is manual MySQL-oriented DDL; tests use H2 MySQL mode. Native MySQL validation and migration are pending. Provision UTF8MB4 database and use UTC JDBC/session time zone.",
+    "eventSchemaVersion": "New facts use candidate schemaVersion 2. PUBLIC payload includes isTop string 0/1; existing schemaVersion 1 rows remain unchanged. Consumer review and version compatibility required before transport."
   },
   "candidateSnapshot": [
     "articleId",
@@ -95,6 +96,7 @@
     "summary",
     "content",
     "thumbnail",
+    "isTop",
     "isComment",
     "category:{id,name}",
     "tags:[{id,name}]",
@@ -124,7 +126,8 @@
       "createTime",
       "viewCount",
       "counterRevision",
-      "delete barrier"
+      "delete barrier",
+      "candidate schema v2 isTop and v1 compatibility"
     ],
     "knowledge": [
       "articleId",
@@ -152,6 +155,6 @@
     "ops": "future",
     "commentsCountingFrontend": "future",
     "validation": "H2 transaction tests and local HTTP with signed synthetic keys and session substitute; native MySQL/Redis and real services unverified",
-    "articleWrite": "POST /api/blog/article and /article implemented; edit/status/delete are internal service methods only, enforce ownership"
+    "articleWrite": "Blog POST plus authorized admin create/edit/status/delete implemented; administrator can manage other authors, while blog author methods retain ownership checks."
   }
 }

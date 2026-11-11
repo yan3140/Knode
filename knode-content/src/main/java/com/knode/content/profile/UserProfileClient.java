@@ -103,6 +103,45 @@ public final class UserProfileClient {
             return unavailable(ids);
         }
     }
+    /** Fetch current admin permissions for the already verified user; never cache this result. */
+    public Set<String> adminPermissions(String token,String principalId) {
+        if (origin==null || token==null || !validId(principalId)) throw new com.knode.auth.AuthFailure(503);
+        CompletableFuture<HttpResponse<byte[]>> pending=null;
+        try {
+            HttpRequest request=HttpRequest.newBuilder(origin.resolve("/api/admin/auth/me"))
+                .timeout(Duration.ofMillis(1000)).header("token",token).GET().build();
+            pending=http.sendAsync(request,ignored -> new BoundedBody());
+            HttpResponse<byte[]> response=pending.get(1000,TimeUnit.MILLISECONDS);
+            if (response.statusCode()==401 || response.statusCode()==403)
+                throw new com.knode.auth.AuthFailure(response.statusCode());
+            if (response.statusCode()!=200) throw new com.knode.auth.AuthFailure(503);
+            JsonNode root=JSON.readTree(response.body());
+            if (!fields(root,Set.of("code","msg","data")) || !root.path("code").isIntegralNumber() || !root.path("code").canConvertToInt()
+                    || root.path("code").asInt()!=200 || !text(root,"msg") || !root.path("data").isObject())
+                throw new com.knode.auth.AuthFailure(503);
+            JsonNode data=root.get("data"), user=data.path("user");
+            if (!fields(data,Set.of("roles","permissions","user")) || !user.isObject()
+                    || !text(user,"id") || !validId(user.get("id").asText())
+                    || !principalId.equals(user.get("id").asText()))
+                throw new com.knode.auth.AuthFailure(503);
+            checkedStrings(data.get("roles"));
+            return checkedStrings(data.get("permissions"));
+        } catch (com.knode.auth.AuthFailure failure) {
+            throw failure;
+        } catch (Exception failure) {
+            if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+            throw new com.knode.auth.AuthFailure(503);
+        } finally { if (pending!=null && !pending.isDone()) pending.cancel(true); }
+    }
+    private static Set<String> checkedStrings(JsonNode items) {
+        if (items==null || !items.isArray() || items.size()>1000) throw new com.knode.auth.AuthFailure(503);
+        Set<String> result=new HashSet<>();
+        for (JsonNode item:items) {
+            if (!item.isTextual() || item.asText().length()>128
+                    || !result.add(item.asText())) throw new com.knode.auth.AuthFailure(503);
+        }
+        return Set.copyOf(result);
+    }
     private JsonNode post(String path,String authorization,String body,long deadline) throws Exception {
         long remaining=TimeUnit.NANOSECONDS.toMillis(deadline-System.nanoTime());
         if (remaining<=0) throw new TimeoutException();

@@ -1,0 +1,67 @@
+{
+  "name": "CONTENT-ADMIN-ARTICLE-CATEGORY",
+  "version": "0.1",
+  "status": "implemented; tested against local provider fixture; real User integration pending",
+  "basePaths": [
+    "/api/admin/content",
+    "/content"
+  ],
+  "authorization": {
+    "flow": "verify user JWT and authoritative session for admin scope; GET fixed User /api/admin/auth/me with the same token on every operation; check canonical user.id equals principal and current permission",
+    "rules": "No roles imply permissions. Only a listed operation permission or explicit *:*:* grants access; no positive permission cache.",
+    "failure": "User or local invalid session 401; scope or missing permission 403; authority unavailable, malformed response or subject mismatch 503 with business code 500",
+    "connection": "KNODE_USER_ORIGIN fixed HTTPS origin, or literal loopback HTTP for development; no proxy, redirects or retry; connect 400ms; GET deadline 1000ms; response max 3145728 bytes",
+    "limits": "roles and permissions each <=1000 distinct strings <=128 characters; empty permissions grant nothing; subject must be canonical positive signed int64 decimal string",
+    "privacy": "Do not log or return User token, email or raw upstream body."
+  },
+  "permissions": {
+    "POST /article": [
+      "content:article:add"
+    ],
+    "GET /article/list": [
+      "content:article:list"
+    ],
+    "GET /article/{id}": [
+      "content:article:query"
+    ],
+    "PUT /article": [
+      "content:article:edit"
+    ],
+    "PUT /article/{id}/status": [
+      "content:article:edit"
+    ],
+    "DELETE /article/{ids}": [
+      "content:article:remove"
+    ],
+    "GET /category/list": [
+      "content:category:list"
+    ],
+    "GET /category/listAllCategory": [
+      "content:category:list",
+      "content:article:add",
+      "content:article:edit",
+      "content:article:query"
+    ]
+  },
+  "semantics": {
+    "admin": "An explicitly authorized administrator can manage other authors. Author, original creation time and first-publication identity remain unchanged; updatedBy derives from admin principal. isTop is 0 or 1. Blog create still forces isTop 0.",
+    "batchDelete": "At most 100 positive signed int64 IDs; deduplicate, lock in ascending order, and delete all in one transaction. Missing or already deleted item rolls back entire batch.",
+    "list": "Includes drafts, excludes deleted. pageNum default 1, pageSize default 10 and max 100, max offset 10000000. title and summary LIKE treats !, % and underscore literally with parameterized queries. Stable createdAt/id descending; list omits content.",
+    "category": "list includes all extant categories; listAllCategory returns active categories even without published articles.",
+    "serialization": "Long IDs, viewCount and total are decimal strings; dates yyyy-MM-dd HH:mm:ss GMT+8; successful writes return only code/msg.",
+    "errors": "Invalid article fields HTTP 200/code 514; not found HTTP 200/code 513; malformed JSON HTTP 400/code 400; system failure HTTP 500/code 500; authentication and authority errors use real HTTP statuses."
+  },
+  "events": {
+    "status": "candidate; no production relay or consumer integration",
+    "schemaVersion": 2,
+    "publicPayloadAddition": "isTop is a string 0/1. New public facts use schemaVersion 2; existing v1 rows are untouched. Consumers must review and support both versions before delivery.",
+    "firstPublication": "stable publicationFactId and first publishedAt survive later edit, withdrawal and republication; old payloads stay immutable"
+  },
+  "deferred": [
+    "tag/link/upload/comment/counter management",
+    "relay and snapshot export",
+    "front-end adaptation",
+    "real User/Redis/MySQL integration",
+    "global event and permission seed approval"
+  ]
+}

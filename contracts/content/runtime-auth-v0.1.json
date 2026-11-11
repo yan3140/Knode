@@ -32,7 +32,7 @@
     "principal": "UserTokenVerifier.Principal stored under AuthenticationFilter.PRINCIPAL",
     "routes": "Exact GET article list/hot/detail and category/tag public paths are anonymous; other application routes are protected by default. Spoofed identity headers are rejected on public paths.",
     "errors": "HTTP 401/business 401 invalid token/session; HTTP 403/business 403 scope; HTTP 503/business 500 unavailable or malformed session state",
-    "authorization": "scope is not authorization for administrative actions; future business controllers must enforce object ownership and separately approved admin permissions"
+    "authorization": "Admin article/category routes revalidate current permission and subject through User /api/admin/auth/me on every request; *:*:* only if explicitly returned. Blog author methods retain ownership checks."
   },
   "build": {
     "parent": "mvn -N -DskipTests install",
@@ -48,10 +48,10 @@
     "Nacos",
     "real User/Redis/MySQL integration",
     "full OpenTelemetry tracing integration",
-    "production event relay and consumer integration",
-    "backend HTTP and admin permissions"
+    "production event relay and consumer integration"
   ],
   "verification": "loopback HTTP with signed synthetic RSA keys and session substitute; H2 and mocked Redis reader checks. Not a real User/Redis/MySQL integration.",
   "articleSlice": "Blog POST uses verified principal; internal command service enforces ownership for edit/status/delete. Local transaction and immutable fact inserts implemented; no other article HTTP endpoint.",
-  "publicQueryContract": "contracts/content/public-content-query-v0.1.json"
+  "publicQueryContract": "contracts/content/public-content-query-v0.1.json",
+  "adminContract": "contracts/content/admin-article-category-v0.1.json"
 }
