@@ -1,0 +1,57 @@
+{
+  "name": "CONTENT-ADMIN-IMAGE-UPLOAD",
+  "version": "0.1",
+  "status": "implemented candidate; loopback Content/User/storage fixtures and real OSS SDK against loopback only; real OSS and cross-service integration pending",
+  "api": {
+    "method": "POST",
+    "paths": [
+      "/api/admin/upload",
+      "/upload"
+    ],
+    "contentType": "multipart/form-data with valid boundary; exactly one file part named img",
+    "success": {
+      "code": 200,
+      "msg": "上传成功",
+      "data": "one-hour presigned GET URL string"
+    },
+    "compatibility": "Existing frontend must let the HTTP client set multipart boundary; its current explicit Content-Type is not modified in this task."
+  },
+  "authorization": {
+    "flow": "Verify SDK JWT, authoritative session and admin scope, then revalidate subject and current permissions through fixed User /api/admin/auth/me using the same token on every request.",
+    "anyPermission": [
+      "content:upload:add",
+      "content:article:add",
+      "content:article:edit",
+      "*:*:*"
+    ],
+    "failure": "Invalid/revoked session 401; scope or permission denied 403; session/User unavailable or malformed 503/code 500. No storage call on auth failure."
+  },
+  "validation": {
+    "file": "At most 1048576 bytes; multipart request at most 1114112 bytes including boundaries and headers; at most two parts can be parsed and exactly one img file is accepted. Malformed or missing multipart/part yields 400/code 400; oversized request/file yields 413/code 413.",
+    "content": "JPEG or PNG identified from bytes, decoded using JDK image readers; PNG chunk CRC and termination checked; JPEG must terminate correctly and decode without warning. Reject invalid/unsupported content with HTTP 200/code 507. Claimed MIME and filename do not determine format.",
+    "dimensions": "Each side <=4096 and total <=4194304 pixels; image sample format and band count are bounded; no more than two concurrent image validations. Decoder memory remains subject to JDK implementation overhead.",
+    "metadata": "Original validated bytes are uploaded unchanged, so embedded image metadata such as EXIF is retained. User-supplied filename is never used in the object key or Content-Disposition."
+  },
+  "storage": {
+    "implementation": "Aliyun OSS Java SDK 3.18.3, V4 signature, HTTPS and certificate verification. Writes are capped at ten concurrent operations with no queue; an outer five-second deadline and SDK request timeout both apply. Connection-pool wait 500 ms, connect 1500 ms, read 2500 ms; no proxy system properties, redirects or automatic retries.",
+    "object": "Object key is UTC yyyy/MM/dd plus random UUID and detected .png or .jpg. Upload Content-Type matches bytes, Content-Length is exact and Content-Disposition is inline. Presigned GET URL expires approximately one hour after signing.",
+    "failure": "Unavailable, disabled, saturated, timed-out or failed storage yields HTTP 503/code 500 with generic message. A timeout/failure after OSS accepted a PUT may leave an orphan object; caller retry is not automatically safe or idempotent.",
+    "logs": "Do not log object paths, raw request/response, credentials or presigned URLs. Default logging disables com.aliyun.oss and Apache HTTP wire/header logs, and limits MVC response-body logging to INFO; deployments must not re-enable sensitive SDK/wire/body logging."
+  },
+  "configuration": {
+    "KNODE_CONTENT_UPLOAD_ENABLED": "false by default; only true/false accepted",
+    "KNODE_CONTENT_UPLOAD_ENDPOINT": "required if enabled; exact HTTPS origin https://oss-{region}.aliyuncs.com with no userinfo, port, query or fragment",
+    "KNODE_CONTENT_UPLOAD_REGION": "required if enabled; lowercase OSS region identifier matching endpoint",
+    "KNODE_CONTENT_UPLOAD_BUCKET": "required if enabled; 3..63 lowercase bucket-name characters",
+    "OSS_ACCESS_KEY_ID": "required when enabled; read by the OSS SDK environment provider, never serialized",
+    "OSS_ACCESS_KEY_SECRET": "required when enabled; read by the OSS SDK environment provider, never serialized",
+    "OSS_SESSION_TOKEN": "optional SDK environment-provider session token",
+    "startup": "Disabled with no configuration starts normally; a valid authorized request gets 503/code 500. Enabled with incomplete or invalid settings or absent SDK credentials fails startup with generic message. No credentials are checked in disabled mode."
+  },
+  "verification": "Loopback Content HTTP with synthetic signed auth and User fixture; storage stub for HTTP plus the production SDK adapter and synthetic credentials against loopback fake OSS, including redirect/error/timeout and bounded concurrency. No actual OSS, User, Redis, MySQL or VM integration.",
+  "deferred": [
+    "real OSS endpoint, credentials and bucket policy verification",
+    "frontend multipart boundary repair under separate ownership",
+    "comments, counters, relay, snapshot, homepage and operations APIs"
+  ]
+}

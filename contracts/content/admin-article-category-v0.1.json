@@ -58,11 +58,12 @@
     "firstPublication": "stable publicationFactId and first publishedAt survive later edit, withdrawal and republication; old payloads stay immutable"
   },
   "deferred": [
-    "upload/comment/counter management",
+    "comment/counter management",
     "relay and snapshot export",
     "front-end adaptation",
     "real User/Redis/MySQL integration",
     "global event and permission seed approval"
   ],
-  "metadataContract": "contracts/content/tag-link-metadata-v0.1.json"
+  "metadataContract": "contracts/content/tag-link-metadata-v0.1.json",
+  "uploadContract": "contracts/content/upload-v0.1.json"
 }

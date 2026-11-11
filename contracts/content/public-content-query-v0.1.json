@@ -42,7 +42,7 @@
   },
   "schema": "New installs use manual db/content-article-schema.sql; 02B installs require manual db/content-metadata-02c-upgrade.sql after existing earlier upgrades. Neither runs automatically. Native MySQL migration is unverified.",
   "deferred": [
-    "other private/admin operations beyond implemented article/category/tag/link scope",
+    "other private/admin operations beyond implemented article/category/tag/link/upload scope",
     "relation aggregation",
     "comments",
     "view count updates",
