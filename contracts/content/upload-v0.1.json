@@ -52,6 +52,6 @@
   "deferred": [
     "real OSS endpoint, credentials and bucket policy verification",
     "frontend multipart boundary repair under separate ownership",
-    "comments, counters, relay, snapshot, homepage and operations APIs"
+    "counters, relay, snapshot, homepage and operations APIs"
   ]
 }

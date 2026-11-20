@@ -155,8 +155,9 @@
     "visibility": "future",
     "snapshot": "future",
     "ops": "future",
-    "commentsCountingFrontend": "future",
+    "commentsCountingFrontend": "Comment local HTTP and candidate facts are implemented; comment relay/consumers, counters and broader frontend integration remain future.",
     "validation": "H2 transaction tests and local HTTP with signed synthetic keys and session substitute; native MySQL/Redis and real services unverified",
     "articleWrite": "Blog POST plus authorized admin create/edit/status/delete implemented; administrator can manage other authors, while blog author methods retain ownership checks."
-  }
+  },
+  "commentContract": "contracts/content/comment-v0.1.json"
 }

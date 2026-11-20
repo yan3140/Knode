@@ -71,6 +71,8 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
                 || p.equals("/api/blog/category/getCategoryList") || p.equals("/category/getCategoryList")
                 || p.equals("/api/blog/tag/listAllTag") || p.equals("/tag/listAllTag")
                 || p.equals("/api/blog/link/getAllLink") || p.equals("/link/getAllLink")
+                || p.equals("/api/blog/comment/commentList") || p.equals("/comment/commentList")
+                || p.equals("/api/blog/comment/linkCommentList") || p.equals("/comment/linkCommentList")
                 || p.matches("/(?:api/blog/)?article/-?[0-9]+");
     }
 

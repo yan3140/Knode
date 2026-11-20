@@ -53,7 +53,7 @@
                                 </div>
                             </header>
                             <section>
-                                <p v-html="analyzeEmoji(item.content)">{{analyzeEmoji(item.content)}}</p>
+                                <p><template v-for="(part, partIndex) in commentParts(item.content)"><img v-if="part.src" :key="'emoji-'+partIndex" :src="part.src" :alt="part.text"><span v-else :key="'text-'+partIndex">{{part.text}}</span></template></p>
                                 <div v-if="haslogin" class="tmsg-replay" @click="respondMsg(item.id,item.id,item.createBy)">
                                     回复
                                 </div>
@@ -72,7 +72,7 @@
                                             </div>
                                     </header>
                                     <section>
-                                        <p v-html="analyzeEmoji(citem.content)">{{citem.content}}</p>
+                                        <p><template v-for="(part, partIndex) in commentParts(citem.content)"><img v-if="part.src" :key="'emoji-'+partIndex" :src="part.src" :alt="part.text"><span v-else :key="'text-'+partIndex">{{part.text}}</span></template></p>
                                         <div v-show="haslogin" class="tmsg-replay" @click="respondMsg(item.id,citem.id,citem.createBy)">
                                             回复
                                         </div>
@@ -214,24 +214,22 @@
           choseEmoji:function(inner){
               this.textarea +='[' + inner + ']';
           },
-          analyzeEmoji:function(cont){//编译表情替换成图片展示出来
-              var pattern1 = /\[[\u4e00-\u9fa5]+\]/g;
-                var pattern2 = /\[[\u4e00-\u9fa5]+\]/;
-                var content = cont.match(pattern1);
-                var str = cont;
-                if(content){
-                    for(var i=0;i<content.length;i++){
-                        for(var j=0;j<this.OwOlist.length;j++){
-                            if("["+this.OwOlist[j].title +"]" == content[i]){
-                                var src = this.OwOlist[j].url;
-                                break;
-                            }
-                        }
-                        str = str.replace(pattern2,'<img src="static/img/emot/image/'+src+'"/>');
-                    }
-                    // console.log(str);
-                }
-                return str;
+          commentParts:function(content){
+              var text = typeof content === 'string' ? content : '';
+              var pattern = /\[([\u4e00-\u9fa5]+)\]/g;
+              var parts = [], last = 0, match;
+              while ((match = pattern.exec(text)) !== null) {
+                  if (match.index > last) parts.push({text:text.slice(last, match.index)});
+                  var known = null;
+                  for (var i = 0; i < this.OwOlist.length; i++) {
+                      if (this.OwOlist[i].title === match[1]) { known = this.OwOlist[i]; break; }
+                  }
+                  if (known) parts.push({text:match[0], src:'static/img/emot/image/'+known.url});
+                  else parts.push({text:match[0]});
+                  last = pattern.lastIndex;
+              }
+              if (last < text.length) parts.push({text:text.slice(last)});
+              return parts.length ? parts : [{text:''}];
           },
           //发送留言
           sendMsg:function(){//留言

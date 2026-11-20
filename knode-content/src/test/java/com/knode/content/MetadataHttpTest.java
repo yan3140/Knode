@@ -48,7 +48,7 @@ class MetadataHttpTest {
     @BeforeEach void setup() {
         TOKEN.set(AuthenticationHttpTest.token("admin",600)); PERMS.set(List.of("*:*:*")); PROTOCOL.set(true);
         AuthenticationHttpTest.STATE.set(SessionCodec.encode(new Session(1,AuthenticationHttpTest.SID,ACTOR,"admin","ACTIVE",Instant.now().getEpochSecond()+1800)));
-        for(String table:List.of("content_metadata_target","content_metadata_job","content_link","content_write_fence","content_article_event","content_article_tag","content_article","content_tag","content_category"))
+        for(String table:List.of("content_comment_event","content_comment","content_comment_limit","content_metadata_target","content_metadata_job","content_link","content_write_fence","content_article_event","content_article_tag","content_article","content_tag","content_category"))
             db.execute("DROP TABLE IF EXISTS "+table);
         new ResourceDatabasePopulator(new ClassPathResource("db/content-article-schema.sql")).execute(db.getDataSource());
         db.update("INSERT INTO content_category(id,name,status) VALUES(2,'Java','0')");

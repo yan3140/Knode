@@ -1,0 +1,92 @@
+{
+  "name": "CONTENT-COMMENT-AND-EVENTS",
+  "version": "0.1",
+  "status": "candidate implementation; H2 and synthetic loopback fixtures only; real MySQL/User/Redis and consumer integration unverified",
+  "api": {
+    "write": {
+      "method": "POST",
+      "paths": [
+        "/api/blog/comment",
+        "/comment"
+      ],
+      "authentication": "verified JWT and live authoritative session with blog scope; actor comes only from principal",
+      "fields": [
+        "type",
+        "articleId",
+        "rootId",
+        "toCommentId",
+        "toCommentUserId",
+        "content"
+      ],
+      "success": {
+        "code": 200,
+        "msg": "操作成功"
+      },
+      "rules": "type 0 article or 1 friend; rootId -1 for roots; numeric or decimal-string integer IDs accepted; fractions and overflow rejected. Root toCommentId and toCommentUserId may be null or -1. A reply requires positive rootId and toCommentId; supplied toCommentUserId must match the actual target author. Ignore client id/actor/audit/deleted fields.",
+      "friendSentinel": "For type 1, absent/null/0 and exact historical sentinel 1 normalize to articleId null; any other positive articleId is invalid. Sentinel 1 never selects an article or an article notification recipient."
+    },
+    "read": {
+      "method": "GET",
+      "articlePaths": [
+        "/api/blog/comment/commentList",
+        "/comment/commentList"
+      ],
+      "friendPaths": [
+        "/api/blog/comment/linkCommentList",
+        "/comment/linkCommentList"
+      ],
+      "parameters": "articleId required positive for article reads; friend read accepts absent/null/0/1 as the same independent space. pageNum default 1; pageSize default 10, maximum 100; offset maximum 10000000.",
+      "shape": "data has rows, total decimal string, profileLookupLimited boolean. Root comments paginate by createdAt/id; children are ordered by rootId/createdAt/id and include only current-page roots and same visible scope. Existing CommentVo fields use camelCase, long IDs as decimal strings and GMT+8 yyyy-MM-dd HH:mm:ss; username and toCommentUserName may be null with userInfoStatus/toCommentUserInfoStatus FOUND/MISSING/UNAVAILABLE. Content is original text.",
+      "budget": "Per request at most 100 roots and independently at most 500 children. More than 500 children returns HTTP 413/code 515 without a partial success. At most 100 distinct profile IDs are looked up in one bounded batch; if more are needed, unqueried profiles are UNAVAILABLE and profileLookupLimited=true while all comments are returned. Empty page performs no User call. A future thread paging flow is needed for oversized threads."
+    },
+    "errors": "Empty content HTTP 200/code 506; invalid thread/input HTTP 200/code 515; missing/draft/withdrawn/deleted article HTTP 200/code 513; commenting disabled HTTP 403/code 403; malformed JSON or numeric overflow/fraction HTTP 400/code 400; limiter unavailable HTTP 503/code 500; limiter denial HTTP 429/code 429 and Retry-After seconds.",
+    "content": "Maximum 4000 UTF-16 units; blank, NUL and malformed surrogate sequences rejected. Stored and returned as original text. Browser clients must render as text; the authorized message.vue component uses Vue interpolation and fixed local emoji assets instead of v-html."
+  },
+  "transactions": {
+    "write": "READ COMMITTED transaction takes content_write_fence first, locks the article then root/target comments in ascending ID order. It verifies public/not-deleted article and isComment=1, plus same type, scope and actual root relationship. Comment and immutable event commit together; no external service is called while holding the fence.",
+    "read": "READ COMMITTED transaction takes the same fence, checks visibility and reads page plus children before release; the subsequent User profile lookup is outside the transaction. A response racing a withdrawal is linearized at the DB snapshot and may complete after withdrawal. All future article/comment writers must follow this fence protocol.",
+    "limits": "No comment write-count cap is imposed by the read budget. Fence serialization may reduce throughput; no global snapshot/export guarantee is made."
+  },
+  "events": {
+    "table": "content_comment_event",
+    "identity": "One immutable event per new comment, eventId UUID, aggregateType COMMENT, aggregateId/commentId decimal strings, independent sourceRevision 1; no change to article revision or article facts.",
+    "article": [
+      "CommentCreated",
+      "CommentReplied"
+    ],
+    "friend": [
+      "LinkCommentCreated",
+      "LinkCommentReplied"
+    ],
+    "payload": [
+      "commentId",
+      "articleId",
+      "rootCommentId",
+      "toCommentId",
+      "actorId",
+      "receiverId",
+      "commentType",
+      "contentPreview"
+    ],
+    "semantics": "rootCommentId and toCommentId use -1 for roots. Article root receiver is article author; article reply receiver is actual target author. Friend events use null articleId and null receiverId and must not enter the future article-notification channel. Preview is at most 500 Unicode code points; full body and session/token data are excluded. Validated request ID is carried as correlationId. Consumers must escape preview when rendering. Relay, delivery and deduplication by consumers remain future work."
+  },
+  "rateLimit": {
+    "rules": [
+      "10 admitted valid-shaped attempts per user in a 60-second fixed window",
+      "30 admitted valid-shaped attempts per direct socket peer in a 60-second fixed window",
+      "1 admitted valid-shaped attempt for the same user and exact content in a 30-second fixed window"
+    ],
+    "behavior": "Database-clock fixed windows begin with the first admitted attempt; three keys are locked in stable order and updated atomically in a separate transaction before the content transaction. Invalid business target or later write failure still consumes an admitted attempt. A rejected limit check does not create a comment. This is anti-abuse, not durable request idempotency.",
+    "storage": "Only SHA-256 pseudonyms, hit counts and expiry timestamps are retained in content_comment_limit; hashes are pseudonyms, not encryption. Each request removes at most 100 expired rows before checking; cleanup is request-triggered, so expired rows may remain during idle periods.",
+    "peer": "Use only servlet direct numeric socket peer; server.forward-headers-strategy=none. Forwarded and X-Forwarded-For are ignored. Behind a Gateway, users sharing its egress address share the IP quota until a separately approved trusted-proxy contract is implemented."
+  },
+  "schema": "Manual new-install content-article-schema.sql or 02C/02D-only content-comment-03a-upgrade.sql; never auto-applied. Tables content_comment, content_comment_event, content_comment_limit and thread/expiry indexes. Native MySQL DDL and query plans remain unverified.",
+  "verification": "Local H2 MySQL-mode and loopback Content/User provider fixtures with synthetic credentials; deterministic lock interleavings, rate concurrency, rollback and limits. Frontend regression renders the authorized Vue component in Jest/jsdom. No real OSS/User/Redis/MySQL or downstream relay/consumer integration.",
+  "deferred": [
+    "comment moderation/deletion and migration",
+    "cache invalidation and production Redis",
+    "relay, consumer delivery and deduplication",
+    "oversized-thread paging UX",
+    "real Gateway peer identity and native MySQL concurrency/DDL"
+  ]
+}
