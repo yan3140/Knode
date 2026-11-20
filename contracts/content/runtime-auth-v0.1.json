@@ -30,7 +30,7 @@
   "auth": {
     "reference": "contracts/shared/auth/auth-api-v0.2.json",
     "principal": "UserTokenVerifier.Principal stored under AuthenticationFilter.PRINCIPAL",
-    "routes": "Exact GET article list/hot/detail, category/tag, approved link and comment-list public paths are anonymous; other routes are protected by default. Comment POST requires blog scope. Spoofed identity headers are rejected.",
+    "routes": "Exact public GET routes and exact article counter PUT paths are anonymous; other routes are protected by default. Comment POST requires blog scope. Spoofed identity headers are rejected.",
     "errors": "HTTP 401/business 401 invalid token/session; HTTP 403/business 403 scope; HTTP 503/business 500 unavailable or malformed session state",
     "authorization": "Admin article/category/tag/link/upload routes revalidate current permission and subject through User /api/admin/auth/me on every request; *:*:* only if explicitly returned. Blog author methods retain ownership checks."
   },
@@ -43,7 +43,6 @@
   "notImplemented": [
     "community/search/knowledge integration",
     "production event protocol",
-    "counter tasks",
     "Nacos",
     "real User/Redis/MySQL integration",
     "full OpenTelemetry tracing integration",
@@ -55,5 +54,6 @@
   "adminContract": "contracts/content/admin-article-category-v0.1.json",
   "metadataContract": "contracts/content/tag-link-metadata-v0.1.json",
   "uploadContract": "contracts/content/upload-v0.1.json",
-  "commentContract": "contracts/content/comment-v0.1.json"
+  "commentContract": "contracts/content/comment-v0.1.json",
+  "counterContract": "contracts/content/counter-v0.1.json"
 }

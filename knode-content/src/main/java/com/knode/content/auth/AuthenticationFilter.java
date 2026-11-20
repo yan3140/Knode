@@ -64,8 +64,10 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
     }
 
     private static boolean isPublicRead(HttpServletRequest request) {
-        if (!"GET".equals(request.getMethod())) return false;
         String p = request.getRequestURI();
+        if ("PUT".equals(request.getMethod()))
+            return p.matches("/(?:api/blog/)?article/updateViewCount/[^/]{1,64}");
+        if (!"GET".equals(request.getMethod())) return false;
         return p.equals("/api/blog/article/articleList") || p.equals("/article/articleList")
                 || p.equals("/api/blog/article/hotArticleList") || p.equals("/article/hotArticleList")
                 || p.equals("/api/blog/category/getCategoryList") || p.equals("/category/getCategoryList")

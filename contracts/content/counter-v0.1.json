@@ -1,0 +1,104 @@
+{
+  "name": "CONTENT-ARTICLE-COUNTER",
+  "version": "0.1",
+  "status": "candidate implementation; H2 and isolated fakeredis/Lua fixtures only; native Redis 7, MySQL, Gateway and consumers not verified",
+  "api": {
+    "method": "PUT",
+    "paths": [
+      "/api/blog/article/updateViewCount/{id}",
+      "/article/updateViewCount/{id}"
+    ],
+    "authorization": "Only these exact PUT patterns are anonymous; the existing filter rejects forged identity headers before public-route handling.",
+    "input": "One positive signed-64-bit decimal id; User-Agent optional, at most one header and 512 UTF-8 bytes. Missing UA is the empty string. Client identity is the numeric direct socket peer, not Forwarded or X-Forwarded-For.",
+    "success": {
+      "code": 200,
+      "msg": "操作成功"
+    },
+    "visibility": "Only a published and non-deleted article increments. Missing, draft, withdrawn and deleted articles return the legacy success without increment; attempts still consume the fixed-window quotas.",
+    "errors": "Invalid id or UA returns HTTP 200/code 514; forged identity headers HTTP 401/code 401; rate limit HTTP 429/code 429 with Retry-After seconds; disabled or unavailable database/Redis, invalid Redis state or overflow HTTP 503/code 500. No server stack, credential, IP or UA is returned.",
+    "limits": "Fixed windows anchored at first request: 300/60 seconds per direct IP and 20/60 seconds per IP+article. Same article+IP+UA is counted once for 1800 seconds. All admitted attempts consume quotas, including duplicates and hidden/missing article attempts. Not permanent idempotency.",
+    "gateway": "All users sharing a Gateway egress IP share the IP quota and can share dedup fingerprints when their UA matches. A trusted-proxy contract and real Gateway verification are future work."
+  },
+  "configuration": {
+    "enabled": "KNODE_CONTENT_COUNTER_ENABLED defaults false. Disabled writes return 503; reads use SQL. Worker defaults false via KNODE_CONTENT_COUNTER_WORKER_ENABLED; enabling worker while counter is disabled fails startup.",
+    "requiredWhenEnabled": [
+      "KNODE_CONTENT_COUNTER_REDIS_HOST",
+      "KNODE_CONTENT_COUNTER_REDIS_PORT",
+      "KNODE_CONTENT_COUNTER_REDIS_USERNAME",
+      "KNODE_CONTENT_COUNTER_REDIS_PASSWORD"
+    ],
+    "isolation": "Separate standalone Lettuce connection factory, separate username and password from auth Redis; mandatory TLS and normal peer verification, JVM truststore. Numeric IPv4/IPv6 literal only to avoid request-path DNS: certificate must include the corresponding IP subject alternative name. Redis Cluster is not supported by these multi-key scripts.",
+    "bounds": "TCP connect timeout 400ms, TLS handshake timeout 500ms, command timeout 800ms; native connection sharing and automatic reconnect are disabled. Database lock/transaction timeout 3 seconds for hits and 5 seconds for each flush; JDBC connect/socket bounds still belong in deployment configuration.",
+    "worker": "KNODE_CONTENT_COUNTER_WORKER_BATCH default 10, range 1..10; KNODE_CONTENT_COUNTER_WORKER_DELAY_MS default 5000, range 1000..60000. Each iteration claims only one entry, bounded by batch; worker is off by default.",
+    "redisVersion": "Redis 7+ required for redis.acl_check_cmd write-permission preflight. Missing capability fails closed. Actual Redis 7 behavior and least-privilege ACL have not yet been validated natively."
+  },
+  "keys": {
+    "prefix": "knode:<KNODE_ENVIRONMENT>:v1:content:views:",
+    "counts": "counts is a Redis HASH mapping canonical article ID string to exact nonnegative signed-int64 decimal string; no expiry.",
+    "dirty": "dirty is a Redis SORTED SET: member is canonical article ID, score is eligible/lease time in Redis server epoch milliseconds. Claims use a 30-second lease; count plus exact score is the cleanup token. No global SCAN/KEYS.",
+    "rate": "rate:ip:<sha256> and rate:article:<sha256> are expiring STRING counters with 60-second TTL.",
+    "visitor": "visitor:<sha256> is an expiring STRING with 1800-second TTL. Hashes use length-prefixed SHA-256 inputs and are pseudonyms, not encryption; raw peer, UA and token are never stored as keys.",
+    "privacy": "No old keys or auth Redis credentials are used."
+  },
+  "algorithm": {
+    "admission": "READ COMMITTED SQL transaction locks only the article row, checks current visibility and uses bounded Redis Lua before releasing the row; it never obtains or holds the global content fence. Redis script linearizes rate admission, dedup and an accepted increment. A concurrent withdrawal waits for this row or commits first; if first, the hit is not counted.",
+    "initialization": "Under the article lock the SQL count is passed as a baseline. Lua never overwrites dirty state: absent count with dirty marker, invalid stored count, or dirty count below SQL baseline fails closed. If clean Redis is absent or behind, the baseline initializes/advances before an accepted increment.",
+    "exactness": "IDs and counts are validated canonical decimal strings, incremented one digit at a time with no Lua double conversion; long overflow and invalid key types, TTLs, ranges, inputs and Redis 7 write ACLs are checked before any write.",
+    "noRollback": "Redis scripts are isolated, not rollback transactions: an unexpected OOM, server failure or command failure after a write can leave partial effects. Dirty is added before count growth to favor recovery; a late dedup/rate failure or timeout has an indeterminate outcome and client retries can count again. Investigate and reconcile; do not claim exactly-once.",
+    "flush": "Claim a bounded due member by advancing its lease, freeze exact absolute count and lease score, then in a new READ COMMITTED SQL transaction acquire content_write_fence first and the article row second. Persist max(SQL,snapshot); only growth increments counter_revision and inserts the immutable counter event. After commit, clear dirty only when both count and lease still match. If count changed, make the member immediately eligible; if the process dies or cleanup fails, the 30-second lease permits retry.",
+    "fairness": "A failed or corrupt head is leased for 30 seconds so later due entries can be claimed; invalid entries remain dirty and generate a generic warning. SQL rollback cannot clear dirty. SQL rows for withdrawn/deleted articles still receive previously accepted counts; event visibility records the current state and includes no body. A physically missing row remains dirty for operator investigation.",
+    "read": "List/detail/hot first query visible SQL rows without a surrounding SQL transaction, then perform one bounded HMGET and use max(SQL,valid Redis) per row. Missing/invalid/unavailable Redis falls back to SQL. Hot candidates and order remain based on persisted SQL values.",
+    "durability": "Redis accepted increments not yet persisted in SQL can be lost if Redis itself loses acknowledged data, including persistence or failover loss. Use appropriately durable isolated Redis and explicitly reconcile; no cross-store exactly-once guarantee is made."
+  },
+  "event": {
+    "table": "content_article_counter_event",
+    "identity": "ArticleCounterChanged, schemaVersion 1, eventId UUID, aggregateType ARTICLE_COUNTER, aggregateId article ID, sourceRevision equals the independent counterRevision; unique (article_id,counter_revision).",
+    "payload": [
+      "articleId",
+      "viewCount",
+      "counterRevision"
+    ],
+    "visibility": "PUBLIC, WITHDRAWN or DELETED at SQL flush time. Consumer must independently honor visibility/tombstones and never resurrect hidden content. Counter revision is not article content sourceRevision.",
+    "delivery": "Insert-only local fact; no Relay, consumer, ACK, dead-letter or replay is implemented."
+  },
+  "permissions": {
+    "redisKeyPattern": "~knode:<KNODE_ENVIRONMENT>:v1:content:views:* on a dedicated non-auth account",
+    "redisCommands": [
+      "AUTH",
+      "HELLO",
+      "PING",
+      "CLIENT SETINFO (when emitted by Lettuce)",
+      "EVAL",
+      "EVALSHA",
+      "TYPE",
+      "GET",
+      "PTTL",
+      "SET",
+      "INCR",
+      "HGET",
+      "HMGET",
+      "HSET",
+      "ZSCORE",
+      "ZRANGEBYSCORE",
+      "ZADD",
+      "ZREM",
+      "ZCARD",
+      "TIME"
+    ],
+    "redisNote": "No broad @all, SCAN, KEYS, FLUSHDB, FLUSHALL or auth namespace access. Exact client-handshake privileges and redis.acl_check_cmd behavior require native Redis 7+ verification.",
+    "sql": "Counter path requires SELECT on needed content_article columns and UPDATE(view_count,counter_revision) on that table; SELECT and an appropriate locking-read privilege (UPDATE is one option) on content_write_fence; INSERT on content_article_counter_event. Read-only event SELECT is optional for audit; never grant counter-event UPDATE/DELETE. Existing content features need their own grants; verify column-level locking privileges on native MySQL."
+  },
+  "schema": "Fresh install: manual db/content-article-schema.sql. Existing 03A: manual db/content-counter-04a-upgrade.sql. No migration runs automatically; native MySQL DDL, privilege behavior and query plans are unverified.",
+  "boundedDrain": [
+    "Block both PUT aliases at every ingress and direct entry for all instances; verify no in-flight counter requests or retries remain. If this cannot be proven, do not call the result settled.",
+    "Keep Redis/MySQL available and run at least one configured counter worker. Observe only the exact dirty key with ZCARD; an isolated operator may use bounded ZRANGE dirty 0 9 WITHSCORES and HGET counts <id> for investigation.",
+    "Poll ZCARD with a fixed interval and explicit maximum rounds/deadline, sized for the initial backlog, batch<=10 and the 30-second lease. Example: every 5 seconds, at most 120 rounds for a suitably small backlog; do not infer success from one shutdown batch.",
+    "Confirm zero after all in-flight calls are gone and again after at least one lease interval, with worker/Redis/MySQL healthy. If the deadline expires, pending remains or no progress occurs, stop and investigate corrupt/missing members or failures; never manually clear dirty to fabricate completion.",
+    "After zero, compare a controlled sample of SQL counts and immutable counter events, document Redis persistence/failover assumptions, and only then coordinate the next migration step."
+  ],
+  "verification": "H2 MySQL mode, real loopback Content HTTP, and fakeredis/Lua via a test-only loopback RESP substitute. fakeredis lacks redis.acl_check_cmd so its test server installs an allow/deny shim; it does not verify actual Redis ACL, TLS, persistence or native script behavior. No real MySQL/Redis/User/OSS or Gateway connection was made.",
+  "references": {
+    "redisLuaApi": "https://redis.io/docs/latest/develop/interact/programmability/lua-api/",
+    "mysqlLockingReads": "https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html"
+  }
+}

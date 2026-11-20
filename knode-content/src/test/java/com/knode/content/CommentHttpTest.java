@@ -55,7 +55,7 @@ class CommentHttpTest {
     @BeforeEach void setup() {
         MODE.set("ok"); TOKENS.set(0); BATCHES.set(0); MAX_IDS.set(0); PROTOCOL.set(true);
         PROFILE_ENTERED.set(null); PROFILE_RELEASE.set(null); session(ACTOR,"blog");
-        for(String t:List.of("content_comment_event","content_comment","content_comment_limit","content_metadata_target","content_metadata_job","content_link","content_write_fence","content_article_event","content_article_tag","content_article","content_tag","content_category"))
+        for(String t:List.of("content_article_counter_event","content_comment_event","content_comment","content_comment_limit","content_metadata_target","content_metadata_job","content_link","content_write_fence","content_article_event","content_article_tag","content_article","content_tag","content_category"))
             db.execute("DROP TABLE IF EXISTS "+t);
         new ResourceDatabasePopulator(new ClassPathResource("db/content-article-schema.sql")).execute(db.getDataSource());
         db.update("INSERT INTO content_category(id,name,status) VALUES(2,'Java','0')");

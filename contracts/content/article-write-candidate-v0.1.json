@@ -82,7 +82,7 @@
     ],
     "redelivery": "preserve original eventId, sourceRevision and payload",
     "transport": "relay disabled until shared protocol and isolated transport are approved",
-    "counter": "counterRevision is separate from content sourceRevision",
+    "counter": "CounterRevision is independent of content sourceRevision. Local ArticleCounterChanged v1 facts are in the separate counter stream; see counter-v0.1.json.",
     "correlation": "correlationId is optional and must match [A-Za-z0-9._-]{1,64}; it is the validated X-Request-Id. traceContext is omitted in this slice, not a fabricated span.",
     "snapshot": "Public facts contain category:{id,name}, active tags:[{id,name}]; soft-deleted tag relations remain for history but are omitted. viewCount and counterRevision come from the persisted row. Dates are ISO-8601 UTC.",
     "bounds": "title <=256 chars, content <=1000000 chars, summary <=1024 chars, thumbnail <=2048 chars, tags <=50 distinct positive IDs; Jackson document <=8000000 input units and string <=2000000 chars; serialized event <=8000000 UTF-8 bytes",
@@ -155,9 +155,10 @@
     "visibility": "future",
     "snapshot": "future",
     "ops": "future",
-    "commentsCountingFrontend": "Comment local HTTP and candidate facts are implemented; comment relay/consumers, counters and broader frontend integration remain future.",
+    "commentsCountingFrontend": "Comment and counter local facts are implemented; relay/consumers and broader frontend integration remain future.",
     "validation": "H2 transaction tests and local HTTP with signed synthetic keys and session substitute; native MySQL/Redis and real services unverified",
     "articleWrite": "Blog POST plus authorized admin create/edit/status/delete implemented; administrator can manage other authors, while blog author methods retain ownership checks."
   },
-  "commentContract": "contracts/content/comment-v0.1.json"
+  "commentContract": "contracts/content/comment-v0.1.json",
+  "counterContract": "contracts/content/counter-v0.1.json"
 }
