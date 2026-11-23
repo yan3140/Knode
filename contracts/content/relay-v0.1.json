@@ -1,0 +1,97 @@
+{
+  "name": "CONTENT-EVENT-RELAY-AND-OPS",
+  "version": "0.1",
+  "status": "Candidate. Local Content HTTP, H2, Redis substitute and focused native MySQL 8.0.43 checks passed. Native Redis TLS evidence is from an earlier candidate artifact. Final native transport integration, deployment and actual consumers are pending.",
+  "scope": {
+    "facts": [
+      "content_article_event",
+      "content_comment_event",
+      "content_article_counter_event"
+    ],
+    "transaction": "Each new immutable fact and its separate content_event_delivery row are inserted in the same SQL transaction. Business requests do not call Redis or consumers. LinkCommentCreated/Replied remain local facts with LOCAL_ONLY delivery state and cannot be redelivered.",
+    "delivery": "Article v1/v2, article CommentCreated/Replied v1 and ArticleCounterChanged v1 are eligible. Facts, eventIds, content/counter revisions and publicationFactId are never rewritten by the relay.",
+    "notIncluded": [
+      "public legacy aggregation facade",
+      "actual downstream consumers or their retries",
+      "consumer ACK/pending handling",
+      "G6 visibility/snapshot cursor or global commit watermark"
+    ]
+  },
+  "transport": {
+    "stream": "knode:<KNODE_ENVIRONMENT>:v1:events:content",
+    "command": "XADD <exact-stream> * event <original-UTF8-JSON>; exactly one field, no MAXLEN/XTRIM, no consumer groups or key scans.",
+    "bytes": "The stored JSON is read without reserialization and encoded as UTF-8 for every append. Provision MySQL utf8mb4 consistently. Same eventId and original payload are reused on all retries and manual redelivery; Stream ID is only transport location.",
+    "budget": "At most 8,000,000 UTF-8 bytes per stored event, checked by database byte length before loading and again before publishing. The supported 1,000,000-character article body was exercised with a multi-byte synthetic fixture.",
+    "validation": "Known family/version/type and exact allowed field sets only. Public article payload is bounded, with scalar/null summary and thumbnail, typed category/tags and scalar publicationFactId. Hidden/tombstone payload forbids body and arbitrary nested reason. Article comments allow only the <=500-code-point preview, never full comment content. Counter facts contain only their three fields. Invalid, oversized or unsupported facts remain visible as DEAD and are never published.",
+    "trace": "At new fact creation the frozen EventTraceContext.captureCurrent may add traceContext containing only SDK-validated traceparent; optional correlationId remains validated. Existing stored facts are never updated. Relay never captures its own thread context as producer and never injects token, sid, baggage or tracestate.",
+    "completion": "SENT means an XADD response was recorded, not that any consumer received, ACKed or applied the fact. At-least-once delivery may duplicate and no strict ordering is promised."
+  },
+  "state": {
+    "tables": {
+      "content_event_delivery": "One mutable row per eventId; family/type, PENDING/LEASED/SENT/DEAD/LOCAL_ONLY, attempts, total_attempts, due_at, unique lease token, last error, delivered_at and Stream ID. Due and state indexes support bounded claims.",
+      "content_event_attempt_audit": "One row per lease token with eventId, attempt number, claimed/finished DB times, LEASED/SENT/RETRY/DEAD/EXPIRED_UNKNOWN outcome, fixed error category and optional Stream ID. The audit excludes event JSON and authentication credentials.",
+      "content_event_replay_audit": "Append-only transactional operator audit. SHA-256 of replayRequestId is the primary key. The original bounded ID, eventId, verified service subject and DB time are retained. Plain read checks the exact original ID, event and actor. Cross-event races resolve through the unique key and a fresh read after rollback.",
+      "content_event_backfill": "One row per family with bounded cyclic event-id cursor, completed pass count, failure count, latest fixed error and failure time. A cursor is only a scan position, never a commit watermark."
+    },
+    "claim": "READ COMMITTED short transaction uses the indexed due_at order and a row lock. After any lock wait it reads fresh DB time before starting the 30-second lease and audit. For sent/failed it first locks the delivery row, then checks the current DB time and exact lease token in a separate conditional UPDATE. Redis is called only after the SQL transaction commits; stale or expired leases cannot mark completion.",
+    "retry": "Each claim increments attempt and creates its attempt audit. Transient DATABASE/TRANSPORT failure retries after 1,2,4,8 seconds; fifth failure or repeated expired claims reaches DEAD. Invalid/missing fact is immediately DEAD. DB failure while marking leaves the lease for recovery; a successful XADD whose SQL mark failed can append the same original event again. Corrupt due entries with missing lease audit or invalid counters become visible DEAD (AUDIT_MISSING/INVALID_STATE) rather than blocking later events.",
+    "expired": "Reclaim or authorized replay of an expired lease records EXPIRED_UNKNOWN for the old attempt. Active leases cannot be overwritten. Unknown transport outcome is never represented as consumer completion.",
+    "history": "Each family scans at most 20 event IDs from its saved cursor in a separate transaction and wraps for another pass. Insert is idempotent and never resets existing delivery state. After all pre-upgrade writers are drained, require a full successful subsequent sweep per family and reconcile; concurrent lower IDs are revisited on a later sweep. No created_at or MAX(id) is used as a commit watermark.",
+    "historyFailureIsolation": "A failed family scan rolls back its cursor and registration, records fixed SCAN_FAILED/failure_count when DB is available, and does not block other families or already registered events. Conflicting source facts remain unchanged; failure is not presented as a completed pass."
+  },
+  "ops": {
+    "routes": [
+      {
+        "method": "GET",
+        "path": "/internal/v1/ops/outbox/summary",
+        "permission": "ops:read"
+      },
+      {
+        "method": "POST",
+        "path": "/internal/v1/ops/outbox/{eventId}/redeliver",
+        "permission": "ops:redeliver"
+      }
+    ],
+    "identity": "Only these exact methods and unambiguous raw paths use ServiceTokenVerifier. Other internal path or method variants fail closed, including implicit HEAD and matrix/encoded variants. Each handler independently requires the verified machine principal and its own operation permission before querying or writing. Exactly one Authorization: Bearer service JWT, issuer knode-user, token_use service, audience knode-content and required permission; no token header, forged identity/actor header or client-supplied actor. Other business/admin routes do not accept machine credentials.",
+    "keys": "KNODE_CONTENT_OPS_PUBLIC_KEYS is optional while ops is disabled; format kid=<absolute X.509 RSA public-key path>[;kid2=<path>], up to four distinct kids, >=2048 bits. Overlap supports rotation. A malformed nonempty configuration fails startup; absent keys make a syntactically valid ops request fail 503.",
+    "summary": "Returns registered state counts and per-family scan cursor/pass/failure status; DB failure returns 503, not fabricated zero. SENT is not downstream completion. Counts and pass counters are decimal strings.",
+    "redelivery": "Body contains exactly one replayRequestId string [A-Za-z0-9._-]{1,64}. Duplicate JSON fields and actor fields are rejected. A new valid request transactionally audits the verified service subject and schedules the same fact for asynchronous delivery. Repeating the same ID/event/subject is idempotent even after its delivery row has been claimed. An ID reused for a different event or subject returns 409. A new request for an active lease or a LOCAL_ONLY fact returns 409.",
+    "errors": "Invalid input HTTP 400; bad/missing/incorrect token HTTP 401; valid service token without permission HTTP 403; missing fact 404; conflict or active lease 409; DB/config dependency failure 503/code 500."
+  },
+  "configuration": {
+    "enabled": "KNODE_CONTENT_RELAY_ENABLED defaults false; KNODE_CONTENT_RELAY_WORKER_ENABLED defaults false and cannot be true when relay is disabled. Queuing new facts does not require Redis.",
+    "requiredWhenEnabled": [
+      "KNODE_CONTENT_RELAY_REDIS_HOST",
+      "KNODE_CONTENT_RELAY_REDIS_PORT",
+      "KNODE_CONTENT_RELAY_REDIS_USERNAME",
+      "KNODE_CONTENT_RELAY_REDIS_PASSWORD"
+    ],
+    "isolation": "Standalone independent Lettuce connection and distinct username/password from auth and counter Redis; TLS peer verification required. Numeric IPv4/IPv6 only, certificate must contain IP SAN. No Redis Cluster support or shared/legacy key access.",
+    "bounds": "TCP 400ms, TLS handshake 500ms, command 800ms, no auto reconnect. SQL claim/mark/history/replay transaction timeouts 5s; deployment must separately bound JDBC connection and socket timeouts.",
+    "worker": "KNODE_CONTENT_RELAY_BATCH default 10 range 1..10; KNODE_CONTENT_RELAY_HISTORY_BATCH default 10 range 1..20 per family; KNODE_CONTENT_RELAY_DELAY_MS default 5000 range 1000..60000. Worker disabled by default."
+  },
+  "permissions": {
+    "redisKey": "~knode:<environment>:v1:events:content on a dedicated relay account",
+    "redisCommands": [
+      "XADD",
+      "AUTH",
+      "HELLO",
+      "PING",
+      "CLIENT SETINFO when emitted by client"
+    ],
+    "redisNote": "No XTRIM, MAXLEN, XGROUP, XREADGROUP, XACK, SCAN, KEYS, DEL or ACL administration. Exact handshake and least privilege require native verification.",
+    "sql": "Relay needs SELECT on the three fact tables, SELECT/INSERT/UPDATE on delivery and attempt audit, SELECT/UPDATE on backfill, and SELECT/INSERT on replay audit. Locking reads are confined to delivery and backfill. Replay audit uses ordinary SELECT and INSERT. Fact creation keeps its existing INSERT grants. Immutable fact tables and replay audit do not need UPDATE or DELETE."
+  },
+  "deployment": [
+    "Review and apply the manual 05A schema using the approved deployment process before starting any new writer; never auto-run it.",
+    "Roll out new writers to all instances and drain pre-05A writers. Keep relay worker disabled until the exact independent Stream account/key and capacity plan are approved.",
+    "Enable worker in a controlled environment. Inspect summary: all three families must complete a successful scan after old writers drain, with no unresolved SCAN_FAILED; reconcile fact-to-delivery coverage. Cyclic cursors are not global commit watermarks and stream publication is not consumer completion.",
+    "Retain immutable facts, all attempt/replay audits, failure rows and the Stream. Do not clean or trim while real consumer groups, pending state, lowest safe watermarks, snapshot handoff and retention windows remain undefined."
+  ],
+  "verification": "The standalone clean package passed 140 tests with zero failures, errors or skips. Local H2 MySQL mode uses synthetic JWTs and loopback HTTP. An isolated fakeredis RESP substitute checks exact Stream bytes and absence of trimming. Focused probes against fresh loopback-only MySQL 8.0.43 with synthetic data exercised the 05A schema, actual lease transactions after lock waits, and the packaged replay service with SELECT/INSERT only on replay audit. The latter covered concurrent idempotency after a delivery lock wait, verified actor conflict, expired attempt repair and rollback after a cross-event duplicate. Controller-provided native Redis TLS and MySQL evidence covers an earlier candidate artifact. Final native transport integration, real downstream consumers and deployment remain pending.",
+  "operationsAndRetention": {
+    "backlog": "Use authenticated summary state counts, backfill lastError/failureCount and delivery attempt categories; separately monitor oldest due time as an age signal, never a commit watermark. Alert on growing PENDING/LEASED age, DEAD, EXPIRED_UNKNOWN, SCAN_FAILED and repeated mark failures using fixed low-cardinality labels.",
+    "capacity": "Monitor database fact/state/audit table sizes, Redis exact-stream XLEN and memory usage, write rates, disk capacity and replication/persistence health with a separate restricted read-only operator account. Thresholds and collection intervals require operator configuration; no eventId, user, payload or token is a metric label.",
+    "retention": "No automatic fact, state, attempt-audit, replay-audit or Stream cleanup is implemented. Keep all until real consumer-group handoff, pending entries, lowest safe watermarks, snapshot continuity and retention windows are explicitly approved."
+  }
+}

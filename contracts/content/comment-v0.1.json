@@ -68,7 +68,7 @@
       "commentType",
       "contentPreview"
     ],
-    "semantics": "rootCommentId and toCommentId use -1 for roots. Article root receiver is article author; article reply receiver is actual target author. Friend events use null articleId and null receiverId and must not enter the future article-notification channel. Preview is at most 500 Unicode code points; full body and session/token data are excluded. Validated request ID is carried as correlationId. Consumers must escape preview when rendering. Relay, delivery and deduplication by consumers remain future work."
+    "semantics": "rootCommentId and toCommentId use -1 for roots. Article root receiver is article author; article reply receiver is actual target author. Friend events use null articleId and null receiverId and must not enter the future article-notification channel. Preview is at most 500 Unicode code points; full body and session/token data are excluded. Validated request ID is carried as correlationId. Consumers must escape preview when rendering. Candidate Relay publishes article comments; LinkComment stays LOCAL_ONLY. Consumer delivery and deduplication remain unverified."
   },
   "rateLimit": {
     "rules": [
@@ -85,8 +85,9 @@
   "deferred": [
     "comment moderation/deletion and migration",
     "cache invalidation and production Redis",
-    "relay, consumer delivery and deduplication",
+    "actual consumer delivery and deduplication",
     "oversized-thread paging UX",
     "real Gateway peer identity and native MySQL concurrency/DDL"
-  ]
+  ],
+  "relayContract": "contracts/content/relay-v0.1.json"
 }

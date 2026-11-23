@@ -45,16 +45,17 @@
     "limits": "Connect 400ms, each request <=1000ms, entire two-call lookup <=2000ms; each response <=3145728 bytes; 100 IDs maximum; no retries or token cache. A 3 MiB response budget covers 100 profiles with both 2048-unit fields JSON escaped, plus envelope.",
     "privacy": "No browser token, passwords, email, raw upstream body or credential in public output or intentional logs"
   },
-  "schema": "New installs use manual db/content-article-schema.sql. Existing 02B installs require the separately planned 02C upgrade; existing 02C/02D installs require manual db/content-comment-03a-upgrade.sql. Existing 03A also requires manual db/content-counter-04a-upgrade.sql for counter events. None run automatically; native MySQL execution remains unverified.",
+  "schema": "New installs use manual db/content-article-schema.sql. Existing 02B installs require the separately planned 02C upgrade; existing 02C/02D installs require manual db/content-comment-03a-upgrade.sql. Existing 03A also requires manual db/content-counter-04a-upgrade.sql for counter events. Existing 04A also requires manual db/content-relay-05a-upgrade.sql before new fact writers. None run automatically; native MySQL execution remains unverified.",
   "deferred": [
     "other private/admin operations beyond implemented article/category/tag/link/upload scope",
     "relation aggregation",
-    "relay",
+    "native relay/consumer integration",
     "consistent snapshot export",
     "Nacos and full OTel",
     "front end",
     "real User/Redis/MySQL integration"
   ],
   "commentContract": "contracts/content/comment-v0.1.json",
-  "counterContract": "contracts/content/counter-v0.1.json"
+  "counterContract": "contracts/content/counter-v0.1.json",
+  "relayContract": "contracts/content/relay-v0.1.json"
 }

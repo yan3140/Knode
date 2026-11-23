@@ -52,7 +52,8 @@
   "deferred": [
     "real OSS endpoint, credentials and bucket policy verification",
     "frontend multipart boundary repair under separate ownership",
-    "relay, snapshot, homepage and operations APIs"
+    "snapshot, homepage and public operations aggregation APIs"
   ],
-  "counterContract": "contracts/content/counter-v0.1.json"
+  "counterContract": "contracts/content/counter-v0.1.json",
+  "relayContract": "contracts/content/relay-v0.1.json"
 }

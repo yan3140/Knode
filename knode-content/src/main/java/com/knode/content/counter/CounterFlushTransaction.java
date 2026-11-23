@@ -3,6 +3,8 @@ package com.knode.content.counter;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.knode.content.metadata.ContentWriteFence;
+import com.knode.content.relay.DeliveryRegistration;
+import com.knode.content.relay.FactTrace;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -20,8 +22,10 @@ public class CounterFlushTransaction {
     private final JdbcTemplate db;
     private final ContentWriteFence fence;
     private final ObjectMapper json;
-    public CounterFlushTransaction(JdbcTemplate db,ContentWriteFence fence,ObjectMapper json) {
-        this.db=db; this.fence=fence; this.json=json;
+    private final DeliveryRegistration delivery;
+    private final FactTrace trace;
+    public CounterFlushTransaction(JdbcTemplate db,ContentWriteFence fence,ObjectMapper json,DeliveryRegistration delivery,FactTrace trace) {
+        this.db=db; this.fence=fence; this.json=json; this.delivery=delivery; this.trace=trace;
     }
     private record Row(long count,long revision,String status,boolean deleted) {}
     @Transactional(isolation=Isolation.READ_COMMITTED,propagation=Propagation.REQUIRES_NEW,timeout=5)
@@ -45,10 +49,11 @@ public class CounterFlushTransaction {
         event.put("eventId",eventId); event.put("eventType","ArticleCounterChanged"); event.put("schemaVersion",1);
         event.put("producer","knode-content"); event.put("aggregateType","ARTICLE_COUNTER");
         event.put("aggregateId",Long.toString(snapshot.articleId())); event.put("sourceRevision",Long.toString(revision));
-        event.put("visibility",visibility); event.put("occurredAt",now.toString()); event.put("payload",payload);
+        event.put("visibility",visibility); event.put("occurredAt",now.toString()); trace.capture(event); event.put("payload",payload);
         try {
             db.update("INSERT INTO content_article_counter_event(event_id,article_id,counter_revision,payload,created_at) VALUES(?,?,?,?,?)",
                     eventId,snapshot.articleId(),revision,json.writeValueAsString(event),Timestamp.from(now));
+            delivery.register(eventId,"COUNTER","ArticleCounterChanged");
         } catch(JsonProcessingException failure) { throw new CounterUnavailable(); }
         return true;
     }

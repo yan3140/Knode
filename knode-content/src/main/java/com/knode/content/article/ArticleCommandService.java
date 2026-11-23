@@ -2,6 +2,8 @@ package com.knode.content.article;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.knode.content.relay.DeliveryRegistration;
+import com.knode.content.relay.FactTrace;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
@@ -18,7 +20,12 @@ public class ArticleCommandService {
     private final JdbcTemplate db;
     private final ObjectMapper json;
     private final com.knode.content.metadata.ContentWriteFence fence;
-    public ArticleCommandService(JdbcTemplate db, ObjectMapper json, com.knode.content.metadata.ContentWriteFence fence) { this.db = db; this.json = json; this.fence=fence; }
+    private final DeliveryRegistration delivery;
+    private final FactTrace trace;
+    public ArticleCommandService(JdbcTemplate db,ObjectMapper json,com.knode.content.metadata.ContentWriteFence fence,
+            DeliveryRegistration delivery,FactTrace trace) {
+        this.db=db; this.json=json; this.fence=fence; this.delivery=delivery; this.trace=trace;
+    }
     private record Row(long id, String title, String content, String summary, String thumbnail,
                        long category, String top, String comment, String status, String author, Instant created,
                        long revision, String fact, Instant published, boolean deleted, long viewCount, long counterRevision) {}
@@ -217,6 +224,7 @@ public class ArticleCommandService {
         event.put("aggregateId",Long.toString(row.id())); event.put("sourceRevision",Long.toString(row.revision()));
         event.put("publicationFactId",row.fact()); event.put("occurredAt",Instant.now().toString()); event.put("visibility",visibility);
         if (correlationId != null && correlationId.matches("[A-Za-z0-9._-]{1,64}")) event.put("correlationId",correlationId);
+        trace.capture(event);
         event.put("payload",payload);
         try {
             String serialized=json.writeValueAsString(event);
@@ -224,6 +232,7 @@ public class ArticleCommandService {
                 throw new ArticleFailure(400,"Article event exceeds size limit");
             db.update("INSERT INTO content_article_event(event_id,article_id,source_revision,event_type,payload,created_at) VALUES(?,?,?,?,?,?)",
                 eventId,row.id(),row.revision(),type,serialized,Timestamp.from(Instant.now()));
+            delivery.register(eventId,"ARTICLE",type);
         } catch (JsonProcessingException e) { throw new IllegalStateException("Event serialization failed",e); }
     }
 }

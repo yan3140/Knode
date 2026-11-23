@@ -4,6 +4,7 @@ import com.knode.auth.AuthFailure;
 import com.knode.auth.Session;
 import com.knode.auth.SessionCodec;
 import com.knode.auth.UserTokenVerifier;
+import com.knode.content.relay.MachineAuth;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -24,10 +25,10 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
     public static final String PRINCIPAL = AuthenticationFilter.class.getName() + ".principal";
     private final UserTokenVerifier verifier;
     private final SessionReader sessions;
+    private final MachineAuth machines;
 
-    public AuthenticationFilter(UserTokenVerifier verifier, SessionReader sessions) {
-        this.verifier = verifier;
-        this.sessions = sessions;
+    public AuthenticationFilter(UserTokenVerifier verifier,SessionReader sessions,MachineAuth machines) {
+        this.verifier=verifier; this.sessions=sessions; this.machines=machines;
     }
 
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
@@ -39,6 +40,13 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
         try {
             if (Collections.list(request.getHeaderNames()).stream().anyMatch(AuthenticationFilter::forbiddenHeader))
                 throw new AuthFailure(401);
+            String permission=machinePermission(request);
+            if(permission!=null) {
+                request.setAttribute(MachineAuth.PRINCIPAL,machines.authenticate(request,permission));
+                chain.doFilter(request,response);
+                return;
+            }
+            if (isInternalPath(request)) throw new AuthFailure(401);
             if (isPublicRead(request)) {
                 chain.doFilter(request, response);
                 return;
@@ -61,6 +69,20 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
             return;
         }
         chain.doFilter(request, response);
+    }
+
+    private static String machinePermission(HttpServletRequest request) {
+        String path=request.getRequestURI();
+        if("GET".equals(request.getMethod()) && path.equals("/internal/v1/ops/outbox/summary")) return "ops:read";
+        if("POST".equals(request.getMethod()) && path.matches("/internal/v1/ops/outbox/[A-Za-z0-9._-]{1,64}/redeliver")) return "ops:redeliver";
+        return null;
+    }
+
+    private static boolean isInternalPath(HttpServletRequest request) {
+        return isInternalPath(request.getRequestURI()) || isInternalPath(request.getServletPath()) || isInternalPath(request.getPathInfo());
+    }
+    private static boolean isInternalPath(String path) {
+        return path!=null && (path.equals("/internal") || path.startsWith("/internal/") || path.startsWith("/internal;"));
     }
 
     private static boolean isPublicRead(HttpServletRequest request) {

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.knode.auth.UserTokenVerifier;
 import com.knode.content.metadata.ContentWriteFence;
+import com.knode.content.relay.DeliveryRegistration;
+import com.knode.content.relay.FactTrace;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
@@ -19,8 +21,10 @@ public class CommentCommandService {
     private final JdbcTemplate db;
     private final ContentWriteFence fence;
     private final ObjectMapper json;
-    public CommentCommandService(JdbcTemplate db,ContentWriteFence fence,ObjectMapper json) {
-        this.db=db; this.fence=fence; this.json=json;
+    private final DeliveryRegistration delivery;
+    private final FactTrace trace;
+    public CommentCommandService(JdbcTemplate db,ContentWriteFence fence,ObjectMapper json,DeliveryRegistration delivery,FactTrace trace) {
+        this.db=db; this.fence=fence; this.json=json; this.delivery=delivery; this.trace=trace;
     }
     private record Article(String author,String status,boolean deleted,String allowComment) {}
     private record Comment(long id,String type,Long article,long root,String author,boolean deleted) {}
@@ -78,10 +82,12 @@ public class CommentCommandService {
         event.put("aggregateType","COMMENT"); event.put("aggregateId",Long.toString(id)); event.put("sourceRevision","1");
         event.put("producer","knode-content"); event.put("occurredAt",now.toInstant().toString());
         if (correlationId!=null && correlationId.matches("[A-Za-z0-9._-]{1,64}")) event.put("correlationId",correlationId);
+        trace.capture(event);
         event.put("payload",payload);
         try {
             db.update("INSERT INTO content_comment_event(event_id,comment_id,source_revision,event_type,payload,created_at) VALUES(?,?,1,?,?,?)",
                 eventId,id,eventType,json.writeValueAsString(event),now);
+            delivery.register(eventId,"COMMENT",eventType);
         } catch(JsonProcessingException failure) { throw new IllegalStateException("Comment event serialization failed"); }
         return id;
     }

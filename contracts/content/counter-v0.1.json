@@ -59,7 +59,7 @@
       "counterRevision"
     ],
     "visibility": "PUBLIC, WITHDRAWN or DELETED at SQL flush time. Consumer must independently honor visibility/tombstones and never resurrect hidden content. Counter revision is not article content sourceRevision.",
-    "delivery": "Insert-only local fact; no Relay, consumer, ACK, dead-letter or replay is implemented."
+    "delivery": "Insert-only local fact is registered for the disabled-by-default candidate Relay; actual consumer delivery, ACK and replay integration remain unverified."
   },
   "permissions": {
     "redisKeyPattern": "~knode:<KNODE_ENVIRONMENT>:v1:content:views:* on a dedicated non-auth account",
@@ -100,5 +100,6 @@
   "references": {
     "redisLuaApi": "https://redis.io/docs/latest/develop/interact/programmability/lua-api/",
     "mysqlLockingReads": "https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html"
-  }
+  },
+  "relayContract": "contracts/content/relay-v0.1.json"
 }

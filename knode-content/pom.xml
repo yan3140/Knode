@@ -4,6 +4,7 @@
   <artifactId>knode-content</artifactId>
   <dependencies>
     <dependency><groupId>com.lx</groupId><artifactId>knode-auth</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>com.lx</groupId><artifactId>knode-observability</artifactId><version>${project.version}</version></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-redis-reactive</artifactId></dependency>
