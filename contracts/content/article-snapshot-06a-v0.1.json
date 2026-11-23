@@ -1,0 +1,282 @@
+{
+  "name": "CONTENT-ARTICLE-VISIBILITY-SNAPSHOT-AND-CHANGES",
+  "version": "0.1",
+  "status": "candidate pending controller and consumer review",
+  "scope": "Content is the provider. Search and Knowledge machine consumers can check present public visibility and rebuild their own public projections. DTOs are bare JSON with Cache-Control: no-store. Current reads and exports use the authoritative Content database. No live Redis view count, caching, User or downstream calls are part of these endpoints.",
+  "authorization": {
+    "machine": "Exactly one Authorization Bearer JWT verified by the shared ServiceTokenVerifier. Issuer knode-user, token_use service, audience knode-content, and the exact operation's permission. Verification occurs in the filter and matching permission plus verified principal are required by each handler.",
+    "permissionGrant": "The trusted issuer decides service permission grants. Allowed purpose values express the public processing purpose and cannot elevate a privilege. Handle and cursor ownership use the exact verified service sub. The Content API neither issues tokens nor accepts client-supplied users or viewers.",
+    "boundaries": "Reject user tokens, forged actor/identity/viewer headers, duplicate/combined Authorization, mixed credentials, path variants and implicit HEAD. Existing G5 operations and public/admin user authentication keep their own routes and behavior.",
+    "trust": "Use the existing KNODE_CONTENT_OPS_PUBLIC_KEYS kid-to-local-public-key ring with up to four overlapping RSA kids. Service JWT rotation is independent of the snapshot cursor signer."
+  },
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/internal/v1/content/articles/visibility:batch",
+      "permission": "content:visibility:read",
+      "request": {
+        "articleIds": [
+          "101",
+          "102",
+          "103"
+        ],
+        "purpose": "PUBLIC_SEARCH"
+      },
+      "response": {
+        "items": [
+          {
+            "articleId": "101",
+            "sourceRevision": "7",
+            "visibility": "PUBLIC",
+            "decision": "READABLE"
+          },
+          {
+            "articleId": "102",
+            "sourceRevision": "8",
+            "visibility": "WITHDRAWN",
+            "decision": "DENIED"
+          },
+          {
+            "articleId": "103",
+            "sourceRevision": null,
+            "visibility": "MISSING",
+            "decision": "DENIED"
+          }
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/internal/v1/content/articles/snapshots:batch",
+      "permission": "content:snapshot:read",
+      "request": {
+        "articleIds": [
+          "101",
+          "102"
+        ]
+      },
+      "response": {
+        "items": [
+          {
+            "articleId": "101",
+            "sourceRevision": "7",
+            "visibility": "PUBLIC",
+            "decision": "READABLE",
+            "snapshot": {
+              "articleId": "101",
+              "sourceRevision": "7",
+              "publicationFactId": "a6baa93b-73f0-46ef-adde-80f97cc4df56",
+              "authorId": "42",
+              "title": "Cache notes",
+              "summary": null,
+              "content": "# Cache notes",
+              "thumbnail": null,
+              "isTop": "0",
+              "isComment": "1",
+              "category": {
+                "id": "2",
+                "name": "Java"
+              },
+              "tags": [
+                {
+                  "id": "3",
+                  "name": "Redis"
+                }
+              ],
+              "createTime": "2020-02-02T00:00:00Z",
+              "publishedAt": "2021-02-02T00:00:00Z",
+              "viewCount": "9007199254740995",
+              "counterRevision": "8"
+            }
+          },
+          {
+            "articleId": "102",
+            "sourceRevision": "8",
+            "visibility": "WITHDRAWN",
+            "decision": "DENIED"
+          }
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/internal/v1/content/article-snapshots",
+      "permission": "content:snapshot:read",
+      "request": {
+        "clientRequestId": "rebuild-01",
+        "purpose": "SEARCH_REBUILD"
+      },
+      "response": {
+        "snapshotId": "e0ae913c-ffd3-4154-8810-dd4e81398caf",
+        "incrementalCursor": "opaque-start",
+        "expiresAt": "2026-11-23T02:30:00Z"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/internal/v1/content/article-snapshots/{snapshotId}",
+      "permission": "content:snapshot:read",
+      "query": {
+        "cursor": "omit for first page",
+        "limit": 100
+      },
+      "response": {
+        "snapshotId": "e0ae913c-ffd3-4154-8810-dd4e81398caf",
+        "items": [
+          {
+            "articleId": "101",
+            "sourceRevision": "7",
+            "publicationFactId": "a6baa93b-73f0-46ef-adde-80f97cc4df56",
+            "authorId": "42",
+            "title": "Cache notes",
+            "summary": null,
+            "content": "# Cache notes",
+            "thumbnail": null,
+            "isTop": "0",
+            "isComment": "1",
+            "category": {
+              "id": "2",
+              "name": "Java"
+            },
+            "tags": [
+              {
+                "id": "3",
+                "name": "Redis"
+              }
+            ],
+            "createTime": "2020-02-02T00:00:00Z",
+            "publishedAt": "2021-02-02T00:00:00Z",
+            "viewCount": "9007199254740995",
+            "counterRevision": "8"
+          }
+        ],
+        "nextCursor": null,
+        "done": true,
+        "incrementalCursor": "opaque-start"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/internal/v1/content/article-changes",
+      "permission": "content:snapshot:read",
+      "query": {
+        "cursor": "opaque-start",
+        "limit": 100
+      },
+      "response": {
+        "commits": [
+          {
+            "commitSequence": "41",
+            "events": [
+              {
+                "eventId": "ffcf75db-6dfc-4dac-97c9-2f91b78881eb",
+                "eventType": "ArticleVisibilityChanged",
+                "schemaVersion": 2,
+                "producer": "knode-content",
+                "aggregateType": "ARTICLE",
+                "aggregateId": "101",
+                "sourceRevision": "8",
+                "publicationFactId": "a6baa93b-73f0-46ef-adde-80f97cc4df56",
+                "occurredAt": "2026-11-23T02:00:00Z",
+                "visibility": "WITHDRAWN",
+                "payload": {
+                  "articleId": "101"
+                }
+              }
+            ]
+          }
+        ],
+        "nextCursor": "opaque-next",
+        "done": true,
+        "cursorExpiresAt": "2026-11-30T02:15:00Z"
+      }
+    }
+  ],
+  "currentReads": {
+    "inputs": "The exact fields shown above are required. Visibility purpose accepts PUBLIC_SEARCH or PUBLIC_KNOWLEDGE. Current snapshots have no purpose field and are public-only. Require a JSON object with no duplicate, extra, null or trailing fields, no POST query parameters and up to 8192 request bytes.",
+    "ids": "Accept 1–100 IDs before deduplication. Each is a canonical positive int64 decimal JSON string (1..9223372036854775807, no leading zero). Deduplicate by first occurrence and return one item per distinct ID in that order.",
+    "visibility": "PUBLIC/READABLE means current status is public and the row is not deleted. WITHDRAWN, DRAFT, DELETED and MISSING are DENIED. A nonpublic nondeleted row is WITHDRAWN if a publication ID, publication time, or an immutable article fact proves public history. Otherwise DRAFT means no public history is recorded. Return sourceRevision for all known rows, including withdrawn/deleted/draft, and null for MISSING.",
+    "projection": "Only the PUBLIC item contains snapshot. Each DTO projects explicit columns and active tags in ID order from the same nonlocking SQL read view, including canonical decimal IDs/revisions/counters, original UTC createTime and persisted viewCount/counterRevision. A truly unknown publishedAt or publicationFactId stays null. No hidden content column is returned. A valid singleton article fits the normal budget. An over-budget batch is HTTP 413 and may be split."
+  },
+  "export": {
+    "create": "Accept clientRequestId matching [A-Za-z0-9._-]{1,64}, and SEARCH_REBUILD or KNOWLEDGE_REBUILD. A committed active request repeats the same handle, cutoff token and expiry for the same verified subject and exact request ID and purpose. The same subject and ID with a different purpose is 409. A busy creation or cleanup may return 429 with Retry-After: 5. Retrying the same key is safe.",
+    "durability": "The handle UUID is bound in the database to machine subject, purpose, epoch, cutoff and absolute database-clock expiry. The capture, header and public-only rows commit together. Pages use stable article ID keyset order, database-backed JSON and a typed owner/purpose/handle-bound HMAC cursor. No replica-local cache or sticky session is required. Provision the same key and epoch on every serving replica.",
+    "pages": "limit defaults to 100 and must be 1..100. Unknown/duplicate query fields are invalid. Use the returned nextCursor, omitting cursor on the first page. For the same live handle/cursor/limit, retry yields the same page. done=true with nextCursor=null terminates even a zero-item export. All pages repeat the same incrementalCursor. Expiry is HTTP 410 even after cleanup, never an empty completed page.",
+    "historicalAccess": "The frozen copy contains only articles public at its cut. Withdrawals after the cut do not edit the frozen data. This is a privileged reconstruction input. A consumer serving current results must recheck authoritative current visibility and deny on verification failure."
+  },
+  "commitCut": {
+    "writers": "Every emit by ArticleCommandService (including the metadata compensation worker) and CounterFlushTransaction holds ContentWriteFence until commit. ArticleChangeJournal takes one sequence on the first eligible fact per SQL transaction and records a batch header plus ordered fact references in that same transaction as the domain and existing immutable facts. An uncommitted sequence is not observable and a rollback undoes it. Draft-only edits and comment/link events do not create public projection batches.",
+    "capture": "The export holds a distinct nonblocking admission row, never ContentWriteFence. InnoDB REPEATABLE READ plain consistent queries read the head, article rows and tags from one database transaction view. All projection facts of a concurrent transaction are either in that view or entirely beyond its watermark. Materialization reads and writes bounded chunks without network dependencies or a business write lock. This relies on InnoDB and one authoritative primary/DataSource, not read-replica routing.",
+    "metadata": "A tag mutation and its compensation jobs commit together. Current SQL views already include dictionary changes. A tag change before the snapshot cut can already be present in its baseline. Pending jobs after the cut generate an ordered higher revision of each still-public article. Repeated jobs read current tags. A withdrawal/deletion has its own ordered tombstone.",
+    "migration": "Deploy additive schema before starting any 06A writer. Keep all G6 API instances disabled until every earlier article/tag/metadata/counter writer is drained and journal-aware writers are the only writers. Start consumer rebuilds from a newly issued full authoritative snapshot. Historical G5 facts keep their IDs, payloads and relay states. No historical ordinal or publication is synthesized. Older public rows with unknown provenance may later edit, withdraw, republish and delete without manufacturing first-publication identity/time. New v2 non-first PUBLIC facts can carry explicit null provenance for these rows. Existing v1 and ArticlePublished validation stay unchanged.",
+    "rollbackOrRestore": "Disable the G6 API before reverting to any non-journaling writers or restoring/truncating the database. Before re-enabling, drain old writers again and change the shared epoch on all instances. Existing signed tokens with the old epoch return 410 with the same signer. If the key must also be changed, old signatures are invalid and consumers must rebootstrap."
+  },
+  "incremental": {
+    "cursor": "Only a signed CHANGES cursor from an authorized export or previous feed response can start this request. It binds subject, purpose, kind, epoch, last complete commit and a database-clock expiry. Sequence strings are diagnostic/order metadata. Consumers must treat cursors as opaque.",
+    "page": "limit counts complete commits and is 1..100, default 100. A response also caps the total at 100 original facts and 8,000,000 item bytes. It takes an ordered prefix without splitting a SQL commit batch. Events embed the original JSON after validating known G5 event shape and identity. Missing/corrupt journal rows return 503 without advancing a cursor.",
+    "poll": "Empty success has commits=[], done=true and a valid nextCursor at the same position with refreshed expiry. done means caught up to the database head observed for this request, not a closed feed. Retry an unadvanced cursor safely. Newly committed batches can extend a retried tail page but already returned event IDs and content stay fixed.",
+    "consumer": "Build a separate consumer projection. Import all snapshot pages and commit their writes before advancing page cursors. Then apply each incremental page of complete batches transactionally and checkpoint nextCursor only after durable application. Gate content by strictly newer sourceRevision. Persist tombstone revision even when deleting indexed text, so older bodies cannot restore it. Merge counterRevision independently and never create or reveal a body from a counter event. Use the producer export and feed for reconstruction without replaying old notification or indexing side effects.",
+    "retention": "The journal holds references to immutable Article and Counter facts only. History is append-only in this slice. Never remove referenced facts or journal batches without an agreed consumer checkpoint, retention floor and reconciliation plan."
+  },
+  "budgets": {
+    "capture": "One creation/cleanup at a time per database using SELECT FOR UPDATE NOWAIT on the export-only gate. At most 4 stored unpruned exports and 256 retained request records. Each export allows 20,000 items, 128,000,000 serialized item bytes and a 20-second SQL transaction budget. Larger exports are rejected atomically with 413. Configure additional JDBC connection and socket timeouts for the deployment.",
+    "read": "Read transactions are bounded to 5 seconds. Page and feed have an 8,000,000 UTF-8 item-byte budget (envelopes stay below 8,100,000 bytes). The copy loop holds at most 20 bounded items at once. Four materializations budget up to 512 MB of item JSON plus SQL indexes, logs and MVCC overhead. Monitor DB disk and MVCC history during capture.",
+    "expiry": "Snapshots live 30 minutes and each successful new/renewed incremental cursor lives 7 days. Cleaner runs every 5 seconds when enabled, reclaiming at most 100 rows and 8 MB of one expired export per pass, and at most 10 aged request records. Pruned request records may stay for 24 hours after expiry, during which their request is still 410. A new clientRequestId is required to restart immediately. An expired handle always remains 410."
+  },
+  "configuration": {
+    "KNODE_CONTENT_SNAPSHOT_API_ENABLED": "false by default. This guards the five internal routes, not the transactional writer journal.",
+    "KNODE_CONTENT_SNAPSHOT_CURSOR_KEY": "Required when API is on. Shared 32-byte secret, canonical base64url without padding. Supply from secret storage and keep it consistent across replicas.",
+    "KNODE_CONTENT_SNAPSHOT_EPOCH": "Required when API is on. Canonical UUID shared across replicas. Rotate it only at a coordinated discontinuity/backfill to force rebootstrap.",
+    "KNODE_CONTENT_SNAPSHOT_CLEANUP_ENABLED": "true by default when the API is enabled. Turning it off preserves expired data and can exhaust storage slots.",
+    "sql": "MySQL 8 InnoDB, utf8mb4, consistent JDBC/DB timezone, one primary. Apply db/content-snapshot-06a-upgrade.sql for G5 incumbents or use db/content-article-schema.sql for new databases. Article and Counter writers need SELECT/UPDATE on change head, INSERT/UPDATE on batch and INSERT on fact reference. Reader needs SELECT on article/categories/tags/relations and immutable facts, plus SELECT on change tables. Exporter needs SELECT/INSERT/UPDATE on snapshot header and SELECT/INSERT on snapshot items. Cleaner also needs DELETE on expired headers/items. Gate locking read needs SELECT and appropriate MySQL locking-read privilege such as UPDATE on that gate only. Neither exporter nor cleaner needs a lock on ContentWriteFence.",
+    "sqlPreflight": "Before enabling the API, verify all participating tables use InnoDB and the service DataSource stays on a single primary. Inspect gate locking permissions, JDBC statement/connection timeouts and utf8mb4 from the same deployment role. Confirm older writers are drained before issuing the first cursor."
+  },
+  "errors": {
+    "shape": {
+      "error": {
+        "code": "DEPENDENCY_UNAVAILABLE",
+        "message": "Content data is unavailable",
+        "retryable": true
+      },
+      "requestId": "request-demo-001"
+    },
+    "codes": {
+      "400": [
+        "INVALID_ARGUMENT"
+      ],
+      "401": [
+        "INVALID_SERVICE_TOKEN"
+      ],
+      "403": [
+        "SERVICE_PERMISSION_DENIED"
+      ],
+      "409": [
+        "IDEMPOTENCY_CONFLICT"
+      ],
+      "410": [
+        "SNAPSHOT_EXPIRED",
+        "CURSOR_EXPIRED"
+      ],
+      "413": [
+        "RESPONSE_TOO_LARGE",
+        "SNAPSHOT_TOO_LARGE"
+      ],
+      "429": [
+        "RATE_LIMITED"
+      ],
+      "503": [
+        "FEATURE_DISABLED",
+        "AUTH_STATE_UNAVAILABLE",
+        "DEPENDENCY_UNAVAILABLE"
+      ]
+    },
+    "observability": "RequestId is validated by the existing filter. A valid local span provides optional traceId. Do not log JSON bodies, Authorization or signed cursor values. Dependency errors return the bounded bare error, never fake READABLE, an empty authorized result or forward progress."
+  },
+  "verification": {
+    "standalone": "mvn -o -f knode-content/pom.xml clean package, 155 tests, 0 failures/errors/skips. 15 G6 tests cover loopback Content HTTP, schema and permissions, transactional rollback/races, stable pages and repeat startup, historical rows, count and metadata versions, expiry, cleanup and byte limits.",
+    "h2": "An isolated JDBC probe reproduced that plain H2 REPEATABLE READ can see later versions on a table first accessed after the watermark query. For G6 tests only, REPEATABLE_READ requests use H2 SERIALIZABLE to model a transaction-wide snapshot. Production continues to use MySQL REPEATABLE READ with consistent reads.",
+    "native": "An owned loopback-only MySQL 8.0.43 database used the G5 schema, synthetic old public rows, additive 06A DDL, and the packaged Content JAR. An uncommitted conflicting request-key row stopped export header insertion after the watermark read. The actual packaged write services committed content and counter mutations over JDBC before the blocker was released. Real loopback machine HTTP verified the old snapshot and new events, rollback without a sequence gap, missing historical publication metadata through edit/withdraw/republish/delete, an unsplit bulk-delete batch, and stable same-key pages after restarting the JAR. The temporary environment was removed.",
+    "jarSha256": "48255d18ffcd18c96a01a58c21ad25ddb1d5ffe0d5a40138ceaa399d86ce488c",
+    "pending": "Controller's independent final verification and consumer contract review, actual Search/Knowledge, and deployment. The isolated native run used fixture grants and synthetic machine keys. No existing MySQL, shared Redis, User, OSS or external consumer was used."
+  }
+}

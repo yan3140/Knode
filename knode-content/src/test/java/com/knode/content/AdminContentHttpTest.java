@@ -56,7 +56,8 @@ class AdminContentHttpTest {
         MODE.set("ok"); PERMS.set(List.of()); CALLS.set(0); PROTOCOL.set(true);
         TOKEN.set(AuthenticationHttpTest.token("admin",600));
         AuthenticationHttpTest.STATE.set(SessionCodec.encode(new Session(1,AuthenticationHttpTest.SID,ACTOR,"admin","ACTIVE",Instant.now().getEpochSecond()+1800)));
-        for (String t:List.of("content_event_backfill","content_event_attempt_audit","content_event_replay_audit","content_event_delivery","content_article_counter_event","content_comment_event","content_comment","content_comment_limit","content_metadata_target","content_metadata_job","content_link","content_write_fence","content_article_event","content_article_tag","content_article","content_tag","content_category"))
+        for (String t:List.of("content_article_snapshot_item","content_article_snapshot","content_article_snapshot_gate",
+                "content_article_change_fact","content_article_change_batch","content_article_change_head","content_event_backfill","content_event_attempt_audit","content_event_replay_audit","content_event_delivery","content_article_counter_event","content_comment_event","content_comment","content_comment_limit","content_metadata_target","content_metadata_job","content_link","content_write_fence","content_article_event","content_article_tag","content_article","content_tag","content_category"))
             db.execute("DROP TABLE IF EXISTS "+t);
         new ResourceDatabasePopulator(new ClassPathResource("db/content-article-schema.sql")).execute(db.getDataSource());
         db.update("INSERT INTO content_category(id,name,status,description) VALUES(2,'Java','0','desc'),(5,'disabled','1','x'),(6,'empty','0','x')");

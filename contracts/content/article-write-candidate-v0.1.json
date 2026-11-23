@@ -64,7 +64,7 @@
   "candidateRules": {
     "transaction": "All article and tag mutations acquire the database write-fence row before business locks in READ COMMITTED transactions. Incompatible or unspecified enclosing transaction isolation fails closed. Article, tag relations, revision, publication identity and immutable event commit or roll back together.",
     "draft": "Draft creation, draft editing, and deletion of never-published drafts emit no public event. Withdrawal and deletion of previously published articles emit no body.",
-    "publicationFact": "publicationFactId is non-null on every locally persisted public fact and assigned once on first publication; publishedAt remains the first publication time",
+    "publicationFact": "For first publication the producer assigns the publicationFactId once and retains publishedAt. Legacy rows already known public may have unknown provenance. Editing or republishing them keeps the original null fields and cannot create a new ArticlePublished. Withdrawals and deletions emit body-free facts.",
     "tombstone": "withdrawal and deletion carry visibility and sourceRevision without body",
     "eventFields": [
       "eventId",
@@ -152,8 +152,8 @@
   },
   "deliveryStatus": {
     "events": "Immutable facts and a disabled-by-default candidate Relay are locally implemented; no native transport or downstream consumer integration verified.",
-    "visibility": "future",
-    "snapshot": "future",
+    "visibility": "G6 candidate machine-only current visibility; see snapshotContract.",
+    "snapshot": "G6 candidate current batch, durable export and committed change feed; see snapshotContract.",
     "ops": "Internal producer summary/redelivery only; public aggregation and consumer operations remain future.",
     "commentsCountingFrontend": "Comment and counter facts can use the candidate Relay; actual consumers and broader frontend integration remain future.",
     "validation": "H2 transaction tests and local HTTP with signed synthetic keys and session substitute; native MySQL/Redis and real services unverified",
@@ -161,5 +161,6 @@
   },
   "commentContract": "contracts/content/comment-v0.1.json",
   "counterContract": "contracts/content/counter-v0.1.json",
-  "relayContract": "contracts/content/relay-v0.1.json"
+  "relayContract": "contracts/content/relay-v0.1.json",
+  "snapshotContract": "contracts/content/article-snapshot-06a-v0.1.json"
 }

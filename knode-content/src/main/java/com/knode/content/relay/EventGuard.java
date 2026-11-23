@@ -24,12 +24,15 @@ public final class EventGuard {
     private final FactTrace trace;
     public EventGuard(FactTrace trace) { this.trace=trace; }
     public void validate(RelayTransaction.Claim claim,String raw) {
+        validate(claim.eventId(),claim.family(),claim.type(),raw);
+    }
+    public void validate(String eventId,String family,String type,String raw) {
         if(raw==null || raw.getBytes(StandardCharsets.UTF_8).length>MAX_BYTES) throw new InvalidEvent();
         try {
             JsonNode e=JSON.readTree(raw);
-            if(!only(e,COMMON) || !claim.eventId().equals(text(e,"eventId")) || !claim.type().equals(text(e,"eventType"))
+            if(!only(e,COMMON) || !eventId.equals(text(e,"eventId")) || !type.equals(text(e,"eventType"))
                     || !"knode-content".equals(text(e,"producer")) || !positive(text(e,"aggregateId"))
-                    || !positive(text(e,"sourceRevision")) || text(e,"occurredAt")==null || !uuid(claim.eventId())
+                    || !positive(text(e,"sourceRevision")) || text(e,"occurredAt")==null || !uuid(eventId)
                     || !e.path("schemaVersion").isIntegralNumber() || !e.path("schemaVersion").canConvertToInt()) throw new InvalidEvent();
             java.time.Instant.parse(text(e,"occurredAt"));
             if(e.has("publicationFactId") && !e.get("publicationFactId").isNull()
@@ -42,10 +45,10 @@ public final class EventGuard {
             JsonNode payload=e.get("payload");
             if(!payloadIsObject(payload)) throw new InvalidEvent();
             int version=e.path("schemaVersion").intValue();
-            switch(claim.family()) {
-                case "ARTICLE" -> article(e,payload,version,claim.type());
-                case "COMMENT" -> comment(e,payload,version,claim.type());
-                case "COUNTER" -> counter(e,payload,version,claim.type());
+            switch(family) {
+                case "ARTICLE" -> article(e,payload,version,type);
+                case "COMMENT" -> comment(e,payload,version,type);
+                case "COUNTER" -> counter(e,payload,version,type);
                 default -> throw new InvalidEvent();
             }
         } catch(InvalidEvent failure) { throw failure; }
@@ -63,11 +66,14 @@ public final class EventGuard {
                 "category","tags","createTime","publishedAt","viewCount","counterRevision"):Set.of("articleId","reason");
         if(!only(p,allowed)) throw new InvalidEvent();
         if(publicFact) {
-            if(text(e,"publicationFactId")==null) throw new InvalidEvent();
+            boolean requiresFirstPublication = version == 1 || "ArticlePublished".equals(type);
+            if (requiresFirstPublication && (text(e,"publicationFactId")==null || text(p,"publishedAt")==null)
+                    || !requiresFirstPublication && (!e.has("publicationFactId") || !p.has("publishedAt")
+                            || !nullableText(p,"publishedAt",64))) throw new InvalidEvent();
             if(!positive(text(p,"authorId")) || text(p,"title")==null || text(p,"title").length()>256
                     || text(p,"content")==null || text(p,"content").length()>1_000_000
                     || !nullableText(p,"summary",1024) || !nullableText(p,"thumbnail",2048)
-                    || !binary(text(p,"isComment")) || text(p,"createTime")==null || text(p,"publishedAt")==null
+                    || !binary(text(p,"isComment")) || text(p,"createTime")==null
                     || !nonnegative(text(p,"viewCount")) || !nonnegative(text(p,"counterRevision"))) throw new InvalidEvent();
             JsonNode category=p.get("category"),tags=p.get("tags");
             if(!only(category,Set.of("id","name")) || !positive(text(category,"id")) || text(category,"name")==null

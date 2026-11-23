@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.knode.content.relay.DeliveryRegistration;
 import com.knode.content.relay.FactTrace;
+import com.knode.content.snapshot.ArticleChangeJournal;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
@@ -22,9 +23,10 @@ public class ArticleCommandService {
     private final com.knode.content.metadata.ContentWriteFence fence;
     private final DeliveryRegistration delivery;
     private final FactTrace trace;
+    private final ArticleChangeJournal changes;
     public ArticleCommandService(JdbcTemplate db,ObjectMapper json,com.knode.content.metadata.ContentWriteFence fence,
-            DeliveryRegistration delivery,FactTrace trace) {
-        this.db=db; this.json=json; this.fence=fence; this.delivery=delivery; this.trace=trace;
+            DeliveryRegistration delivery,FactTrace trace,ArticleChangeJournal changes) {
+        this.db=db; this.json=json; this.fence=fence; this.delivery=delivery; this.trace=trace; this.changes=changes;
     }
     private record Row(long id, String title, String content, String summary, String thumbnail,
                        long category, String top, String comment, String status, String author, Instant created,
@@ -79,7 +81,7 @@ public class ArticleCommandService {
         long id=old.id();
         validateReferences(input);
         Instant now = Instant.now();
-        boolean first = old.fact() == null && "0".equals(input.status());
+        boolean first = "0".equals(input.status()) && !hasPublicHistory(old);
         String fact = first ? UUID.randomUUID().toString() : old.fact();
         Instant published = first ? now : old.published();
         long revision = Math.addExact(old.revision(), 1);
@@ -114,7 +116,8 @@ public class ArticleCommandService {
             validateReferences(old.category(), tags);
         }
         Instant now = Instant.now();
-        boolean first = old.fact() == null && "0".equals(status);
+        boolean wasPublic = hasPublicHistory(old);
+        boolean first = "0".equals(status) && !wasPublic;
         String fact = first ? UUID.randomUUID().toString() : old.fact();
         Instant published = first ? now : old.published();
         db.update("UPDATE content_article SET status=?,updated_at=?,updated_by=?,source_revision=?,publication_fact_id=?,published_at=? WHERE id=?",
@@ -122,7 +125,7 @@ public class ArticleCommandService {
             published == null ? null : Timestamp.from(published), id);
         Row current = load(id, false);
         if (first) emit(current, "ArticlePublished", "PUBLIC", correlationId);
-        else if (fact != null) emit(current, "ArticleVisibilityChanged", "0".equals(status) ? "PUBLIC" : "WITHDRAWN", correlationId);
+        else if (wasPublic) emit(current, "ArticleVisibilityChanged", "0".equals(status) ? "PUBLIC" : "WITHDRAWN", correlationId);
     }
 
     @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
@@ -144,7 +147,7 @@ public class ArticleCommandService {
         long id=old.id();
         db.update("UPDATE content_article SET deleted=1,updated_at=?,updated_by=?,source_revision=? WHERE id=?",
             Timestamp.from(Instant.now()), actor, Math.addExact(old.revision(),1), id);
-        if (old.fact() != null) emit(load(id, false), "ArticleDeleted", "DELETED", correlationId);
+        if (hasPublicHistory(old)) emit(load(id, false), "ArticleDeleted", "DELETED", correlationId);
     }
 
     @Transactional(propagation=org.springframework.transaction.annotation.Propagation.MANDATORY)
@@ -155,6 +158,13 @@ public class ArticleCommandService {
         db.update("UPDATE content_article SET source_revision=? WHERE id=?",Math.addExact(row.revision(),1),id);
         emit(load(id,false),"ArticleContentChanged","PUBLIC",null);
         return true;
+    }
+
+    private boolean hasPublicHistory(Row row) {
+        if ("0".equals(row.status()) || row.fact() != null || row.published() != null) return true;
+        // A withdrawn legacy article may have a tombstone without known first-publication metadata.
+        return Boolean.TRUE.equals(db.queryForObject(
+                "SELECT EXISTS (SELECT 1 FROM content_article_event WHERE article_id=?)", Boolean.class, row.id()));
     }
 
     private Row owned(String actor, long id) {
@@ -215,7 +225,8 @@ public class ArticleCommandService {
             payload.put("authorId",row.author()); payload.put("title",row.title()); payload.put("summary",row.summary());
             payload.put("content",row.content()); payload.put("thumbnail",row.thumbnail()); payload.put("isTop",row.top()); payload.put("isComment",row.comment());
             payload.put("category",Map.of("id",Long.toString(row.category()),"name",category)); payload.put("tags",tags);
-            payload.put("createTime",row.created().toString()); payload.put("publishedAt",row.published().toString());
+            payload.put("createTime",row.created().toString());
+            payload.put("publishedAt",row.published() == null ? null : row.published().toString());
             payload.put("viewCount",Long.toString(row.viewCount())); payload.put("counterRevision",Long.toString(row.counterRevision()));
         }
         Map<String,Object> event = new LinkedHashMap<>();
@@ -228,11 +239,13 @@ public class ArticleCommandService {
         event.put("payload",payload);
         try {
             String serialized=json.writeValueAsString(event);
-            if (serialized.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 8000000)
+            int bytes = serialized.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes > 8_000_000)
                 throw new ArticleFailure(400,"Article event exceeds size limit");
             db.update("INSERT INTO content_article_event(event_id,article_id,source_revision,event_type,payload,created_at) VALUES(?,?,?,?,?,?)",
                 eventId,row.id(),row.revision(),type,serialized,Timestamp.from(Instant.now()));
             delivery.register(eventId,"ARTICLE",type);
+            changes.append(ArticleChangeJournal.Family.ARTICLE,type,eventId,bytes);
         } catch (JsonProcessingException e) { throw new IllegalStateException("Event serialization failed",e); }
     }
 }

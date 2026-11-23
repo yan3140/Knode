@@ -14,7 +14,7 @@
       "public legacy aggregation facade",
       "actual downstream consumers or their retries",
       "consumer ACK/pending handling",
-      "G6 visibility/snapshot cursor or global commit watermark"
+      "G6 visibility/snapshot and increment feed, documented in the snapshot contract"
     ]
   },
   "transport": {
@@ -22,7 +22,7 @@
     "command": "XADD <exact-stream> * event <original-UTF8-JSON>; exactly one field, no MAXLEN/XTRIM, no consumer groups or key scans.",
     "bytes": "The stored JSON is read without reserialization and encoded as UTF-8 for every append. Provision MySQL utf8mb4 consistently. Same eventId and original payload are reused on all retries and manual redelivery; Stream ID is only transport location.",
     "budget": "At most 8,000,000 UTF-8 bytes per stored event, checked by database byte length before loading and again before publishing. The supported 1,000,000-character article body was exercised with a multi-byte synthetic fixture.",
-    "validation": "Known family/version/type and exact allowed field sets only. Public article payload is bounded, with scalar/null summary and thumbnail, typed category/tags and scalar publicationFactId. Hidden/tombstone payload forbids body and arbitrary nested reason. Article comments allow only the <=500-code-point preview, never full comment content. Counter facts contain only their three fields. Invalid, oversized or unsupported facts remain visible as DEAD and are never published.",
+    "validation": "Known family/version/type and exact allowed field sets only. Public article payload is bounded, with scalar/null summary and thumbnail, typed category/tags and scalar publicationFactId. Hidden/tombstone payload forbids body and arbitrary nested reason. Article comments allow only the <=500-code-point preview, never full comment content. Counter facts contain only their three fields. Invalid, oversized or unsupported facts remain visible as DEAD and are never published. G6 non-first v2 public updates of legacy rows can retain null first-publication metadata. ArticlePublished and v1 keep the earlier required fields.",
     "trace": "At new fact creation the frozen EventTraceContext.captureCurrent may add traceContext containing only SDK-validated traceparent; optional correlationId remains validated. Existing stored facts are never updated. Relay never captures its own thread context as producer and never injects token, sid, baggage or tracestate.",
     "completion": "SENT means an XADD response was recorded, not that any consumer received, ACKed or applied the fact. At-least-once delivery may duplicate and no strict ordering is promised."
   },
@@ -93,5 +93,6 @@
     "backlog": "Use authenticated summary state counts, backfill lastError/failureCount and delivery attempt categories; separately monitor oldest due time as an age signal, never a commit watermark. Alert on growing PENDING/LEASED age, DEAD, EXPIRED_UNKNOWN, SCAN_FAILED and repeated mark failures using fixed low-cardinality labels.",
     "capacity": "Monitor database fact/state/audit table sizes, Redis exact-stream XLEN and memory usage, write rates, disk capacity and replication/persistence health with a separate restricted read-only operator account. Thresholds and collection intervals require operator configuration; no eventId, user, payload or token is a metric label.",
     "retention": "No automatic fact, state, attempt-audit, replay-audit or Stream cleanup is implemented. Keep all until real consumer-group handoff, pending entries, lowest safe watermarks, snapshot continuity and retention windows are explicitly approved."
-  }
+  },
+  "snapshotContract": "contracts/content/article-snapshot-06a-v0.1.json"
 }

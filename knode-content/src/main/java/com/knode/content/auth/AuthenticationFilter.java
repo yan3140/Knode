@@ -5,6 +5,8 @@ import com.knode.auth.Session;
 import com.knode.auth.SessionCodec;
 import com.knode.auth.UserTokenVerifier;
 import com.knode.content.relay.MachineAuth;
+import com.knode.content.snapshot.SnapshotFailure;
+import com.knode.content.snapshot.SnapshotRoutes;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -40,8 +42,10 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
         try {
             if (Collections.list(request.getHeaderNames()).stream().anyMatch(AuthenticationFilter::forbiddenHeader))
                 throw new AuthFailure(401);
-            String permission=machinePermission(request);
+            String snapshotPermission = SnapshotRoutes.permission(request);
+            String permission = snapshotPermission == null ? machinePermission(request) : snapshotPermission;
             if(permission!=null) {
+                if (snapshotPermission != null && SnapshotRoutes.viewerHeaderPresent(request)) throw new AuthFailure(401);
                 request.setAttribute(MachineAuth.PRINCIPAL,machines.authenticate(request,permission));
                 chain.doFilter(request,response);
                 return;
@@ -62,6 +66,10 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
             UserTokenVerifier.Principal principal = verifier.validateSession(token, state, scope);
             request.setAttribute(PRINCIPAL, principal);
         } catch (AuthFailure failure) {
+            if (SnapshotRoutes.inNamespace(request)) {
+                SnapshotFailure.writeAuth(request, response, failure.status());
+                return;
+            }
             response.setStatus(failure.status());
             response.setContentType("application/json");
             int code = failure.status() == 503 ? 500 : failure.status();

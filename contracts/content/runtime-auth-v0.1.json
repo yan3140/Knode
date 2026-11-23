@@ -56,5 +56,6 @@
   "uploadContract": "contracts/content/upload-v0.1.json",
   "commentContract": "contracts/content/comment-v0.1.json",
   "counterContract": "contracts/content/counter-v0.1.json",
-  "relayContract": "contracts/content/relay-v0.1.json"
+  "relayContract": "contracts/content/relay-v0.1.json",
+  "snapshotContract": "contracts/content/article-snapshot-06a-v0.1.json"
 }

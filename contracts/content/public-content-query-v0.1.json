@@ -50,12 +50,12 @@
     "other private/admin operations beyond implemented article/category/tag/link/upload scope",
     "relation aggregation",
     "native relay/consumer integration",
-    "consistent snapshot export",
     "Nacos and full OTel",
     "front end",
     "real User/Redis/MySQL integration"
   ],
   "commentContract": "contracts/content/comment-v0.1.json",
   "counterContract": "contracts/content/counter-v0.1.json",
-  "relayContract": "contracts/content/relay-v0.1.json"
+  "relayContract": "contracts/content/relay-v0.1.json",
+  "snapshotContract": "contracts/content/article-snapshot-06a-v0.1.json"
 }
