@@ -33,8 +33,24 @@ export default {
   methods: {
     onCategoryChange(value) { this.form.categoryId = value; this.clearCategoryValidation() },
     clearCategoryValidation() { this.$nextTick(() => { if (this.$refs.articleForm) this.$refs.articleForm.clearValidate('categoryId') }) },
-    submitAs(status) { this.form.status = status; this.submit() },
-    submit() { this.$refs.articleForm.validate(valid => { if (!valid) return; const payload = Object.assign({}, this.form, { categoryId: Number(this.form.categoryId) }); if (!payload.summary) payload.summary = payload.content.replace(/[#>*`_\-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150); this.saving = true; publishArticle(payload).then(() => { this.$message.success(payload.status === '0' ? '文章已发布' : '草稿已保存'); const user = JSON.parse(localStorage.getItem('userInfo') || 'null'); this.$router.push({ path: '/UserProfile', query: { userId: user && user.id } }) }).finally(() => { this.saving = false }) }) }
+    submitAs(status) { if (this.saving) return; this.form.status = status; this.submit() },
+    submit() {
+      if (this.saving) return
+      this.$refs.articleForm.validate(valid => {
+        if (!valid) return
+        const payload = Object.assign({}, this.form, {
+          categoryId: String(this.form.categoryId),
+          tags: (this.form.tags || []).map(tag => String(tag))
+        })
+        if (!payload.summary) payload.summary = payload.content.replace(/[#>*`_\-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150)
+        this.saving = true
+        publishArticle(payload).then(() => {
+          this.$message.success(payload.status === '0' ? '文章已发布' : '草稿已保存')
+          const user = JSON.parse(localStorage.getItem('userInfo') || 'null')
+          this.$router.push({ path: '/UserProfile', query: { userId: user && user.id != null ? String(user.id) : '' } })
+        }).catch(() => {}).finally(() => { this.saving = false })
+      })
+    }
   }
 }
 </script>

@@ -20,6 +20,7 @@ CREATE TABLE content_article (
 );
 CREATE INDEX ix_content_article_public_list ON content_article(status,deleted,is_top,created_at,id);
 CREATE INDEX ix_content_article_public_hot ON content_article(status,deleted,view_count,id);
+CREATE INDEX ix_content_article_author_public ON content_article(author_id,status,deleted,created_at,id);
 CREATE TABLE content_article_tag (
  article_id BIGINT NOT NULL, tag_id BIGINT NOT NULL,
  PRIMARY KEY (article_id, tag_id),

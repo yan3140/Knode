@@ -1,26 +1,31 @@
 <!-- 文章详情模块 -->
 <template>
         <div class="detailBox tcommonBox" >
+            <div v-if="loadError" class="detail-error">
+                <p>{{ loadError }}</p>
+                <el-button size="small" type="primary" @click="getArticleDetail">重试</el-button>
+            </div>
+            <template v-else>
             <span class="s-round-date">
-                <span class="month" v-html="showInitDate(detailObj.createTime,'month')+'月'"></span>
-                <span class="day" v-html="showInitDate(detailObj.createTime,'date')"></span>
+                <span class="month">{{ showInitDate(detailObj.createTime,'month') }}月</span>
+                <span class="day">{{ showInitDate(detailObj.createTime,'date') }}</span>
             </span>
             <header>
                 <h1>
-                    <a :href="'#/DetailShare?aid='+detailObj.id" target="_blank">
+                    <a :href="'#/DetailArticle?aid='+detailObj.id" target="_blank">
                         {{detailObj.title}}
                     </a>
                 </h1>
                 <h2>
-                    <a v-if="detailObj.authorId" class="detail-author" :href="'#/UserProfile?userId='+detailObj.authorId"><i class="fa fa-fw fa-user"></i>{{detailObj.authorName || '作者'}}</a>
-                    <span v-else><i class="fa fa-fw fa-user"></i>作者</span> · <span >{{detailObj.createTime}}</span> •
+                    <a v-if="detailObj.authorId" class="detail-author" :href="'#/UserProfile?userId='+detailObj.authorId"><i class="fa fa-fw fa-user"></i>{{ authorDisplayName }}</a>
+                    <span v-else><i class="fa fa-fw fa-user"></i>{{ authorDisplayName }}</span> · <span >{{detailObj.createTime}}</span> •
                     <i class="fa fa-fw fa-eye"></i>{{detailObj.viewCount}} 次围观 •
                 </h2>
                 <div class="ui label">
                     <a :href="'#/Share?classId='+detailObj.categoryId">{{detailObj.categoryName}}</a>
                 </div>
             </header>
-            <div class="article-content markdown-body" v-html="detailObj.content"></div>
+            <div class="article-content markdown-body" v-html="sanitizedContent"></div>
 
             <div class="donate">
                 <div class="donate-word">
@@ -41,6 +46,7 @@
                     </el-col>
                 </el-row>
             </div>
+            </template>
         </div>
 </template>
 
@@ -48,44 +54,153 @@
 import {initDate} from '../utils/server.js'
 import {getArticle,updateViewCount} from '../api/article.js'
 import { mavonEditor } from 'mavon-editor'
+
+const POSITIVE_INT64_RE = /^[1-9]\d{0,18}$/
+const DANGEROUS_TAGS = new Set(['SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'STYLE', 'SVG', 'MATH', 'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'BASE', 'META', 'LINK'])
+const SAFE_URL_RE = /^(https?:\/\/|\/(?!\/)|#|\.\.?\/|static\/)/i
+
+function normalizePositiveId(raw) {
+    if (raw === undefined || raw === null) return ''
+    const value = String(raw).trim()
+    return POSITIVE_INT64_RE.test(value) ? value : ''
+}
+
+function isSafeUrl(url) {
+    if (!url || typeof url !== 'string') return false
+    const cleaned = url.replace(/[\u0000-\u0020\u007f]+/g, '')
+    return SAFE_URL_RE.test(cleaned)
+}
+
+function sanitizeRenderedHtml(html) {
+    if (!html || typeof html !== 'string') return ''
+    if (typeof document === 'undefined') return ''
+    const template = document.createElement('template')
+    template.innerHTML = html
+    const walk = (node) => {
+        const children = Array.from(node.childNodes || [])
+        for (const child of children) {
+            if (child.nodeType === 1) {
+                const tag = child.tagName ? child.tagName.toUpperCase() : ''
+                if (DANGEROUS_TAGS.has(tag)) {
+                    child.parentNode && child.parentNode.removeChild(child)
+                    continue
+                }
+                const attrs = Array.from(child.attributes || [])
+                for (const attr of attrs) {
+                    const name = attr.name.toLowerCase()
+                    if (name.startsWith('on') || name === 'style' || name === 'srcdoc' || name === 'formaction') {
+                        child.removeAttribute(attr.name)
+                    } else if (name === 'href' || name === 'src' || name === 'xlink:href') {
+                        if (!isSafeUrl(attr.value)) {
+                            child.removeAttribute(attr.name)
+                        }
+                    }
+                }
+                if (tag === 'A' && child.getAttribute('href')) {
+                    child.setAttribute('rel', 'noopener noreferrer')
+                }
+                walk(child)
+            }
+        }
+    }
+    walk(template.content)
+    return template.innerHTML
+}
+
     export default {
         data() { //选项 / 数据
             return {
-                aid:'',//文章ID
+                aid:'',//文章ID（十进制字符串，保留64位精度）
                 pdonate:true,//打开赞赏控制,
                 detailObj:{},//返回详情数据
+                sanitizedContent:'',
+                loadError:'',
+                loading:false,
+                detailRequestSeq:0,
                 haslogin:false,//是否已经登录
                 userId:'',//用户id
             }
         },
+        computed: {
+            authorDisplayName() {
+                if (this.detailObj.authorName) return this.detailObj.authorName
+                if (this.detailObj.authorInfoStatus === 'UNAVAILABLE') return '作者信息暂不可用'
+                if (this.detailObj.authorInfoStatus === 'MISSING') return '已注销用户'
+                return '作者'
+            }
+        },
         methods: { //事件处理器
             showInitDate:function(date,full){//年月日的编辑
-                // console.log(detailObj.create_time,date,full);
                 return initDate(date,full);
             },
+            renderSafeMarkdown:function(markdown){
+                const source = typeof markdown === 'string' ? markdown : ''
+                const markdownIt = mavonEditor.getMarkdownIt()
+                const prevHtml = markdownIt.options ? markdownIt.options.html : undefined
+                try {
+                    if (markdownIt.set) markdownIt.set({ html: false })
+                    else if (markdownIt.options) markdownIt.options.html = false
+                    const rendered = markdownIt.render(source)
+                    return sanitizeRenderedHtml(rendered)
+                } finally {
+                    if (prevHtml !== undefined) {
+                        if (markdownIt.set) markdownIt.set({ html: prevHtml })
+                        else if (markdownIt.options) markdownIt.options.html = prevHtml
+                    }
+                }
+            },
             getArticleDetail:function(){
-                getArticle(this.aid).then((response)=>{
-                    this.detailObj = response
-                     const markdownIt = mavonEditor.getMarkdownIt()
-                    // markdownIt.re
-                    this.detailObj.content = markdownIt.render(response.content);
+                const targetAid = this.aid
+                const seq = ++this.detailRequestSeq
+                this.detailObj = {}
+                this.sanitizedContent = ''
+                this.loadError = ''
+                if (!targetAid) {
+                    this.loading = false
+                    this.loadError = '无效的文章标识'
+                    return
+                }
+                this.loading = true
+                getArticle(targetAid).then((response)=>{
+                    if (seq !== this.detailRequestSeq || targetAid !== this.aid) {
+                        return
+                    }
+                    this.detailObj = response || {}
+                    this.sanitizedContent = this.renderSafeMarkdown(this.detailObj.content)
+                }).catch((err)=>{
+                    if (seq !== this.detailRequestSeq || targetAid !== this.aid) {
+                        return
+                    }
+                    this.detailObj = {}
+                    this.sanitizedContent = ''
+                    this.loadError = (err && err.message) || '文章加载失败，请稍后重试'
+                }).finally(()=>{
+                    if (seq === this.detailRequestSeq) {
+                        this.loading = false
+                    }
                 })
             },
             routeChange:function(){
                 var that = this;
-                that.aid = that.$route.query.aid==undefined?1:parseInt(that.$route.query.aid);//获取传参的aid
+                that.detailRequestSeq++;
+                that.detailObj = {};
+                that.sanitizedContent = '';
+                that.loadError = '';
+                that.aid = normalizePositiveId(that.$route.query.aid);
                 //判断用户是否存在
                 if(localStorage.getItem('userInfo')){
                     that.haslogin = true;
                     that.userInfo = JSON.parse(localStorage.getItem('userInfo'));
-                    that.userId = that.userInfo.userId;
-                    // console.log(that.userInfo);
+                    that.userId = that.userInfo && (that.userInfo.id || that.userInfo.userId) ? String(that.userInfo.id || that.userInfo.userId) : '';
                 }else{
                     that.haslogin = false;
+                    that.userId = '';
                 }
                 //获取详情接口
                 this.getArticleDetail()
-                updateViewCount(that.aid)
+                if (that.aid) {
+                    updateViewCount(that.aid).catch(()=>{})
+                }
             }
         },
         watch: {
@@ -96,8 +211,6 @@ import { mavonEditor } from 'mavon-editor'
 
         },
         created() { //生命周期函数
-            var that = this;
-
             this.routeChange();
         },
 

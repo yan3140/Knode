@@ -8,13 +8,22 @@
         <h3>网站logo: https://www.sg.com/1.png</h3>
 
 </h1>
-    <el-row>
+    <div v-if="loadError" class="friends-error">
+        <span>{{ loadError }}</span>
+        <el-button size="mini" type="text" @click="getList">重试</el-button>
+    </div>
+    <el-row v-else>
         <el-col :span="12" class="tf-item" v-for="(item,index) in friendslink" :key="'f'+index">
-            <a :href="item.address" target="_blank">
-                <img :src="item.logo?item.logo:'static/img/tou.jpg'"  :onerror="$store.state.errorImg">
+            <a v-if="safeHref(item.address)" :href="safeHref(item.address)" target="_blank" rel="noopener noreferrer">
+                <img :src="safeHref(item.logo) || 'static/img/tou.jpg'" :onerror="$store.state.errorImg">
                 <h4>{{item.name}}</h4>
                 <p>{{item.description}}</p>
             </a>
+            <div v-else class="tf-item-disabled">
+                <img :src="safeHref(item.logo) || 'static/img/tou.jpg'" :onerror="$store.state.errorImg">
+                <h4>{{item.name}}</h4>
+                <p>{{item.description}}</p>
+            </div>
         </el-col>
     </el-row>
 </div>
@@ -25,13 +34,26 @@ import {getAllLink} from '../api/link.js'
 export default {
     data() { //选项 / 数据
         return {
-            friendslink:[]//友情链接
+            friendslink: [], //友情链接
+            loadError: ''
         }
     },
     methods: { //事件处理器
+        safeHref(url) {
+            if (typeof url !== 'string') return ''
+            const trimmed = url.trim()
+            if (/^https?:\/\//i.test(trimmed)) {
+                return trimmed
+            }
+            return ''
+        },
         getList(){
+            this.loadError = ''
             getAllLink().then((response)=>{
-                this.friendslink = response
+                this.friendslink = Array.isArray(response) ? response : []
+            }).catch(() => {
+                this.friendslink = []
+                this.loadError = '友链加载失败，请稍后重试'
             })
         }
     },

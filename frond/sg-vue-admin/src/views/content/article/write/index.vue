@@ -86,11 +86,15 @@
           </el-form-item>
         </el-col>
         <el-col :span="12">
+          <div v-if="loadError" class="article-load-error">
+            <span>{{ loadError }}</span>
+            <el-button type="text" size="mini" @click="loadArticleForCurrentId">重试加载</el-button>
+          </div>
           <el-form-item>
-            <el-button type="primary" size="medium" @click="handleSubmit">{{ aId?"更新":"发布" }}</el-button>
+            <el-button type="primary" size="medium" :disabled="submitting || (!!aId && !canSubmitEdit)" @click="handleSubmit">{{ aId?"更新":"发布" }}</el-button>
           </el-form-item>
           <el-form-item>
-            <el-button v-if="!aId" type="info" @click="handleSave">保存到草稿箱</el-button>
+            <el-button v-if="!aId" type="info" :disabled="submitting" @click="handleSave">保存到草稿箱</el-button>
           </el-form-item>
 
         </el-col>
@@ -107,65 +111,173 @@ import { listAllCategory } from '@/api/content/category'
 import { uploadImg } from '@/api/content/upload'
 import { addArticle, getArticle, updateArticle } from '@/api/content/article'
 import { listAllTag } from '@/api/content/tag'
+
+function createEmptyForm() {
+  return {
+    id: undefined,
+    title: '',
+    summary: '',
+    thumbnail: '',
+    isTop: '0',
+    isComment: '1',
+    content: '',
+    categoryId: undefined,
+    tags: []
+  }
+}
+
 export default {
   name: 'Write',
   data() {
     return {
-      form: {
-        title: '',
-        thumbnail: '',
-        isTop: '0',
-        isComment: '1',
-        content: '',
-        categoryId: undefined,
-        tags: []
-      },
+      form: createEmptyForm(),
       categoryList: [],
       tagList: [],
-      aId: -1,
+      aId: '',
+      loadedArticleId: '',
+      loadingArticle: false,
+      loadError: '',
+      loadRequestSeq: 0,
+      thumbnailUploadSeq: 0,
+      submitting: false,
       fileList: []
     }
   },
+  computed: {
+    canSubmitEdit() {
+      if (!this.aId) return true
+      return !this.loadingArticle &&
+        !this.loadError &&
+        this.loadedArticleId === this.aId &&
+        String(this.form.id || '') === this.aId
+    }
+  },
   watch: {
-    $route: {
-      handler: function(route) {
-        this.aId = route.query && route.query.id
-        console.log(this.aId)
-      },
-      immediate: true
+    $route(route) {
+      this.syncRoute(route, false)
     }
   },
   created() {
     this.getCategoryAndTag()
-    if (this.aId) {
-      this.getArticle()
-    }
+    this.syncRoute(this.$route, true)
   },
   methods: {
+    syncRoute(route, force) {
+      const raw = route && route.query && route.query.id
+      const nextId = raw != null && String(raw).trim() !== '' ? String(raw).trim() : ''
+      if (!force && nextId === this.aId) {
+        return
+      }
+      this.aId = nextId
+      this.resetFormForRoute()
+      if (this.aId) {
+        this.loadArticleForCurrentId()
+      }
+    },
+    resetFormForRoute() {
+      this.loadRequestSeq++
+      this.thumbnailUploadSeq++
+      this.form = createEmptyForm()
+      this.fileList = []
+      this.loadedArticleId = ''
+      this.loadingArticle = false
+      this.loadError = ''
+    },
     getArticle() {
-      getArticle(this.aId).then(response => {
-        this.form = response
-        this.fileList.push({ name: '缩略图', url: response.thumbnail })
+      return this.loadArticleForCurrentId()
+    },
+    loadArticleForCurrentId() {
+      const targetId = this.aId
+      if (!targetId) return Promise.resolve()
+      const seq = ++this.loadRequestSeq
+      this.form = createEmptyForm()
+      this.fileList = []
+      this.loadedArticleId = ''
+      this.loadError = ''
+      this.loadingArticle = true
+      return getArticle(targetId).then(response => {
+        if (seq !== this.loadRequestSeq || targetId !== this.aId) {
+          return
+        }
+        if (!response || typeof response !== 'object') {
+          this.loadError = '文章数据为空，请重试'
+          return
+        }
+        const resolvedId = response.id != null ? String(response.id).trim() : targetId
+        if (resolvedId !== targetId) {
+          this.loadError = '返回的文章标识与当前编辑目标不一致，已禁止保存'
+          return
+        }
+        this.form = Object.assign(createEmptyForm(), response, {
+          id: targetId,
+          categoryId: response.categoryId != null ? String(response.categoryId) : undefined,
+          tags: Array.isArray(response.tags) ? response.tags.map(t => String(t)) : []
+        })
+        this.fileList = response.thumbnail ? [{ name: '缩略图', url: response.thumbnail }] : []
+        this.loadedArticleId = targetId
+      }).catch(err => {
+        if (seq !== this.loadRequestSeq || targetId !== this.aId) {
+          return
+        }
+        this.form = createEmptyForm()
+        this.fileList = []
+        this.loadedArticleId = ''
+        this.loadError = (err && (err.msg || err.message)) || '文章加载失败，请重试后再编辑'
+      }).finally(() => {
+        if (seq === this.loadRequestSeq) {
+          this.loadingArticle = false
+        }
       })
     },
+    buildPayload(statusOverride) {
+      const payload = Object.assign({}, this.form, {
+        categoryId: this.form.categoryId != null ? String(this.form.categoryId) : undefined,
+        tags: Array.isArray(this.form.tags) ? this.form.tags.map(t => String(t)) : []
+      })
+      if (this.aId) payload.id = String(this.aId)
+      else delete payload.id
+      if (statusOverride != null) payload.status = statusOverride
+      return payload
+    },
     handleSave() {
-      this.form.status = '1'
-      addArticle(this.form).then(response => {
+      if (this.submitting || this.aId) return
+      this.submitting = true
+      const payload = this.buildPayload('1')
+      addArticle(payload).then(() => {
         this.$modal.msgSuccess('保存草稿成功')
+      }).catch(() => {}).finally(() => {
+        this.submitting = false
       })
     },
     handleSubmit() {
+      if (this.submitting) return
+      if (this.aId && !this.canSubmitEdit) {
+        if (this.$message && this.$message.error) {
+          this.$message.error('文章尚未加载完成或加载失败，禁止提交')
+        }
+        return
+      }
+      this.submitting = true
       if (!this.aId) {
-        this.form.status = '0'
-        addArticle(this.form).then(response => {
+        const payload = this.buildPayload('0')
+        addArticle(payload).then(() => {
           this.$modal.msgSuccess('博客发布成功')
           this.$router.push({ path: '/content/article' })
+        }).catch(() => {}).finally(() => {
+          this.submitting = false
         })
       } else {
-        // 更新博客信息
-        updateArticle(this.form).then(response => {
+        const targetId = this.aId
+        const payload = this.buildPayload(null)
+        if (String(payload.id || '') !== targetId || this.loadedArticleId !== targetId) {
+          this.submitting = false
+          return
+        }
+        updateArticle(payload).then(() => {
           this.$modal.msgSuccess('博客更新成功')
           this.$router.push({ path: '/content/article' })
+        }).catch(() => {}).finally(() => {
+          this.submitting = false
         })
       }
     },
@@ -173,33 +285,64 @@ export default {
       this.$message.error('只能上传一个图片')
     },
     handleUpload(img) {
+      const seq = this.loadRequestSeq
+      const targetId = this.aId
+      const uploadSeq = ++this.thumbnailUploadSeq
+      let aborted = false
+      const handle = {
+        abort: () => {
+          aborted = true
+          if (uploadSeq === this.thumbnailUploadSeq) {
+            this.thumbnailUploadSeq++
+          }
+        }
+      }
       uploadImg(img.file).then(response => {
+        if (aborted || uploadSeq !== this.thumbnailUploadSeq || seq !== this.loadRequestSeq || targetId !== this.aId) {
+          return
+        }
         this.form.thumbnail = response
-        this.fileList.push({ name: img.file.name, url: response })
+        this.fileList = [{ name: img.file.name, url: response }]
+        if (img && typeof img.onSuccess === 'function') {
+          img.onSuccess(response)
+        }
       }).catch(error => {
-        this.$message.error(error.msg)
+        if (aborted || uploadSeq !== this.thumbnailUploadSeq || seq !== this.loadRequestSeq || targetId !== this.aId) {
+          return
+        }
+        if (img && typeof img.onError === 'function') {
+          img.onError(error)
+        }
+        this.fileList = this.form.thumbnail ? [{ name: '缩略图', url: this.form.thumbnail }] : []
+        const msg = (error && (error.msg || error.message)) || '图片上传失败'
+        this.$message.error(msg)
       })
+      return handle
     },
     fileRemove(file, fileList) {
-      this.fileList.pop()
+      this.thumbnailUploadSeq++
+      this.fileList = []
       this.form.thumbnail = ''
     },
     // 绑定@imgAdd event
     addImg(pos, file) {
-      // 第一步.将图片上传到服务器.
+      const seq = this.loadRequestSeq
+      const targetId = this.aId
       uploadImg(file).then(response => {
+        if (seq !== this.loadRequestSeq || targetId !== this.aId) return
         this.$refs.md.$img2Url(pos, response)
       }).catch(error => {
-        this.$message.error(error.msg)
+        const msg = (error && (error.msg || error.message)) || '图片上传失败'
+        this.$message.error(msg)
       })
     },
     getCategoryAndTag() {
       listAllCategory().then((response) => {
-        this.categoryList = response
-      })
+        this.categoryList = response || []
+      }).catch(() => {})
       listAllTag().then(response => {
-        this.tagList = response
-      })
+        this.tagList = response || []
+      }).catch(() => {})
     },
     beforeAvatarUpload(file) {
       const isJPG = file.type === 'image/jpeg'

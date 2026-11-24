@@ -51,6 +51,19 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
                 return;
             }
             if (isInternalPath(request)) throw new AuthFailure(401);
+            if (isOptionalBlogProfileRead(request)) {
+                List<String> optionalHeaders = Collections.list(request.getHeaders("token"));
+                if (!optionalHeaders.isEmpty()) {
+                    if (optionalHeaders.size() != 1 || optionalHeaders.get(0).isBlank() || optionalHeaders.get(0).contains(","))
+                        throw new AuthFailure(401);
+                    UserTokenVerifier.VerifiedToken token = verifier.verifyToken(optionalHeaders.get(0));
+                    Optional<Session> state = readSession(token.sid());
+                    UserTokenVerifier.Principal principal = verifier.validateSession(token, state, "blog");
+                    request.setAttribute(PRINCIPAL, principal);
+                }
+                chain.doFilter(request, response);
+                return;
+            }
             if (isPublicRead(request)) {
                 chain.doFilter(request, response);
                 return;
@@ -91,6 +104,12 @@ public final class AuthenticationFilter extends OncePerRequestFilter {
     }
     private static boolean isInternalPath(String path) {
         return path!=null && (path.equals("/internal") || path.startsWith("/internal/") || path.startsWith("/internal;"));
+    }
+
+    private static boolean isOptionalBlogProfileRead(HttpServletRequest request) {
+        if (!"GET".equals(request.getMethod())) return false;
+        String p = request.getRequestURI();
+        return p.matches("/(?:api/blog/)?user/profile/[^/]{1,64}");
     }
 
     private static boolean isPublicRead(HttpServletRequest request) {

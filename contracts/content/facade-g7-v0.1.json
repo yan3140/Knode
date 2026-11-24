@@ -1,0 +1,54 @@
+{
+  "name": "CONTENT-FACADE-G7",
+  "version": "0.1",
+  "status": "Implemented in knode-content; verified against loopback H2 and synthetic User/Community/Search/Knowledge provider fixtures; real Community/Search/Knowledge services pending their domain stages.",
+  "profileFacade": {
+    "routes": [
+      "GET /api/blog/user/profile/{id}",
+      "GET /user/profile/{id}"
+    ],
+    "auth": "Anonymous GET allowed; optional single blog token header is validated strictly against signature and authoritative Redis session (invalid/revoked 401, wrong scope 403, auth Redis unavailable 503). Forged identity headers always rejected 401.",
+    "input": {
+      "id": "canonical positive signed int64 decimal string; invalid -> HTTP 200 code 515",
+      "pageNum": "default 1, >= 1",
+      "pageSize": "default 10, 1..100, offset <= 10000000"
+    },
+    "dependencies": {
+      "userPrimary": "POST /internal/v1/auth/service-tokens (audience knode-user, users:public:read) + POST /internal/v1/users/public-profiles:batch. MISSING -> HTTP 200 code 515; UNAVAILABLE/protocol violation/unconfigured -> HTTP 503 code 500 (never fabricated as missing or empty).",
+      "contentArticles": "Local SQL content_article + content_category (status='0' AND deleted=0, ORDER BY created_at DESC, id DESC) + batch live CounterRead fallback; no cross-DB JOINs.",
+      "communityRelations": "Optional KNODE_COMMUNITY_ORIGIN. POST /internal/v1/auth/service-tokens (audience knode-community, community:relations:read) + POST /internal/v1/community/relations:batch. Never blocks primary profile; when unconfigured or failed, returns relationStatus=UNAVAILABLE, followingCount=null, followerCount=null, viewerFollowing=null (never 0 or false)."
+    },
+    "viewerFollowStatus": [
+      "NOT_APPLICABLE (anonymous or viewing self)",
+      "AVAILABLE (authenticated non-self viewer and boolean viewerFollowing received)",
+      "UNAVAILABLE (authenticated non-self viewer and Community unavailable or returned null)"
+    ],
+    "serialization": "All int64 IDs/counts/totals are decimal strings; article createTime is yyyy-MM-dd HH:mm:ss GMT+8; profile createTime is null because user public-profiles:batch only provides profileRevision and updatedAt."
+  },
+  "opsFacade": {
+    "routes": [
+      "GET /api/admin/ops/outbox/summary (/ops/outbox/summary)",
+      "GET /api/admin/ops/outbox/search (/ops/outbox/search)",
+      "GET /api/admin/ops/outbox/notification (/ops/outbox/notification)",
+      "POST /api/admin/ops/outbox/search/retry (/ops/outbox/search/retry)",
+      "POST /api/admin/ops/outbox/notification/retry (/ops/outbox/notification/retry)",
+      "POST /api/admin/ops/outbox/content/{eventId}/redeliver (/ops/outbox/content/{eventId}/redeliver)",
+      "POST /api/admin/ops/outbox/retry (/ops/outbox/retry)"
+    ],
+    "auth": "Admin JWT + authoritative Redis session (admin scope) + fresh User /api/admin/auth/me permission check on every request (read: ops:outbox:read|content:ops:read; write: ops:outbox:retry|ops:outbox:redeliver|content:ops:redeliver; or *:*:*). Machine JWTs are never accepted on public admin ops routes; browser admin tokens are never forwarded to /internal/v1/** peer ops routes.",
+    "peerOrigins": [
+      "KNODE_SEARCH_ORIGIN (audience knode-search)",
+      "KNODE_COMMUNITY_ORIGIN (audience knode-community)",
+      "KNODE_KNOWLEDGE_ORIGIN (audience knode-knowledge)"
+    ],
+    "perDomainSemantics": {
+      "atomic": false,
+      "summary": "Reports contentProducer, contentMetadata, search, notification, knowledge individually with AVAILABLE/UNCONFIGURED/UNAVAILABLE. Never fabricates zero counts for unavailable or unconfigured domains. HTTP 503 if all local and remote domains fail.",
+      "retry": "Never claims cross-domain atomic success. Bulk contentProducer redeliver reports UNSUPPORTED unless explicit contentEventIds (max 20 UUIDs) are supplied or /content/{eventId}/redeliver is called with replayRequestId. Peer 401/403 internal machine auth errors are mapped to UNAVAILABLE/503 so valid admin sessions are never logged out.",
+      "batchChildReplayKey": "Derived deterministically from full batch replayRequestId and canonical eventId as 'batch-' + sha256('v1\\n' + batchReplayId + '\\n' + eventId).substring(0, 56) (62 chars, matching [A-Za-z0-9._-]{1,64}). Prevents tail-truncation collisions on 64-char batch IDs and keeps retries idempotent across reordered contentEventIds.",
+      "peerRetrySuccessSchema": "Remote consumer retry HTTP 200/202 responses must be non-empty JSON objects with no non-null 'error', optional 'code' strictly in {200, 202}, and at least one explicit positive acknowledgment: 'status' in {ACCEPTED, RETRIED, REPLAYED, QUEUED, OK, NOOP} and/or canonical non-negative int64 decimal string count in {'requeued', 'retried', 'accepted'}. Empty objects '{}', failed status values, or invalid counts are rejected as UNAVAILABLE (HTTP 503 on single-domain retry) and never aggregated as ACCEPTED.",
+      "audit": "Server always records operator as admin:<verifiedUserId>; client-supplied actor/operator fields are rejected HTTP 400."
+    }
+  },
+  "schema": "Optional additive index db/content-facade-07a-upgrade.sql (also included in fresh db/content-article-schema.sql). Never auto-applied."
+}

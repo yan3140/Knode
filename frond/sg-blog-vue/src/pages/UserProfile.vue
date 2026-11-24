@@ -2,20 +2,29 @@
   <div>
     <sg-nav></sg-nav>
     <main v-loading="loading" class="container profile-page">
+      <section v-if="profileError && !profile.id" class="profile-section tcommonBox">
+        <div class="profile-empty"><p>{{ profileError }}</p><el-button type="primary" size="small" @click="loadProfile">重试</el-button></div>
+      </section>
       <section v-if="profile.id" class="profile-hero">
         <div class="profile-orbit orbit-one"></div><div class="profile-orbit orbit-two"></div>
         <img class="profile-avatar" :src="profile.avatar || defaultAvatar" :onerror="$store.state.errorImg" alt="用户头像">
         <div class="profile-identity">
           <p>CREATOR PROFILE</p>
-          <h1>{{ profile.nickName }}</h1>
+          <h1>{{ profile.nickName || '用户' }}</h1>
           <span>加入 YanBlog · {{ formatDate(profile.createTime) }}</span>
         </div>
         <div class="profile-actions">
           <el-button v-if="isSelf" type="primary" icon="el-icon-edit" @click="$router.push('/WriteArticle')">写博客</el-button>
-          <el-button v-else-if="hasLogin" :type="following ? 'default' : 'primary'" :icon="following ? 'el-icon-check' : 'el-icon-plus'" @click="toggleFollow">{{ following ? '取消关注' : '关注' }}</el-button>
+          <el-button v-else-if="hasLogin && followState === 'unavailable'" disabled plain>关注状态暂不可用</el-button>
+          <el-button v-else-if="hasLogin && followState === 'unknown'" disabled plain>加载中</el-button>
+          <el-button v-else-if="hasLogin" :type="following ? 'default' : 'primary'" :loading="followPending" :icon="following ? 'el-icon-check' : 'el-icon-plus'" @click="toggleFollow">{{ following ? '取消关注' : '关注' }}</el-button>
           <el-button v-else plain @click="goLogin">登录后关注</el-button>
         </div>
-        <div class="profile-stats"><span><strong>{{ profile.followerCount || 0 }}</strong> 粉丝</span><span><strong>{{ profile.followingCount || 0 }}</strong> 关注</span><span><strong>{{ articleTotal }}</strong> 文章</span></div>
+        <div class="profile-stats">
+          <span><strong>{{ followerCountDisplay }}</strong> 粉丝</span>
+          <span><strong>{{ followingCountDisplay }}</strong> 关注</span>
+          <span><strong>{{ articleTotal }}</strong> 文章</span>
+        </div>
       </section>
 
       <el-row :gutter="24">
@@ -38,8 +47,9 @@
               <img :src="user.avatar || defaultAvatar" :onerror="$store.state.errorImg" alt=""><span>{{ user.nickName }}</span>
               <el-button v-if="isSelf" size="mini" type="text" @click.stop="cancelFollow(user.userId)">取消关注</el-button>
             </a>
-            <div v-if="!followingUsers.length && !loading" class="small-empty">暂无关注，去发现值得关注的作者吧。</div>
-            <el-pagination v-if="followingTotal > followingPageSize" small layout="prev, next" :current-page="followingPage" :page-size="followingPageSize" :total="followingTotal" @current-change="changeFollowingPage" />
+            <div v-if="followingUnavailable" class="small-empty">关注列表暂不可用</div>
+            <div v-else-if="!followingUsers.length && !loading" class="small-empty">暂无关注，去发现值得关注的作者吧。</div>
+            <el-pagination v-if="!followingUnavailable && followingTotal > followingPageSize" small layout="prev, next" :current-page="followingPage" :page-size="followingPageSize" :total="followingTotal" @current-change="changeFollowingPage" />
           </section>
         </el-col>
       </el-row>
@@ -51,44 +61,186 @@
 import header from '../components/header.vue'
 import { getUserProfile, getUserFollowing, followUser, getFollowStatus, unfollowUser } from '../api/social'
 
+const POSITIVE_INT64_RE = /^[1-9]\d{0,18}$/
+
 export default {
   name: 'UserProfile',
   components: { 'sg-nav': header },
   data() {
-    return { profile: {}, articles: [], articleTotal: 0, articlePage: 1, articlePageSize: 8, followingUsers: [], followingTotal: 0, followingPage: 1, followingPageSize: 8, loading: false, following: false, defaultAvatar: 'static/img/tou.jpg' }
+    return {
+      profile: {},
+      profileError: '',
+      articles: [],
+      articleTotal: 0,
+      articlePage: 1,
+      articlePageSize: 8,
+      followingUsers: [],
+      followingTotal: 0,
+      followingPage: 1,
+      followingPageSize: 8,
+      followingUnavailable: false,
+      loading: false,
+      followPending: false,
+      followState: 'unknown',
+      profileRequestSeq: 0,
+      followingRequestSeq: 0,
+      followStatusSeq: 0,
+      followWriteSeq: 0,
+      defaultAvatar: 'static/img/tou.jpg'
+    }
   },
   computed: {
-    profileId() { return Number(this.$route.query.userId) || 0 },
+    profileId() {
+      const raw = this.$route.query.userId
+      const text = raw == null ? '' : String(raw).trim()
+      return POSITIVE_INT64_RE.test(text) ? text : ''
+    },
     currentUser() { return JSON.parse(localStorage.getItem('userInfo') || 'null') },
-    hasLogin() { return !!this.currentUser },
-    isSelf() { return this.hasLogin && Number(this.currentUser.id) === this.profileId }
+    hasLogin() { return !!(this.currentUser && this.currentUser.id != null) },
+    isSelf() { return this.hasLogin && String(this.currentUser.id) === this.profileId },
+    following() { return this.followState === 'following' },
+    followerCountDisplay() {
+      if (this.profile.relationStatus === 'UNAVAILABLE' || this.profile.followerCount == null) return '暂不可用'
+      return String(this.profile.followerCount)
+    },
+    followingCountDisplay() {
+      if (this.profile.relationStatus === 'UNAVAILABLE' || this.profile.followingCount == null) return '暂不可用'
+      return String(this.profile.followingCount)
+    }
   },
-  watch: { '$route.query.userId': 'loadProfile' },
+  watch: {
+    '$route.query.userId'() {
+      this.resetUserState()
+      this.loadProfile()
+    }
+  },
   created() { this.loadProfile() },
   methods: {
-    loadProfile() {
-      if (!this.profileId) { this.$router.replace('/'); return }
-      this.loading = true
-      getUserProfile(this.profileId, { pageNum: this.articlePage, pageSize: this.articlePageSize }).then(response => {
-        this.profile = response
-        this.articles = (response.articles && response.articles.rows) || []
-        this.articleTotal = (response.articles && response.articles.total) || 0
-        this.loadFollowing()
-        if (this.hasLogin && !this.isSelf) this.loadFollowStatus()
-      }).finally(() => { this.loading = false })
+    resetUserState() {
+      this.profileRequestSeq++
+      this.followingRequestSeq++
+      this.followStatusSeq++
+      this.followWriteSeq++
+      this.profile = {}
+      this.profileError = ''
+      this.articles = []
+      this.articleTotal = 0
+      this.articlePage = 1
+      this.followingUsers = []
+      this.followingTotal = 0
+      this.followingPage = 1
+      this.followingUnavailable = false
+      this.loading = false
+      this.followPending = false
+      this.followState = 'unknown'
     },
-    loadFollowing() {
-      getUserFollowing(this.profileId, { pageNum: this.followingPage, pageSize: this.followingPageSize }).then(response => {
-        this.followingUsers = response.rows || []; this.followingTotal = response.total || 0
+    loadProfile() {
+      const targetId = this.profileId
+      if (!targetId) {
+        this.resetUserState()
+        this.$router.replace('/')
+        return
+      }
+      const seq = ++this.profileRequestSeq
+      this.loading = true
+      this.profileError = ''
+      getUserProfile(targetId, { pageNum: this.articlePage, pageSize: this.articlePageSize }).then(response => {
+        if (seq !== this.profileRequestSeq || targetId !== this.profileId) return
+        const data = response || {}
+        this.profile = data
+        this.articles = (data.articles && data.articles.rows) || []
+        this.articleTotal = Number(data.articles && data.articles.total) || 0
+        this.loadFollowing(targetId)
+        if (!this.followPending) {
+          if (this.hasLogin && !this.isSelf) {
+            if (data.viewerFollowStatus === 'AVAILABLE' && typeof data.viewerFollowing === 'boolean') {
+              this.followStatusSeq++
+              this.followState = data.viewerFollowing ? 'following' : 'not_following'
+            } else if (data.viewerFollowStatus === 'UNAVAILABLE') {
+              this.followStatusSeq++
+              this.followState = 'unavailable'
+            } else {
+              this.loadFollowStatus(targetId)
+            }
+          } else {
+            this.followStatusSeq++
+            this.followState = 'unknown'
+          }
+        }
+      }).catch(err => {
+        if (seq !== this.profileRequestSeq || targetId !== this.profileId) return
+        this.profile = {}
+        this.articles = []
+        this.articleTotal = 0
+        this.followState = 'unknown'
+        this.profileError = (err && err.message) || '个人主页暂不可用，请稍后重试'
+      }).finally(() => {
+        if (seq === this.profileRequestSeq) this.loading = false
       })
     },
-    loadFollowStatus() { getFollowStatus(this.profileId).then(response => { this.following = response.following }).catch(() => { this.following = false }) },
-    toggleFollow() { (this.following ? unfollowUser(this.profileId) : followUser(this.profileId)).then(() => { this.following = !this.following; this.loadProfile() }) },
-    cancelFollow(userId) { unfollowUser(userId).then(() => { this.$message.success('已取消关注'); this.loadFollowing(); this.loadProfile() }) },
+    loadFollowing(explicitTargetId) {
+      const targetId = explicitTargetId || this.profileId
+      if (!targetId) return
+      const seq = ++this.followingRequestSeq
+      this.followingUnavailable = false
+      getUserFollowing(targetId, { pageNum: this.followingPage, pageSize: this.followingPageSize }).then(response => {
+        if (seq !== this.followingRequestSeq || targetId !== this.profileId) return
+        this.followingUsers = (response && response.rows) || []
+        this.followingTotal = Number(response && response.total) || 0
+      }).catch(() => {
+        if (seq !== this.followingRequestSeq || targetId !== this.profileId) return
+        this.followingUsers = []
+        this.followingTotal = 0
+        this.followingUnavailable = true
+      })
+    },
+    loadFollowStatus(explicitTargetId) {
+      const targetId = explicitTargetId || this.profileId
+      if (!targetId) return
+      const seq = ++this.followStatusSeq
+      this.followState = 'unknown'
+      getFollowStatus(targetId).then(response => {
+        if (seq !== this.followStatusSeq || targetId !== this.profileId) return
+        if (response && typeof response.following === 'boolean') {
+          this.followState = response.following ? 'following' : 'not_following'
+        } else {
+          this.followState = 'unavailable'
+        }
+      }).catch(() => {
+        if (seq !== this.followStatusSeq || targetId !== this.profileId) return
+        this.followState = 'unavailable'
+      })
+    },
+    toggleFollow() {
+      if (this.followPending || this.followState === 'unavailable' || this.followState === 'unknown') return
+      const targetId = this.profileId
+      if (!targetId) return
+      const writeSeq = ++this.followWriteSeq
+      this.followPending = true
+      const next = !this.following
+      ;(this.following ? unfollowUser(targetId) : followUser(targetId)).then(() => {
+        if (writeSeq !== this.followWriteSeq || targetId !== this.profileId) return
+        this.followStatusSeq++
+        this.followState = next ? 'following' : 'not_following'
+        this.followPending = false
+        this.loadProfile()
+      }).catch(() => {}).finally(() => {
+        if (writeSeq === this.followWriteSeq) this.followPending = false
+      })
+    },
+    cancelFollow(userId) {
+      const targetId = this.profileId
+      unfollowUser(String(userId)).then(() => {
+        if (targetId !== this.profileId) return
+        this.$message.success('已取消关注')
+        this.loadFollowing(targetId)
+        this.loadProfile()
+      }).catch(() => {})
+    },
     changeArticlePage(page) { this.articlePage = page; this.loadProfile() },
     changeFollowingPage(page) { this.followingPage = page; this.loadFollowing() },
-    openProfile(userId) { this.$router.push({ path: '/UserProfile', query: { userId } }) },
-    openArticle(id) { this.$router.push({ path: '/DetailArticle', query: { aid: id } }) },
+    openProfile(userId) { this.$router.push({ path: '/UserProfile', query: { userId: String(userId) } }) },
+    openArticle(id) { this.$router.push({ path: '/DetailArticle', query: { aid: String(id) } }) },
     goLogin() { this.$router.push({ name: 'Login', query: { login: '1', redirect: this.$route.fullPath } }) },
     formatDate(value) { return value ? String(value).slice(0, 10) : '—' }
   }

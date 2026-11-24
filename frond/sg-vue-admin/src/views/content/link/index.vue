@@ -223,17 +223,20 @@ export default {
     getList() {
       this.loading = true
       listLink(this.queryParams).then((response) => {
-        this.linkList = response.rows
-        this.total = response.total
+        this.linkList = (response && response.rows) || []
+        this.total = Number(response && response.total) || 0
+      }).catch(() => {}).finally(() => {
         this.loading = false
       })
     },
     handleChangeStatus(link, newStatus) {
       this.loading = true
-      changeLinkStatus(link.id, newStatus).then((response) => {
+      changeLinkStatus(String(link.id), newStatus).then(() => {
         this.$modal.msgSuccess('审核成功')
         this.open = false
         this.getList()
+      }).catch(() => {
+        this.loading = false
       })
     },
     // 取消按钮

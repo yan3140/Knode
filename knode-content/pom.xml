@@ -4,7 +4,10 @@
   <artifactId>knode-content</artifactId>
   <dependencies>
     <dependency><groupId>com.lx</groupId><artifactId>knode-auth</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>com.lx</groupId><artifactId>knode-governance</artifactId><version>${project.version}</version></dependency>
     <dependency><groupId>com.lx</groupId><artifactId>knode-observability</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>com.alibaba.cloud</groupId><artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId></dependency>
+    <dependency><groupId>com.alibaba.nacos</groupId><artifactId>nacos-client</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-redis-reactive</artifactId></dependency>
@@ -12,6 +15,7 @@
     <dependency><groupId>com.mysql</groupId><artifactId>mysql-connector-j</artifactId><scope>runtime</scope></dependency>
     <dependency><groupId>com.aliyun.oss</groupId><artifactId>aliyun-sdk-oss</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>io.opentelemetry</groupId><artifactId>opentelemetry-sdk-testing</artifactId><scope>test</scope></dependency>
     <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>test</scope></dependency>
   </dependencies>
   <build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build>

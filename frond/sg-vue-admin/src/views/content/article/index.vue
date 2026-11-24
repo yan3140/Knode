@@ -192,32 +192,35 @@ export default {
       this.open = false
       this.reset()
     },
-    /** 查询用户列表 */
+    /** 查询文章列表 */
     getList() {
       this.loading = true
       listArticle(this.queryParams).then((response) => {
-        this.articleList = response.rows
-        this.total = response.total
+        this.articleList = (response && response.rows) || []
+        this.total = Number(response && response.total) || 0
+      }).catch(() => {}).finally(() => {
         this.loading = false
       })
     },
     getCategoryList() {
       listAllCategory().then(response => {
-        this.categoryList = response
-      })
+        this.categoryList = response || []
+      }).catch(() => {})
     },
     /** 修改按钮操作 */
     handleUpdate(row) {
-      this.$router.push('/write?id=' + row.id)
+      this.$router.push('/write?id=' + String(row.id))
     },
-    /** 新增用户 */
+    /** 新增文章 */
     handleAdd() {
       this.$router.push('/write')
     },
     /** 删除按钮操作 */
     handleDelete(row) {
-      const ids = row.id || this.ids
-      this.$modal.confirm('是否确认删除分类编号为"' + ids + '"的数据项？').then(function() {
+      const rawIds = row && row.id != null ? [String(row.id)] : (this.ids || []).map(id => String(id))
+      if (!rawIds.length) return
+      const ids = rawIds.join(',')
+      this.$modal.confirm('是否确认删除文章编号为"' + ids + '"的数据项？').then(function() {
         return delArticle(ids)
       }).then(() => {
         this.getList()

@@ -46,14 +46,46 @@ public class AuthConfiguration {
         };
     }
 
-    @Bean UserTokenVerifier tokenVerifier(@Value("${KNODE_AUTH_PUBLIC_KEY_FILE}") String file,
-                                           @Value("${KNODE_AUTH_PUBLIC_KEY_ID}") String kid) throws Exception {
-        if (kid.isBlank() || kid.length() > 128) throw new IllegalArgumentException("Invalid key id");
-        String pem = Files.readString(Path.of(file));
+    @Bean UserTokenVerifier tokenVerifier(@Value("${KNODE_AUTH_PUBLIC_KEY_FILE:}") String file,
+                                           @Value("${KNODE_AUTH_PUBLIC_KEY_ID:}") String kid,
+                                           @Value("${KNODE_AUTH_TRUSTED_PUBLIC_KEYS:}") String trustedKeys) throws Exception {
+        java.util.LinkedHashMap<String, RSAPublicKey> keys = new java.util.LinkedHashMap<>();
+        if (!trustedKeys.isBlank()) {
+            String[] entries = trustedKeys.split(";", -1);
+            if (entries.length < 1 || entries.length > 4) throw new IllegalArgumentException("Invalid trusted public keys");
+            for (String entry : entries) {
+                int at = entry.indexOf('=');
+                if (at < 1) throw new IllegalArgumentException("Invalid trusted public key entry");
+                String entryKid = entry.substring(0, at);
+                String entryPath = entry.substring(at + 1);
+                if (!entryKid.matches("[A-Za-z0-9._-]{1,128}") || entryPath.isBlank())
+                    throw new IllegalArgumentException("Invalid trusted public key entry");
+                RSAPublicKey parsed = parsePublicKey(entryPath);
+                if (keys.putIfAbsent(entryKid, parsed) != null)
+                    throw new IllegalArgumentException("Duplicate trusted public key id");
+            }
+        }
+        if (!file.isBlank() || !kid.isBlank()) {
+            if (kid.isBlank() || kid.length() > 128 || file.isBlank()) throw new IllegalArgumentException("Invalid key id");
+            RSAPublicKey primary = parsePublicKey(file);
+            RSAPublicKey existing = keys.putIfAbsent(kid, primary);
+            if (existing != null && !java.util.Arrays.equals(existing.getEncoded(), primary.getEncoded())) {
+                throw new IllegalArgumentException("Conflicting public key for kid");
+            }
+        }
+        if (keys.isEmpty() || keys.size() > 4) throw new IllegalArgumentException("At least one trusted public key required");
+        return new UserTokenVerifier(Map.copyOf(keys), Clock.systemUTC());
+    }
+
+    private static RSAPublicKey parsePublicKey(String file) throws Exception {
+        Path path = Path.of(file);
+        if (Files.size(path) > 8192) throw new IllegalArgumentException("Public key file too large");
+        String pem = Files.readString(path);
         if (!pem.startsWith("-----BEGIN PUBLIC KEY-----") || !pem.contains("-----END PUBLIC KEY-----"))
             throw new IllegalArgumentException("Expected X.509 public key");
         String body = pem.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "").replaceAll("\\s", "");
         RSAPublicKey key = (RSAPublicKey) KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(body)));
-        return new UserTokenVerifier(Map.of(kid, key), Clock.systemUTC());
+        if (key.getModulus().bitLength() < 2048) throw new IllegalArgumentException("RSA public key must be at least 2048 bits");
+        return key;
     }
 }

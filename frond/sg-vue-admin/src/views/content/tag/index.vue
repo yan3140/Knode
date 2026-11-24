@@ -155,12 +155,13 @@ export default {
     this.getList()
   },
   methods: {
-    /** 查询分类列表 */
+    /** 查询标签列表 */
     getList() {
       this.loading = true
       listTag(this.queryParams).then((response) => {
-        this.categoryList = response.rows
-        this.total = response.total
+        this.categoryList = (response && response.rows) || []
+        this.total = Number(response && response.total) || 0
+      }).catch(() => {}).finally(() => {
         this.loading = false
       })
     },

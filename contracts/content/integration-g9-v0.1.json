@@ -1,0 +1,66 @@
+{
+  "name": "CONTENT-INTEGRATION-G9",
+  "version": "0.1",
+  "status": "Implemented in knode-content with opt-in Nacos discovery, Sentinel governance, Micrometer Prometheus + OpenTelemetry tracing, and overlapping multi-kid auth rotation.",
+  "governance": {
+    "module": "com.lx:knode-governance:1.0-SNAPSHOT",
+    "toggle": "CONTENT_GOVERNANCE_ENABLED (defaults false)",
+    "nacosGroup": "CONTENT_GOVERNANCE_GROUP (defaults KNODE_SENTINEL)",
+    "dataIds": [
+      "knode-content.flow.json",
+      "knode-content.degrade.json"
+    ],
+    "governedOutboundResources": [
+      "feign:knode-user#serviceTokens",
+      "feign:knode-user#publicProfiles",
+      "feign:knode-user#adminMe",
+      "feign:knode-community#relationsBatch",
+      "feign:knode-ops#get",
+      "feign:knode-ops#post"
+    ],
+    "readinessIndicator": "contentGovernance"
+  },
+  "discovery": {
+    "toggle": "CONTENT_NACOS_DISCOVERY_ENABLED (defaults false)",
+    "configImport": "disabled (spring.cloud.nacos.config.enabled=false)",
+    "readinessIndicator": "contentDiscovery"
+  },
+  "observability": {
+    "module": "com.lx:knode-observability:1.0-SNAPSHOT",
+    "toggle": "CONTENT_OBSERVABILITY_ENABLED (defaults false)",
+    "otlpEndpoint": "CONTENT_OTLP_ENDPOINT (bounded queue 512, batch 128, export timeout 2s, connect timeout 1s)",
+    "propagation": "W3C traceparent only (baggage disabled); X-Request-Id normalized once at highest precedence filter and propagated to outbound calls and OTel span attribute knode.request_id",
+    "metrics": "/actuator/prometheus on loopback management port"
+  },
+  "authRotation": {
+    "env": "KNODE_AUTH_TRUSTED_PUBLIC_KEYS (kid1=/abs/path1;kid2=/abs/path2, up to 4 kids, >= 2048-bit RSA)",
+    "compatibility": "Retains KNODE_AUTH_PUBLIC_KEY_ID and KNODE_AUTH_PUBLIC_KEY_FILE"
+  },
+  "buildPrerequisites": [
+    "mvn -B -N -DskipTests install",
+    "mvn -B -f knode-auth/pom.xml -DskipTests install",
+    "mvn -B -f knode-governance/pom.xml -DskipTests install",
+    "mvn -B -f knode-observability/pom.xml -DskipTests install",
+    "mvn -B -f knode-content/pom.xml clean package"
+  ],
+  "verificationScope": {
+    "realProcessesVerified": [
+      "knode-gateway, knode-user, knode-content production JARs",
+      "isolated native MySQL 8.0.43 (two databases, least-privilege accounts, UTC timezone, clean SHUTDOWN exit code 0)",
+      "overlapping multi-kid auth verification (KNODE_AUTH_TRUSTED_PUBLIC_KEYS) and /actuator/prometheus",
+      "Microsoft Edge headless CDP browser regression against real sg-blog-vue and sg-vue-admin webpack dev servers, real 3-service JARs, and native MySQL 8.0.43 (reports/microservices/g8-content-browser/verification.json, 21/21 checks + 3 screenshots)"
+    ],
+    "substitutesAndUnitTests": [
+      "isolated TLS 1.3 ACL-enforced RESP protocol test double for auth Redis session verification and outage/recovery",
+      "RuntimeWiringTest for Sentinel FlowRule degradation and OTel W3C traceparent + X-Request-Id propagation (InMemorySpanExporter)",
+      "G8 browser transparent loopback proxy for deterministic page-2 503 injection, latency injection, delayed 2nd upload stub (aborted mid-flight via Element UI remove), and controlled 200 thumbnail preview stub on 3rd upload attempt (1st upload hit real knode-content with OSS disabled -> 503)"
+    ],
+    "notVerifiedIn03Scope": [
+      "live Nacos server registration and discovery",
+      "live OTLP/Jaeger trace ingestion",
+      "real VM Redis and real Aliyun OSS upload",
+      "real knode-community, knode-search, knode-knowledge services",
+      "production data migration and cutover"
+    ]
+  }
+}

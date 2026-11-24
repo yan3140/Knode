@@ -43,7 +43,7 @@
                             <header>
                                 <img  :src="$store.state.errorImg"  :onerror="$store.state.errorImg">
                                 <div class="i-name">
-                                    {{item.username}}
+                                    {{ commentUserName(item.username, item.userInfoStatus) }}
                                 </div>
                                 <!-- <div class="i-class">
                                     {{item.label}}
@@ -54,7 +54,7 @@
                             </header>
                             <section>
                                 <p><template v-for="(part, partIndex) in commentParts(item.content)"><img v-if="part.src" :key="'emoji-'+partIndex" :src="part.src" :alt="part.text"><span v-else :key="'text-'+partIndex">{{part.text}}</span></template></p>
-                                <div v-if="haslogin" class="tmsg-replay" @click="respondMsg(item.id,item.id,item.createBy)">
+                                <div v-if="haslogin" class="tmsg-replay" @click="respondMsg(item.id,item.id,item.createBy,$event)">
                                     回复
                                 </div>
                             </section>
@@ -65,7 +65,7 @@
                                     <header>
                                             <img :src="$store.state.errorImg"  :onerror="$store.state.errorImg">
                                             <div class="i-name">
-                                                {{citem.username}} <span>回复</span> {{citem.toCommentUserName}}
+                                                {{ commentUserName(citem.username, citem.userInfoStatus) }} <span>回复</span> {{ commentUserName(citem.toCommentUserName, citem.toCommentUserInfoStatus) }}
                                             </div>
                                             <div class="i-time">
                                                 <time>{{citem.createTime}}</time>
@@ -73,7 +73,7 @@
                                     </header>
                                     <section>
                                         <p><template v-for="(part, partIndex) in commentParts(citem.content)"><img v-if="part.src" :key="'emoji-'+partIndex" :src="part.src" :alt="part.text"><span v-else :key="'text-'+partIndex">{{part.text}}</span></template></p>
-                                        <div v-show="haslogin" class="tmsg-replay" @click="respondMsg(item.id,citem.id,citem.createBy)">
+                                        <div v-show="haslogin" class="tmsg-replay" @click="respondMsg(item.id,citem.id,citem.createBy,$event)">
                                             回复
                                         </div>
                                     </section>
@@ -83,8 +83,11 @@
                     </li>
 
                 </ul>
-                <h1 v-show='hasMore' class="tcolors-bg" @click="addMoreFun" >查看更多</h1>
-                <h1 v-show='!hasMore' class="tcolors-bg" >没有更多</h1>
+                <p v-if="commentError" class="tmsg-error">{{ commentError }}</p>
+                <h1 v-if="commentError" class="tcolors-bg" @click="retryCommentPage">重试加载</h1>
+                <h1 v-else-if="loadingComments" class="tcolors-bg">加载中...</h1>
+                <h1 v-else-if='hasMore' class="tcolors-bg" @click="addMoreFun" >查看更多</h1>
+                <h1 v-else class="tcolors-bg" >没有更多</h1>
             </div>
         </div>
     </div>
@@ -109,8 +112,17 @@
                 textarea: '',//文本框输入内容
                 pBody:true,//表情打开控制
                 commentList:[],//评论列表数据
-                aid:0,//文章id
+                aid:'',//文章id（十进制字符串，友链评论为空）
                 hasMore:false,
+                loadingComments:false,
+                commentRequestSeq:0,
+                nextPageNum:1,
+                failedPageNum:null,
+                sending:false,
+                sendRequestSeq:0,
+                activeTargetKey:'',
+                sendTipTimer:null,
+                commentError:'',
                 haslogin:false,
                 userId:'',//用户id
                 type:0,//回复评论的当前的commentId
@@ -197,17 +209,51 @@
             }
         },
         methods: { //事件处理器
-            setData(initData,result){
-                var msg = result.rows;
-                if(initData){
-                    //刷新列表
-                    this.commentList = msg;
-                }else{
-                    //加载更多
-                    this.commentList = this.commentList.concat(msg);
+            commentUserName(name, status){
+                if (name) return name
+                if (status === 'UNAVAILABLE') return '用户昵称暂不可用'
+                if (status === 'MISSING') return '已注销用户'
+                return '匿名用户'
+            },
+            currentTargetKey(){
+                var routeName = this.$route && this.$route.name ? String(this.$route.name) : '';
+                if (routeName === 'DetailArticle') {
+                    var rawAid = this.$route.query && this.$route.query.aid;
+                    var normalizedAid = rawAid != null ? String(rawAid).trim() : '';
+                    var validAid = /^[1-9]\d{0,18}$/.test(normalizedAid) ? normalizedAid : '';
+                    return routeName + ':' + validAid;
                 }
-                
-                this.hasMore = result.total>this.commentList.length
+                return routeName + ':';
+            },
+            setData(initData, result, loadedPage){
+                var msg = (result && result.rows) || [];
+                var total = Number(result && result.total) || 0;
+                this.commentError = '';
+                this.failedPageNum = null;
+                if(initData || loadedPage === 1){
+                    //刷新列表
+                    this.commentList = msg.slice();
+                }else{
+                    //加载更多（按 id 防重兜底）
+                    var seen = {};
+                    for (var i = 0; i < this.commentList.length; i++) {
+                        if (this.commentList[i] && this.commentList[i].id != null) {
+                            seen[String(this.commentList[i].id)] = true;
+                        }
+                    }
+                    var appended = [];
+                    for (var j = 0; j < msg.length; j++) {
+                        var row = msg[j];
+                        var key = row && row.id != null ? String(row.id) : null;
+                        if (key && seen[key]) continue;
+                        if (key) seen[key] = true;
+                        appended.push(row);
+                    }
+                    this.commentList = this.commentList.concat(appended);
+                }
+                this.nextPageNum = loadedPage + 1;
+                this.queryParams.pageNum = loadedPage;
+                this.hasMore = total > this.commentList.length
                 this.$nextTick(() => this.focusNotificationComment())
               },
           //选择表情包
@@ -234,41 +280,75 @@
           //发送留言
           sendMsg:function(){//留言
               var that = this;
-              if(that.textarea){
+              if (that.sending) return;
+              if(that.textarea && that.textarea.trim()){
+                  var submitTargetKey = that.currentTargetKey();
+                  var sendSeq = ++that.sendRequestSeq;
+                  var submitType = that.type;
+                  var targetArticleId = submitType === 1 ? null : that.aid;
+                  var submitRootId = that.rootId;
+                  var submitToCommentId = that.toCommentId;
+                  var submitToCommentUserId = that.toCommentUserId;
+                  var submitContent = that.textarea;
+                  that.sending = true;
                   that.sendTip = '咻~~';
-                    sendComment(that.type,that.aid,that.rootId,that.toCommentId,that.toCommentUserId,that.textarea).then((response)=>{
-                        that.textarea = '';
-                        that.rootId = -1;
-                        that.toCommentId = -1;
-                        that.toCommentUserId=-1;
-
-                        that.routeChange();
-                        that.removeRespond();
-                        var timer02 = setTimeout(function(){
-                            that.sendTip = '发送~';
-                            clearTimeout(timer02);
-                        },1000)
-                    })
-              }else{
-                  that.sendTip = '内容不能为空~'
-                  var timer = setTimeout(function(){
+                  if (that.sendTipTimer) {
+                      clearTimeout(that.sendTipTimer);
+                      that.sendTipTimer = null;
+                  }
+                  sendComment(submitType, targetArticleId, submitRootId, submitToCommentId, submitToCommentUserId, submitContent).then((response)=>{
+                      if (sendSeq !== that.sendRequestSeq || that.currentTargetKey() !== submitTargetKey) {
+                          return;
+                      }
+                      that.textarea = '';
+                      that.rootId = -1;
+                      that.toCommentId = -1;
+                      that.toCommentUserId = -1;
+                      that.showCommentList(true, 1);
+                      that.removeRespond();
+                      that.sendTipTimer = setTimeout(function(){
+                          if (sendSeq === that.sendRequestSeq && that.currentTargetKey() === submitTargetKey) {
+                              that.sendTip = '发送~';
+                          }
+                          that.sendTipTimer = null;
+                      }, 1000);
+                  }).catch(function(){
+                      if (sendSeq !== that.sendRequestSeq || that.currentTargetKey() !== submitTargetKey) {
+                          return;
+                      }
                       that.sendTip = '发送~';
-                      clearTimeout(timer);
-                  },3000)
+                  }).finally(function(){
+                      if (sendSeq === that.sendRequestSeq) {
+                          that.sending = false;
+                      }
+                  });
+              }else{
+                  var emptySeq = that.sendRequestSeq;
+                  var emptyTargetKey = that.currentTargetKey();
+                  that.sendTip = '内容不能为空~';
+                  if (that.sendTipTimer) {
+                      clearTimeout(that.sendTipTimer);
+                  }
+                  that.sendTipTimer = setTimeout(function(){
+                      if (emptySeq === that.sendRequestSeq && that.currentTargetKey() === emptyTargetKey) {
+                          that.sendTip = '发送~';
+                      }
+                      that.sendTipTimer = null;
+                  }, 3000);
               }
           },
-          respondMsg:function(rootId,toCommentId,toCommentUserId){//回复留言
-              // console.log(leavePid,pid);
+          respondMsg:function(rootId,toCommentId,toCommentUserId,evt){//回复留言
               var that = this;
               if(localStorage.getItem('userInfo')){
-                  var dom = event.currentTarget;
-                  dom = dom.parentNode;
+                  var sourceEvent = evt || (typeof event !== 'undefined' ? event : null);
+                  var dom = sourceEvent && sourceEvent.currentTarget ? sourceEvent.currentTarget.parentNode : null;
                   this.isRespond = true;
-                //   this.leavePid = leavePid;
-                  this.rootId = rootId
-                  this.toCommentId = toCommentId;
-                  this.toCommentUserId = toCommentUserId
-                  dom.appendChild(this.$refs.respondBox);
+                  this.rootId = String(rootId);
+                  this.toCommentId = String(toCommentId);
+                  this.toCommentUserId = String(toCommentUserId);
+                  if (dom && this.$refs.respondBox) {
+                      dom.appendChild(this.$refs.respondBox);
+                  }
               }else{
                   that.$confirm('登录后即可点赞和收藏，是否前往登录页面?', '提示', {
                     confirmButtonText: '确定',
@@ -288,44 +368,125 @@
             this.rootId = -1;
             this.toCommentId = -1;
             this.toCommentUserId=-1;
-            this.$refs.tmsgBox.insertBefore(this.$refs.respondBox,this.$refs.listDom);
+            if (this.$refs.tmsgBox && this.$refs.respondBox && this.$refs.listDom) {
+                this.$refs.tmsgBox.insertBefore(this.$refs.respondBox,this.$refs.listDom);
+            }
           },
-          showCommentList: function(initData){//评论列表
+          handleCommentLoadError: function(initData, failedPage, err) {
+              var status = err && err.response && err.response.status;
+              var code = err && (err.code || (err.response && err.response.data && err.response.data.code));
+              if ((status === 413 || code === 515) && this.queryParams.pageSize > 1) {
+                  this.queryParams.pageSize = 1;
+                  this.loadingComments = false;
+                  this.failedPageNum = null;
+                  this.nextPageNum = 1;
+                  this.queryParams.pageNum = 1;
+                  // pageSize 变更后分页边界变化，从第 1 页重新加载替换列表，避免重复或漏项
+                  this.showCommentList(true, 1);
+                  return;
+              }
+              this.failedPageNum = failedPage;
+              this.nextPageNum = failedPage;
+              this.queryParams.pageNum = failedPage;
+              this.commentError = status === 413 ? '单条评论回复过多，暂无法一次展示' : ((err && err.message) || '评论加载失败，请稍后重试');
+          },
+          retryCommentPage: function() {
+              if (this.loadingComments) return;
+              var retryPage = this.failedPageNum || this.nextPageNum || 1;
+              this.showCommentList(retryPage === 1, retryPage);
+          },
+          showCommentList: function(initData, explicitPageNum){//评论列表
               var that = this;
-              that.aid = that.$route.query.aid==undefined?1:parseInt(that.$route.query.aid);//获取传参的aid
-              that.queryParams.articleId = that.aid
+              var isInit = !!initData;
+              if (!isInit && that.loadingComments) {
+                  return;
+              }
+              var rawAid = that.$route.query && that.$route.query.aid;
+              var normalizedAid = rawAid != null ? String(rawAid).trim() : '';
+              that.aid = /^[1-9]\d{0,18}$/.test(normalizedAid) ? normalizedAid : '';
+              var targetPage = isInit ? 1 : (typeof explicitPageNum === 'number' && explicitPageNum >= 1 ? explicitPageNum : (that.failedPageNum || that.nextPageNum || 1));
+              var seq = ++that.commentRequestSeq;
+              var requestTargetKey = that.currentTargetKey();
               //判断当前用户是否登录
               var token = getToken();
-              if(token){
-                  that.haslogin = true;
-              }else{
-                  that.haslogin = false;
+              that.haslogin = !!token;
+              that.commentError = '';
+              that.failedPageNum = null;
+              that.queryParams.pageNum = targetPage;
+              if (isInit) {
+                  that.commentList = [];
+                  that.hasMore = false;
+                  that.nextPageNum = 1;
               }
 
-              //公用设置数据方法
-              
               if(that.$route.name=='DetailArticle'){//文章列表的评论
                   that.type = 0;
-                  getArticleComment(that.queryParams).then((response)=>{
-                     that.setData(initData,response);
-                  })
-              }else{//其他评论
-                    if(that.$route.name == 'FriendsLink'){
-                      that.type = 1
-                      getLinkComment(that.queryParams).then((response)=>{
-                          that.setData(initData,response);
-                      })
+                  if (!that.aid) {
+                      that.commentList = [];
+                      that.hasMore = false;
+                      that.loadingComments = false;
+                      return;
                   }
+                  that.queryParams.articleId = that.aid;
+                  that.loadingComments = true;
+                  getArticleComment({
+                      articleId: that.aid,
+                      pageNum: targetPage,
+                      pageSize: that.queryParams.pageSize
+                  }).then((response)=>{
+                     if (seq !== that.commentRequestSeq || that.currentTargetKey() !== requestTargetKey) return;
+                     that.setData(isInit, response, targetPage);
+                  }).catch((err)=>{
+                     if (seq !== that.commentRequestSeq || that.currentTargetKey() !== requestTargetKey) return;
+                     that.handleCommentLoadError(isInit, targetPage, err);
+                  }).finally(()=>{
+                     if (seq === that.commentRequestSeq) that.loadingComments = false;
+                  })
+              }else if(that.$route.name == 'FriendsLink'){//友链评论显式不传articleId
+                  that.type = 1;
+                  that.aid = '';
+                  that.queryParams.articleId = null;
+                  that.loadingComments = true;
+                  getLinkComment({
+                      pageNum: targetPage,
+                      pageSize: that.queryParams.pageSize
+                  }).then((response)=>{
+                      if (seq !== that.commentRequestSeq || that.currentTargetKey() !== requestTargetKey) return;
+                      that.setData(isInit, response, targetPage);
+                  }).catch((err)=>{
+                      if (seq !== that.commentRequestSeq || that.currentTargetKey() !== requestTargetKey) return;
+                      that.handleCommentLoadError(isInit, targetPage, err);
+                  }).finally(()=>{
+                      if (seq === that.commentRequestSeq) that.loadingComments = false;
+                  })
               }
           },
           addMoreFun:function(){//查看更多
-              this.queryParams.pageNum++
-              this.showCommentList(false);
+              if (this.loadingComments || !this.hasMore) return;
+              this.showCommentList(false, this.nextPageNum);
           },
           routeChange:function(){//重新加载
-              var that = this;
-              this.queryParams.pageNum = 1
-              this.showCommentList(true);
+              var nextTargetKey = this.currentTargetKey();
+              var targetChanged = this.activeTargetKey !== '' && this.activeTargetKey !== nextTargetKey;
+              this.activeTargetKey = nextTargetKey;
+              if (targetChanged) {
+                  this.sendRequestSeq++;
+                  this.sending = false;
+                  this.textarea = '';
+                  this.sendTip = '发送~';
+                  if (this.sendTipTimer) {
+                      clearTimeout(this.sendTipTimer);
+                      this.sendTipTimer = null;
+                  }
+                  this.removeRespond();
+              }
+              this.commentRequestSeq++;
+              this.loadingComments = false;
+              this.nextPageNum = 1;
+              this.failedPageNum = null;
+              this.queryParams.pageNum = 1;
+              this.queryParams.pageSize = 10;
+              this.showCommentList(true, 1);
           },
           focusNotificationComment:function(){
               var commentId = this.$route.query.commentId;
@@ -340,8 +501,7 @@
 
         },
         watch: {
-           // 如果路由有变化，会再次执行该方法
-           // '$route':'routeChange'
+           '$route':'routeChange'
          },
         created() { //生命周期函数
             // console.log(this.$route);
@@ -350,6 +510,14 @@
         },
         mounted(){//页面加载完成后
 
+        },
+        beforeDestroy() {
+            this.sendRequestSeq++;
+            this.commentRequestSeq++;
+            if (this.sendTipTimer) {
+                clearTimeout(this.sendTipTimer);
+                this.sendTipTimer = null;
+            }
         }
     }
 </script>

@@ -65,9 +65,10 @@
     </section>
     <section class="rs4">
       <h2 class="ui label">热门文章</h2>
-      <ul>
+      <p v-if="hotLoadError" class="hot-error">{{ hotLoadError }}</p>
+      <ul v-else>
         <li v-for="(item, index) in browseList" :key="'browseList' + index">
-          <a :href="'#/DetailArticle?aid=' + item.id" target="_blank">{{
+          <a :href="'#/DetailArticle?aid=' + item.id" target="_blank" rel="noopener noreferrer">{{
             item.title
           }}</a>
           —— {{ item.viewCount }} 次围观
@@ -117,7 +118,8 @@ export default {
       loveme: false,
       gotoTop: false, //返回顶部
       going: false, //是否正在执行上滑动作
-      browseList: "", //热门文章 浏览量最多
+      browseList: [], //热门文章 浏览量最多
+      hotLoadError: "",
       artCommentList: "", //最新评论
       catchMeObj: {
         //个人信息
@@ -152,9 +154,15 @@ export default {
       }, 30);
     },
     getHotArticleList() {
-      hotArticleList().then((response) => {
-        this.browseList = response;
-      });
+      this.hotLoadError = "";
+      hotArticleList()
+        .then((response) => {
+          this.browseList = Array.isArray(response) ? response : [];
+        })
+        .catch(() => {
+          this.browseList = [];
+          this.hotLoadError = "热门文章加载失败";
+        });
     },
   },
   components: {
