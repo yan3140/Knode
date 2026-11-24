@@ -159,6 +159,11 @@ class SnapshotHttpTest {
         error(401, "INVALID_SERVICE_TOKEN", send("POST",VIS,null,good));
         error(403, "SERVICE_PERMISSION_DENIED", send("POST",VIS,snap,good));
         error(403, "SERVICE_PERMISSION_DENIED", send("POST",CURRENT,vis,"{\"articleIds\":[\"1\"]}"));
+        String notif = service("knode-community", "content:notification-metadata:read");
+        error(403, "SERVICE_PERMISSION_DENIED", send("POST",VIS,notif,good));
+        error(403, "SERVICE_PERMISSION_DENIED", send("POST",CURRENT,notif,"{\"articleIds\":[\"1\"]}"));
+        error(403, "SERVICE_PERMISSION_DENIED", send("POST","/internal/v1/content/articles/notification-metadata:batch",vis,"{\"articleIds\":[\"1\"]}"));
+        error(403, "SERVICE_PERMISSION_DENIED", send("POST","/internal/v1/content/articles/notification-metadata:batch",snap,"{\"articleIds\":[\"1\"]}"));
         error(401, "INVALID_SERVICE_TOKEN", send("POST",VIS,
                 machine(OWNER,"knode-user","test-key",List.of(VIS_READ)),good));
         error(401, "INVALID_SERVICE_TOKEN", send("POST",VIS,

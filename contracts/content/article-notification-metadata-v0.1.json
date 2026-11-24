@@ -1,0 +1,111 @@
+{
+  "name": "CONTENT-ARTICLE-NOTIFICATION-METADATA-BATCH",
+  "version": "0.1",
+  "status": "implemented in knode-content; candidate pending controller and 04/02 alignment",
+  "provider": "knode-content",
+  "intendedConsumer": "knode-community (04 notification inbox enrichment)",
+  "scope": "Lightweight internal batch lookup returning current article visibility, sourceRevision, decision, and current title (PUBLIC only) for community inbox rendering and link eligibility. Never reads or returns article content, summary, thumbnail, tags, categories, Redis counters, or User profiles.",
+  "route": {
+    "method": "POST",
+    "path": "/internal/v1/content/articles/notification-metadata:batch",
+    "contentType": "application/json",
+    "cacheControl": "no-store",
+    "dtoStyle": "bare JSON object (not ResponseResult wrapper)"
+  },
+  "authorization": {
+    "mechanism": "Single Authorization: Bearer <service-jwt> verified by shared ServiceTokenVerifier using KNODE_CONTENT_OPS_PUBLIC_KEYS (up to 4 overlapping >=2048-bit RSA kids).",
+    "issuer": "knode-user",
+    "tokenUse": "service",
+    "audience": "knode-content",
+    "requiredPermission": "content:notification-metadata:read",
+    "isolation": "Independent from content:visibility:read and content:snapshot:read. Rejects user tokens, forged identity/actor/operator/viewer headers, mixed or duplicate credentials, non-POST methods, and path variants. Does not require KNODE_CONTENT_SNAPSHOT_API_ENABLED, snapshot cursor key, or snapshot epoch.",
+    "userPolicyGrantRequired": {
+      "owner": "02 knode-user via controller alignment",
+      "serviceId": "knode-community",
+      "audience": "knode-content",
+      "permissions": [
+        "content:notification-metadata:read"
+      ]
+    }
+  },
+  "request": {
+    "schema": {
+      "articleIds": [
+        "9007199254740993",
+        "102"
+      ]
+    },
+    "rules": [
+      "Exact JSON object with single required key articleIds; no extra, duplicate, null, or trailing fields; no query parameters; max 8192 request bytes.",
+      "articleIds must contain 1 to 100 canonical positive signed int64 decimal strings matching ^[1-9][0-9]{0,18}$ and <= 9223372036854775807 (no numeric JSON values, no leading zeros, no negatives, no zero).",
+      "Deduplicated by first occurrence; response contains exactly one item per distinct ID in that first-occurrence order."
+    ]
+  },
+  "response": {
+    "example": {
+      "items": [
+        {
+          "articleId": "9007199254740993",
+          "sourceRevision": "7",
+          "visibility": "PUBLIC",
+          "decision": "READABLE",
+          "title": "Spring Cloud Notes"
+        },
+        {
+          "articleId": "102",
+          "sourceRevision": "3",
+          "visibility": "WITHDRAWN",
+          "decision": "DENIED"
+        },
+        {
+          "articleId": "103",
+          "sourceRevision": "1",
+          "visibility": "DRAFT",
+          "decision": "DENIED"
+        },
+        {
+          "articleId": "104",
+          "sourceRevision": "4",
+          "visibility": "DELETED",
+          "decision": "DENIED"
+        },
+        {
+          "articleId": "9223372036854775807",
+          "sourceRevision": null,
+          "visibility": "MISSING",
+          "decision": "DENIED"
+        }
+      ]
+    },
+    "fieldRules": {
+      "articleId": "Canonical decimal string matching requested int64 ID verbatim.",
+      "sourceRevision": "Canonical positive decimal string for PUBLIC, DRAFT, WITHDRAWN, and DELETED rows; JSON null for MISSING.",
+      "visibility": "PUBLIC | DRAFT | WITHDRAWN | DELETED | MISSING (identical classification rules to /internal/v1/content/articles/visibility:batch).",
+      "decision": "READABLE iff visibility is PUBLIC; DENIED for DRAFT, WITHDRAWN, DELETED, and MISSING.",
+      "title": "Present only when visibility is PUBLIC (current title); omitted from JSON object for all DENIED states (DRAFT, WITHDRAWN, DELETED, MISSING)."
+    }
+  },
+  "querySemantics": {
+    "sql": "Single read-only REPEATABLE READ query (5s timeout) projecting only id, source_revision, status, deleted, public_history existence predicate, and conditional public title from content_article / content_article_event. Non-public titles are nulled in SQL and never returned.",
+    "compatibility": "Existing POST /internal/v1/content/articles/visibility:batch and POST /internal/v1/content/articles/snapshots:batch remain unchanged and fully compatible."
+  },
+  "errors": {
+    "shape": {
+      "error": {
+        "code": "DEPENDENCY_UNAVAILABLE",
+        "message": "Content data is unavailable",
+        "retryable": true
+      },
+      "requestId": "req-001"
+    },
+    "statusCodes": {
+      "400": "INVALID_ARGUMENT",
+      "401": "INVALID_SERVICE_TOKEN",
+      "403": "SERVICE_PERMISSION_DENIED",
+      "503": [
+        "AUTH_STATE_UNAVAILABLE",
+        "DEPENDENCY_UNAVAILABLE"
+      ]
+    }
+  }
+}

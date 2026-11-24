@@ -1,7 +1,7 @@
 {
   "name": "CONTENT-RUNTIME-AUTH",
   "version": "0.1",
-  "status": "implemented in content; local fixture verification only; integration pending",
+  "status": "Implemented in knode-content (G1-G9); verified with unit/H2 tests and real Gateway+User+Content JAR + native MySQL 8.0.43 + TLS/ACL RESP substitute integration; live Nacos/OTLP/VM Redis/OSS/peer domains pending.",
   "requiredEnvironment": [
     "KNODE_ENVIRONMENT",
     "KNODE_CONTENT_JDBC_URL",
@@ -18,13 +18,13 @@
   ],
   "runtime": {
     "http": "separate application port KNODE_CONTENT_PORT on 127.0.0.1",
-    "management": "separate loopback port; expose health only",
-    "readiness": "database connection and authoritative session Redis GET must succeed",
+    "management": "separate loopback port; expose health and prometheus",
+    "readiness": "database connection, authoritative session Redis GET, optional Nacos discovery and optional Sentinel governance rules must succeed",
     "schema": "automatic SQL, Flyway and Liquibase disabled by default",
     "redis": "TLS required, configure trusted CA with JVM truststore; standalone host and port; username restricted to GET on session key namespace",
     "redisKey": "knode:<environment>:v1:auth:session:<sid>",
     "readTimeout": "800ms reactive timeout, 1000ms blocking upper bound; no positive cache",
-    "publicKey": "single configured kid and X.509 RSA public key file, minimum 2048 bits; rotation requires coordinated restart",
+    "publicKey": "supports KNODE_AUTH_PUBLIC_KEY_ID/KNODE_AUTH_PUBLIC_KEY_FILE plus overlapping multi-kid KNODE_AUTH_TRUSTED_PUBLIC_KEYS (up to 4 distinct kids, >= 2048-bit RSA) for zero-downtime key rotation",
     "startup": "required auth and DB settings, public key and TLS must be valid or startup fails"
   },
   "auth": {
@@ -35,20 +35,23 @@
     "authorization": "Admin article/category/tag/link/upload routes revalidate current permission and subject through User /api/admin/auth/me on every request; *:*:* only if explicitly returned. Blog author methods retain ownership checks."
   },
   "build": {
-    "parent": "mvn -N -DskipTests install",
-    "sdk": "mvn -f knode-auth/pom.xml -DskipTests install",
-    "service": "mvn -f knode-content/pom.xml package",
+    "parent": "mvn -B -N -DskipTests install",
+    "sdks": [
+      "mvn -B -f knode-auth/pom.xml -DskipTests install",
+      "mvn -B -f knode-governance/pom.xml -DskipTests install",
+      "mvn -B -f knode-observability/pom.xml -DskipTests install"
+    ],
+    "service": "mvn -B -f knode-content/pom.xml clean package",
     "rootIntegration": "controller to request infra add <module>knode-content</module> to root pom.xml"
   },
   "notImplemented": [
-    "community/search/knowledge integration",
-    "production event protocol",
-    "Nacos",
-    "real User/Redis/MySQL integration",
-    "full OpenTelemetry tracing integration",
-    "production event relay and consumer integration"
+    "real community/search/knowledge downstream services",
+    "live Nacos server registration verification",
+    "live OTLP/Jaeger trace collection verification",
+    "real VM Redis and real Aliyun OSS live verification",
+    "production data migration and cutover"
   ],
-  "verification": "loopback HTTP with signed synthetic RSA keys and session substitute; H2 and mocked Redis reader checks. Not a real User/Redis/MySQL integration.",
+  "verification": "Unit/SpringBootTest suite (H2 + mocked/synthetic providers + Sentinel FlowRule + OTel InMemorySpanExporter) plus real Gateway+User+Content production JAR E2E against isolated native MySQL 8.0.43 and isolated TLS 1.3 ACL-enforced RESP protocol substitute (reports/microservices/g9-content-cross-service/verification.json). Live Nacos, OTLP collector, VM Redis, real OSS, and real peer business domains are not claimed as verified.",
   "articleSlice": "Blog POST and authorized admin article create/edit/status/delete implemented; internal author methods enforce ownership. Local immutable facts only.",
   "publicQueryContract": "contracts/content/public-content-query-v0.1.json",
   "adminContract": "contracts/content/admin-article-category-v0.1.json",
@@ -57,5 +60,8 @@
   "commentContract": "contracts/content/comment-v0.1.json",
   "counterContract": "contracts/content/counter-v0.1.json",
   "relayContract": "contracts/content/relay-v0.1.json",
-  "snapshotContract": "contracts/content/article-snapshot-06a-v0.1.json"
+  "snapshotContract": "contracts/content/article-snapshot-06a-v0.1.json",
+  "notificationMetadataContract": "contracts/content/article-notification-metadata-v0.1.json",
+  "facadeContract": "contracts/content/facade-g7-v0.1.json",
+  "integrationContract": "contracts/content/integration-g9-v0.1.json"
 }

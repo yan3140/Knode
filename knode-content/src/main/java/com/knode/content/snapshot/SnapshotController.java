@@ -32,6 +32,12 @@ public class SnapshotController {
         return response(articles.visibility(SnapshotRequests.visibility(request).ids()));
     }
 
+    @PostMapping(NOTIFICATION_METADATA)
+    public ResponseEntity<?> notificationMetadata(HttpServletRequest request) {
+        SnapshotRoutes.requireOwner(request, NOTIFICATION_METADATA_READ);
+        return response(articles.notificationMetadata(SnapshotRequests.batch(request)));
+    }
+
     @PostMapping(CURRENT)
     public ResponseEntity<?> current(HttpServletRequest request) {
         authorize(request, SNAPSHOT_READ);

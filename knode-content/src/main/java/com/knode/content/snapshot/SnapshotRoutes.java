@@ -12,11 +12,13 @@ import static com.knode.content.snapshot.SnapshotFailure.Code.*;
 public final class SnapshotRoutes {
     static final String ROOT = "/internal/v1/content";
     static final String VISIBILITY = ROOT + "/articles/visibility:batch";
+    static final String NOTIFICATION_METADATA = ROOT + "/articles/notification-metadata:batch";
     static final String CURRENT = ROOT + "/articles/snapshots:batch";
     static final String EXPORTS = ROOT + "/article-snapshots";
     static final String EXPORT_PAGE = EXPORTS + "/{snapshotId}";
     static final String CHANGES = ROOT + "/article-changes";
     static final String VISIBILITY_READ = "content:visibility:read";
+    static final String NOTIFICATION_METADATA_READ = "content:notification-metadata:read";
     static final String SNAPSHOT_READ = "content:snapshot:read";
     private static final Pattern EXPORT_ID = Pattern.compile(EXPORTS + "/[A-Za-z0-9_-]{1,64}");
 
@@ -26,6 +28,7 @@ public final class SnapshotRoutes {
         String path = request.getRequestURI();
         return switch (request.getMethod()) {
             case "POST" -> VISIBILITY.equals(path) ? VISIBILITY_READ
+                    : NOTIFICATION_METADATA.equals(path) ? NOTIFICATION_METADATA_READ
                     : CURRENT.equals(path) || EXPORTS.equals(path) ? SNAPSHOT_READ : null;
             case "GET" -> CHANGES.equals(path) || EXPORT_ID.matcher(path).matches() ? SNAPSHOT_READ : null;
             default -> null;

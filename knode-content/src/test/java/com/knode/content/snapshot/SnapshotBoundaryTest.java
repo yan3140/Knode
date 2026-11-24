@@ -41,6 +41,41 @@ class SnapshotBoundaryTest {
     }
 
     @Test
+    void notificationMetadataHandlerEnforcesOwnerPermissionAudienceMethodAndDoesNotRequireSnapshotExportToggle() {
+        ArticleSnapshotRows rows = mock(ArticleSnapshotRows.class);
+        SnapshotExport exports = mock(SnapshotExport.class);
+        ArticleChangeFeed feed = mock(ArticleChangeFeed.class);
+        SnapshotController controller = new SnapshotController(new SnapshotSettings(false,true,"",""), rows, exports, feed);
+        var request = new MockHttpServletRequest("POST", NOTIFICATION_METADATA);
+        request.setContentType("application/json");
+        request.setContent("{\"articleIds\":[\"101\"]}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        assertEquals(401, assertThrows(SnapshotFailure.class, () -> controller.notificationMetadata(request)).status());
+        request.setAttribute(MachineAuth.PRINCIPAL,
+                new ServiceTokenVerifier.Principal("knode-community", "knode-content", Set.of(VISIBILITY_READ), 1));
+        assertEquals(403, assertThrows(SnapshotFailure.class, () -> controller.notificationMetadata(request)).status());
+        request.setAttribute(MachineAuth.PRINCIPAL,
+                new ServiceTokenVerifier.Principal("knode-community", "other", Set.of(NOTIFICATION_METADATA_READ), 1));
+        assertEquals(403, assertThrows(SnapshotFailure.class, () -> controller.notificationMetadata(request)).status());
+        request.setAttribute(MachineAuth.PRINCIPAL,
+                new ServiceTokenVerifier.Principal("knode-community", "knode-content", Set.of(NOTIFICATION_METADATA_READ), 1));
+        request.setMethod("GET");
+        assertEquals(401, assertThrows(SnapshotFailure.class, () -> controller.notificationMetadata(request)).status());
+        verifyNoInteractions(rows, exports, feed);
+
+        request.setMethod("POST");
+        when(rows.notificationMetadata(java.util.List.of(101L)))
+                .thenReturn(new ArticleSnapshotRows.Batch<>(java.util.List.of(
+                        new ArticleSnapshotRows.NotificationMetadataItem("101", "1",
+                                ArticleSnapshotRows.Visibility.PUBLIC, ArticleSnapshotRows.Decision.READABLE, "Hello"))));
+        var ok = controller.notificationMetadata(request);
+        assertEquals(200, ok.getStatusCode().value());
+        assertEquals("no-store", ok.getHeaders().getFirst("Cache-Control"));
+        verify(rows).notificationMetadata(java.util.List.of(101L));
+        verifyNoInteractions(exports, feed);
+    }
+
+    @Test
     void disablingAnOldExportGenerationRequiresRebootstrapEvenWithSameKey() {
         byte[] secret = new byte[32];
         new SecureRandom().nextBytes(secret);

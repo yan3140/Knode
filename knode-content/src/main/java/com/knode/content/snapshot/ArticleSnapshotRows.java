@@ -29,6 +29,8 @@ public class ArticleSnapshotRows {
 
     record Batch<T>(List<T> items) {}
     record VisibilityItem(String articleId, String sourceRevision, Visibility visibility, Decision decision) {}
+    record NotificationMetadataItem(String articleId, String sourceRevision, Visibility visibility, Decision decision,
+                                    @JsonInclude(JsonInclude.Include.NON_NULL) String title) {}
     record SnapshotItem(String articleId, String sourceRevision, Visibility visibility, Decision decision,
                         @JsonInclude(JsonInclude.Include.NON_NULL) JsonNode snapshot) {}
     record Taxonomy(String id, String name) {}
@@ -39,6 +41,16 @@ public class ArticleSnapshotRows {
     record Stored(long id, String json, int bytes) {}
     private record Location(long revision, Visibility visibility, long bytes) {
         static final Location MISSING = new Location(0, Visibility.MISSING, 0);
+        String revisionText() {
+            return visibility == Visibility.MISSING ? null : Long.toString(revision);
+        }
+        Decision decision() {
+            return visibility == Visibility.PUBLIC ? Decision.READABLE : Decision.DENIED;
+        }
+    }
+
+    private record NotificationRow(long revision, Visibility visibility, String title) {
+        static final NotificationRow MISSING = new NotificationRow(0, Visibility.MISSING, null);
         String revisionText() {
             return visibility == Visibility.MISSING ? null : Long.toString(revision);
         }
@@ -61,6 +73,32 @@ public class ArticleSnapshotRows {
         return new Batch<>(ids.stream().map(id -> {
             Location row = found.getOrDefault(id, Location.MISSING);
             return new VisibilityItem(id.toString(), row.revisionText(), row.visibility(), row.decision());
+        }).toList());
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ, timeout = 5)
+    public Batch<NotificationMetadataItem> notificationMetadata(List<Long> ids) {
+        Map<Long, NotificationRow> found = new HashMap<>();
+        db.query("""
+                SELECT a.id,a.source_revision,a.status,a.deleted,
+                    CASE WHEN a.status='1' AND a.deleted=0 THEN
+                        a.publication_fact_id IS NOT NULL OR a.published_at IS NOT NULL
+                        OR EXISTS (SELECT 1 FROM content_article_event e WHERE e.article_id=a.id)
+                    ELSE FALSE END AS public_history,
+                    CASE WHEN a.status='0' AND a.deleted=0 THEN a.title ELSE NULL END AS public_title
+                FROM content_article a WHERE a.id IN (""" + placeholders(ids.size()) + ")", rs -> {
+            long revision = rs.getLong("source_revision");
+            if (revision <= 0) throw new IllegalStateException("Invalid stored article revision");
+            Visibility state = classify(rs);
+            String title = state == Visibility.PUBLIC ? rs.getString("public_title") : null;
+            if (state == Visibility.PUBLIC && title == null) {
+                throw new IllegalStateException("Invalid stored article title");
+            }
+            found.put(rs.getLong("id"), new NotificationRow(revision, state, title));
+        }, ids.toArray());
+        return new Batch<>(ids.stream().map(id -> {
+            NotificationRow row = found.getOrDefault(id, NotificationRow.MISSING);
+            return new NotificationMetadataItem(id.toString(), row.revisionText(), row.visibility(), row.decision(), row.title());
         }).toList());
     }
 
