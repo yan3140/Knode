@@ -11,6 +11,15 @@
       }
     },
     {
+      "id": "knode-community",
+      "credentialHash": "<bcrypt-hash-from-external-secret-store>",
+      "audiences": {
+        "knode-user": [
+          "users:state:read"
+        ]
+      }
+    },
+    {
       "id": "knode-social",
       "credentialHash": "<bcrypt-hash-from-external-secret-store>",
       "audiences": {

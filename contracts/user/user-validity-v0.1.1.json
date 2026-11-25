@@ -1,0 +1,72 @@
+{
+  "name": "USER-VALIDITY",
+  "version": "0.1.1",
+  "status": "Provider-confirmed 02 semantics, frozen for this handoff; controller integration and 04 consumer acceptance pending. Endpoint implementation and wire format are unchanged.",
+  "compatibility": "This extends the documented use of the already supported FOLLOW_TARGET purpose without changing the request enum, response or permission. RELATION_READ is not implemented or accepted.",
+  "endpoint": {
+    "method": "POST",
+    "path": "/internal/v1/users/validity:batch",
+    "serviceId": "knode-community",
+    "audience": "knode-user",
+    "permission": "users:state:read",
+    "authentication": "Bearer service token issued by POST /internal/v1/auth/service-tokens with Basic service-id:bootstrap-secret and requested audience and permissions. The response is the bare service-token DTO, not a data envelope. The caller must verify the returned audience and granted permission.",
+    "authorizationBoundary": "The endpoint verifies service-token type, signature, time, audience and users:state:read. It does not enforce an individual service-id allowlist, resource ownership, or a purpose-specific permission: any properly granted service can query any supplied valid user IDs. Restrict this permission to trusted services in the external issuer policy."
+  },
+  "servicePolicy": {
+    "actualCommunityIdentity": "knode-community requests audience knode-user and users:state:read; controller reports that this grant was issued in the 04 real-service test. No production credential or policy has been inspected.",
+    "example": "service-policy.example.json is an illustrative external-policy template, not an active grant. It retains the historical knode-social entry and separately shows the least-privilege knode-community state-read grant; deployments must provision their own external credential hash and policy.",
+    "isolatedTest": "The User HTTP integration fixture constructs a temporary policy for knode-community with only users:state:read, synthetic credentials and generated RSA keys; it is not evidence of a production policy or a live Community process.",
+    "runtimeConfiguration": "Set exactly one of KNODE_AUTH_SERVICE_POLICY_FILE (external policy path) or KNODE_AUTH_SERVICE_POLICY_ENV (name of an external environment variable containing the policy). Without an enabled external policy, validly formed issuance and bearer-verification requests fail with 503; malformed requests can be rejected earlier. The example is not automatically applied and its placeholder hashes must be replaced with externally provisioned bcrypt hashes."
+  },
+  "request": {
+    "schema": "user-batches-g5-v0.1.schema.json#/$defs/validityRequest",
+    "example": {
+      "userIds": [
+        "9007199254740993",
+        "9007199254740995"
+      ],
+      "purpose": "FOLLOW_TARGET"
+    },
+    "userIds": "1 to 100 array entries, counting duplicates. Each is a canonical positive signed-64-bit decimal string at most 9223372036854775807. Duplicate IDs are accepted.",
+    "purpose": {
+      "FOLLOW_TARGET": "Check whether a prospective follow target is eligible, or resolve either or both account endpoints of existing follow relationships for following/follower list filtering, page totals and profile counts.",
+      "DELEGATION_CHECK": "Existing account validity check for delegation; unchanged."
+    },
+    "limits": "Only userIds and purpose are accepted; the raw JSON body must be at most 16384 bytes."
+  },
+  "response": {
+    "schema": "user-batches-g5-v0.1.schema.json#/$defs/validityResponse",
+    "example": {
+      "items": [
+        {
+          "userId": "9007199254740993",
+          "exists": true,
+          "active": true
+        },
+        {
+          "userId": "9007199254740995",
+          "exists": true,
+          "active": false
+        }
+      ]
+    },
+    "order": "One item per distinct requested ID, in first-occurrence order.",
+    "exists": "True only when a row exists and is not logically deleted. Missing and logically deleted accounts are both false and are intentionally indistinguishable.",
+    "active": "True only when exists is true and the stored account status is '0'. Disabled accounts are exists=true, active=false; missing or logically deleted accounts are exists=false, active=false.",
+    "communityEligibility": "The effective-account predicate is exists=true AND active=true. Determine each relevant relationship endpoint according to the Community operation. The response contains no status-change reason or other profile attributes."
+  },
+  "consistency": {
+    "singleBatch": "The provider reads all distinct requested IDs using one SQL SELECT and derives each result from that statement. Database storage engine and transaction isolation determine its read consistency; the API supplies no snapshot ID, account-state revision, timestamp or freshness SLA. A statement-level consistent read requires an appropriately configured database.",
+    "crossBatch": "Separate requests, including retries, may see different account states and cannot be pinned to a common snapshot. There is no atomic snapshot spanning User and Community relation rows, no bounded staleness guarantee, and no guarantee that page totals or counts remain unchanged across calls.",
+    "consumerBoundary": "A consumer may derive a list and total from complete batch results only under a separately agreed relationship-cardinality, deadline and acceptable consistency window. This endpoint alone cannot provide exact shared-snapshot filtering/counting for unbounded relationships or concurrent changes; a revisioned snapshot and complete ordered state-change feed would require a separate provider capability."
+  },
+  "failure": {
+    "400": "Invalid JSON, IDs, size, unknown field or unsupported purpose, including RELATION_READ.",
+    "401": "Missing, invalid, expired, wrong-type or wrong-audience service token.",
+    "403": "Valid service token lacks users:state:read; service-token issuance can also deny an ungranted audience or permission.",
+    "503": "User database, required profile metadata or service issuer unavailable; no items are returned.",
+    "consumer": "Treat non-200, timeout, transport failure and malformed, missing, extra or inconsistent response items as dependency failure. Do not infer an inactive/missing user or return a partial list or assumed count. A bounded retry is a fresh read and cannot repair the cross-batch snapshot limitation."
+  },
+  "accountChangeSignal": "There is no published complete, ordered, revisioned account-eligibility change feed or snapshot/export for Community. SessionRevoked is a per-session fact, may refer to ACCOUNT_SECURITY_CHANGED, and does not provide the resulting account state or cover every account change; it cannot maintain a complete eligibility projection or act as a state watermark.",
+  "validation": "User-local HTTP integration with synthetic service credentials, generated signing keys and isolated H2 verifies the Community service identity, purpose, status classification, limits, denials, dependency failure and existing purpose regression. This does not by itself establish a live Community-to-User deployment, production authorization, MySQL isolation configuration or cross-batch consistency."
+}

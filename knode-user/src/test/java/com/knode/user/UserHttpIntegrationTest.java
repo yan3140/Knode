@@ -502,6 +502,93 @@ class UserHttpIntegrationTest {
         var ambiguous=http.exchange("/internal/v1/auth/service-tokens",HttpMethod.POST,new HttpEntity<>(request,headers),String.class);
         assertEquals(401,ambiguous.getStatusCode().value());assertTrue(data(ambiguous).has("error"));assertFalse(data(ambiguous).has("code"));
     }
+
+    @Test void communityServiceUsesFollowTargetForExistingRelationEndpoints() throws Exception {
+        String issuance="{\"audience\":\"knode-user\",\"permissions\":[\"users:state:read\"]}";
+        var issued=internal(HttpMethod.POST,"/internal/v1/auth/service-tokens",issuance,basic("knode-community","test-only-service-secret"));
+        assertEquals(200,issued.getStatusCode().value());
+        var grant=data(issued);
+        assertEquals("knode-user",grant.path("audience").asText());
+        assertEquals("Bearer",grant.path("tokenType").asText());
+        assertEquals(json.readTree("[\"users:state:read\"]"),grant.path("permissions"));
+        String token=grant.path("accessToken").asText();
+        var verifier=new com.knode.auth.ServiceTokenVerifier(signingKeys.publicKeys(),java.time.Clock.systemUTC());
+        assertEquals("knode-community",verifier.verify(token,"knode-user",Set.of("users:state:read")).service());
+
+        jdbc.update("INSERT INTO sys_user(id,user_name,nick_name,password,email,type,status,sex,del_flag) VALUES(?,?,?,?,?,'0','0','2',0)",
+                9007199254740993L,"large-id","Large ID",encoder.encode("synthetic-password"),"large@example.invalid");
+        String ids="[\"9007199254740993\",\"45\",\"46\",\"999\",\"42\",\"9007199254740993\"]";
+        var expected=json.readTree("{\"items\":["
+                +"{\"userId\":\"9007199254740993\",\"exists\":true,\"active\":true},"
+                +"{\"userId\":\"45\",\"exists\":true,\"active\":false},"
+                +"{\"userId\":\"46\",\"exists\":false,\"active\":false},"
+                +"{\"userId\":\"999\",\"exists\":false,\"active\":false},"
+                +"{\"userId\":\"42\",\"exists\":true,\"active\":true}]}");
+        var follow=internal(HttpMethod.POST,"/internal/v1/users/validity:batch",
+                "{\"userIds\":"+ids+",\"purpose\":\"FOLLOW_TARGET\"}","Bearer "+token);
+        assertEquals(200,follow.getStatusCode().value());assertEquals(expected,data(follow));
+        var delegation=internal(HttpMethod.POST,"/internal/v1/users/validity:batch",
+                "{\"userIds\":"+ids+",\"purpose\":\"DELEGATION_CHECK\"}","Bearer "+token);
+        assertEquals(200,delegation.getStatusCode().value());assertEquals(expected,data(delegation));
+    }
+
+    @Test void communityValidityRejectsBadGrantsPurposesAndBatchLimits() throws Exception {
+        String path="/internal/v1/users/validity:batch";
+        String token=serviceToken("knode-community","users:state:read");
+        String good="{\"userIds\":[\"42\"],\"purpose\":\"FOLLOW_TARGET\"}";
+        assertEquals(401,internal(HttpMethod.POST,path,good,null).getStatusCode().value());
+        String publicToken=serviceToken("knode-content","users:public:read");
+        assertEquals(403,internal(HttpMethod.POST,path,good,"Bearer "+publicToken).getStatusCode().value());
+        var now=java.time.Instant.now();
+        String wrongAudience=io.jsonwebtoken.Jwts.builder().header().keyId("old-key").and()
+                .issuer("knode-user").subject("knode-community").audience().add("other-service").and()
+                .claim("token_use","service").claim("permissions",List.of("users:state:read"))
+                .id(UUID.randomUUID().toString()).issuedAt(Date.from(now)).expiration(Date.from(now.plusSeconds(120)))
+                .signWith((java.security.interfaces.RSAPrivateKey)oldMachineKey.getPrivate(),io.jsonwebtoken.Jwts.SIG.RS256).compact();
+        assertEquals(401,internal(HttpMethod.POST,path,good,"Bearer "+wrongAudience).getStatusCode().value());
+        assertEquals(403,internal(HttpMethod.POST,"/internal/v1/auth/service-tokens",
+                "{\"audience\":\"knode-user\",\"permissions\":[\"users:public:read\"]}",
+                basic("knode-community","test-only-service-secret")).getStatusCode().value());
+        for (String invalid:List.of(
+                "{\"userIds\":[\"42\"],\"purpose\":\"RELATION_READ\"}",
+                "{\"userIds\":[\"42\"],\"purpose\":\"ADMIN\"}",
+                "{\"userIds\":[],\"purpose\":\"FOLLOW_TARGET\"}",
+                "{\"userIds\":[42],\"purpose\":\"FOLLOW_TARGET\"}",
+                "{\"userIds\":[\"9223372036854775808\"],\"purpose\":\"FOLLOW_TARGET\"}",
+                "{\"userIds\":[\"42\"],\"purpose\":\"FOLLOW_TARGET\",\"extra\":true}"))
+            assertEquals(400,internal(HttpMethod.POST,path,invalid,"Bearer "+token).getStatusCode().value());
+        String hundred=json.writeValueAsString(Map.of("userIds",Collections.nCopies(100,"42"),"purpose","FOLLOW_TARGET"));
+        var allowed=internal(HttpMethod.POST,path,hundred,"Bearer "+token);
+        assertEquals(200,allowed.getStatusCode().value());assertEquals(1,data(allowed).path("items").size());
+        var distinct=new ArrayList<String>();distinct.add("9223372036854775807");
+        for (long id=1000;id<1099;id++) distinct.add(Long.toString(id));
+        String fullBatch=json.writeValueAsString(Map.of("userIds",distinct,"purpose","FOLLOW_TARGET"));
+        var full=internal(HttpMethod.POST,path,fullBatch,"Bearer "+token);
+        assertEquals(200,full.getStatusCode().value());var items=data(full).path("items");
+        assertEquals(100,items.size());assertEquals("9223372036854775807",items.get(0).path("userId").asText());
+        assertFalse(items.get(0).path("exists").asBoolean());assertEquals("1098",items.get(99).path("userId").asText());
+        String tooMany=json.writeValueAsString(Map.of("userIds",Collections.nCopies(101,"42"),"purpose","FOLLOW_TARGET"));
+        assertEquals(400,internal(HttpMethod.POST,path,tooMany,"Bearer "+token).getStatusCode().value());
+    }
+
+    @Test void communityValidityIsFreshPerRequestAndFailsWithoutPartialItems() throws Exception {
+        String path="/internal/v1/users/validity:batch",token=serviceToken("knode-community","users:state:read");
+        String input="{\"userIds\":[\"42\",\"45\"],\"purpose\":\"FOLLOW_TARGET\"}";
+        var before=internal(HttpMethod.POST,path,input,"Bearer "+token);
+        assertEquals(200,before.getStatusCode().value());assertTrue(data(before).path("items").get(0).path("active").asBoolean());
+        jdbc.update("UPDATE sys_user SET status='1' WHERE id=42");
+        var after=internal(HttpMethod.POST,path,input,"Bearer "+token);
+        assertEquals(200,after.getStatusCode().value());assertFalse(data(after).path("items").get(0).path("active").asBoolean());
+        jdbc.execute("ALTER TABLE sys_user RENAME TO sys_user_temp");
+        try {
+            var failed=internal(HttpMethod.POST,path,input,"Bearer "+token);
+            assertEquals(503,failed.getStatusCode().value());
+            assertEquals("DEPENDENCY_UNAVAILABLE",data(failed).path("error").path("code").asText());
+            assertTrue(data(failed).path("error").path("retryable").asBoolean());
+            assertFalse(data(failed).has("items"));
+        } finally {jdbc.execute("ALTER TABLE sys_user_temp RENAME TO sys_user");}
+    }
+
     @Test void batchesAreOrderedPrivateAndDistinguishMissingInvalidAndUnavailable() throws Exception {
         String publicToken=serviceToken("knode-content","users:public:read"),stateToken=serviceToken("knode-community","users:state:read");
         String input="{\"userIds\":[\"42\",\"999\",\"42\",\"45\",\"46\"]}";

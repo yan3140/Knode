@@ -43,7 +43,8 @@
           "enum": [
             "FOLLOW_TARGET",
             "DELEGATION_CHECK"
-          ]
+          ],
+          "description": "FOLLOW_TARGET also covers both account endpoints of existing follow relationships for Community list, page-total and profile-count reads; see user-validity-v0.1.1.json for consistency and failure boundaries. DELEGATION_CHECK is unchanged."
         }
       }
     },
