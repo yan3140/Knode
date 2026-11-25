@@ -1,0 +1,59 @@
+{
+  "name": "COMMUNITY-ACTIVE-RELATIONS",
+  "version": "0.2-candidate",
+  "status": "Closed by User v0.1.1 authorization and controller-approved cross-batch consistency. Effective contract: relations-v0.1.json (version 0.1.1).",
+  "consumer": "knode-community",
+  "provider": "knode-user",
+  "existingUserEndpoint": {
+    "method": "POST",
+    "path": "/internal/v1/users/validity:batch",
+    "serviceId": "knode-community",
+    "audience": "knode-user",
+    "permission": "users:state:read",
+    "publishedPurposes": [
+      "FOLLOW_TARGET",
+      "DELEGATION_CHECK"
+    ],
+    "maxIds": 100
+  },
+  "communitySemantics": {
+    "effectiveAccount": "exists=true and active=true",
+    "readScope": [
+      "GET /api/blog/follow/following",
+      "GET /api/blog/follow/followers",
+      "GET /api/blog/follow/{userId}/following",
+      "POST /internal/v1/community/relations:batch followingCount/followerCount"
+    ],
+    "pageAndCount": "Apply the same counterparty eligibility predicate before counting and paging. Preserve the original relation order among eligible rows and the canonical decimal-string total.",
+    "writeScope": "Retain durable relations for inactive accounts and allow the authenticated follower to cancel without consulting User.",
+    "failure": "If eligibility cannot be determined under the approved consistency budget, map to dependency unavailable. Do not return a partial list or an assumed valid count."
+  },
+  "resolved": {
+    "purpose": "FOLLOW_TARGET",
+    "decision": "Use authorized bounded synchronous validity reads; no extra User purpose or revisioned feed in this release."
+  },
+  "historicalMinimumRequest": {
+    "decision": "Authorize the Community caller to resolve both endpoints of existing relationships for list and count reads. Either explicitly extend FOLLOW_TARGET to cover that use or add the purpose RELATION_READ under the existing audience and permission.",
+    "example": {
+      "userIds": [
+        "9007199254740993",
+        "9007199254740995"
+      ],
+      "purpose": "RELATION_READ"
+    },
+    "responseFields": [
+      "userId",
+      "exists",
+      "active"
+    ]
+  },
+  "historicalOptions": {
+    "boundedOption": "If controller approves a concrete maximum relationship cardinality and a batched-read consistency window, resolve all eligible counterparts in bounded batches before deriving count and page.",
+    "unboundedOption": "If existing cardinality and latency limits remain, provide a revisioned account eligibility snapshot or export with ordered activation/deactivation/deletion updates and a watermark; build a Community-owned eligibility projection, and perform the filter and count in one local SQL view.",
+    "validation": [
+      "More than one page of mixed active/inactive counterparts with inactive rows before and within the first page",
+      "Following/follower totals and Content profile counts agree for the same eligibility snapshot",
+      "Inactive relationship can still be deleted when User is unavailable"
+    ]
+  }
+}

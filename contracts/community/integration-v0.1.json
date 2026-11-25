@@ -1,0 +1,96 @@
+{
+  "contract": "knode-community-runtime-integration",
+  "version": "0.1.0",
+  "owner": "knode-community",
+  "gatewayRoutes": [
+    "/api/blog/follow/**",
+    "/api/blog/notification/**"
+  ],
+  "internalProvides": [
+    {
+      "method": "POST",
+      "path": "/internal/v1/community/relations:batch",
+      "audience": "knode-community",
+      "permission": "community:relations:read",
+      "optionalHeader": "token"
+    },
+    {
+      "method": "GET",
+      "path": "/internal/v1/community/notifications/summary",
+      "audience": "knode-community",
+      "permission": "community:notifications:read",
+      "requiredHeader": "token"
+    },
+    {
+      "method": "GET",
+      "path": "/internal/v1/ops/consumers/summary",
+      "audience": "knode-community",
+      "permission": "ops:read"
+    },
+    {
+      "method": "GET",
+      "path": "/internal/v1/ops/consumers/events",
+      "audience": "knode-community",
+      "permission": "ops:read"
+    },
+    {
+      "method": "POST",
+      "path": "/internal/v1/ops/consumers/retry",
+      "audience": "knode-community",
+      "permission": "ops:retry"
+    },
+    {
+      "method": "POST",
+      "path": "/internal/v1/ops/consumers/{eventId}/retry",
+      "audience": "knode-community",
+      "permission": "ops:retry"
+    }
+  ],
+  "internalConsumes": [
+    {
+      "provider": "knode-user",
+      "path": "/internal/v1/auth/service-tokens",
+      "sentinelResource": "feign:knode-user#serviceTokens"
+    },
+    {
+      "provider": "knode-user",
+      "path": "/internal/v1/users/validity:batch",
+      "audience": "knode-user",
+      "permission": "users:state:read",
+      "sentinelResource": "feign:knode-user#validityBatch"
+    },
+    {
+      "provider": "knode-user",
+      "path": "/internal/v1/users/public-profiles:batch",
+      "audience": "knode-user",
+      "permission": "users:public:read",
+      "sentinelResource": "feign:knode-user#publicProfiles"
+    },
+    {
+      "provider": "knode-content",
+      "path": "/internal/v1/content/articles/notification-metadata:batch",
+      "audience": "knode-content",
+      "permission": "content:notification-metadata:read",
+      "sentinelResource": "feign:knode-content#notificationMetadata"
+    }
+  ],
+  "requiredInfraWiring": {
+    "rootPomModule": "knode-community",
+    "servicePolicyPermissions": {
+      "knode-community": [
+        { "audience": "knode-user", "permissions": ["users:state:read", "users:public:read"] },
+        { "audience": "knode-content", "permissions": ["content:notification-metadata:read"] }
+      ],
+      "knode-content": [
+        { "audience": "knode-community", "permissions": ["community:relations:read", "ops:read", "ops:retry"] }
+      ]
+    },
+    "readinessHealthIndicators": [
+      "readinessState",
+      "db",
+      "authSession",
+      "communityDiscovery",
+      "communityGovernance"
+    ]
+  }
+}

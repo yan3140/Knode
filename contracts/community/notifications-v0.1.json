@@ -1,0 +1,96 @@
+{
+  "name": "COMMUNITY-NOTIFICATIONS-INBOX-AND-SUMMARY-STAGE2",
+  "version": "0.1",
+  "stage": "COMMUNITY-02A",
+  "status": "implemented in knode-community; verified against loopback H2 (MySQL mode) and synthetic Auth/User/Content fixtures; native multi-service integration scheduled for Stage 5",
+  "provider": "knode-community",
+  "publicApi": {
+    "prefixes": ["/api/blog/notification", "/notification"],
+    "auth": "required blog user JWT + live authoritative Redis session; receiver is always derived from verified principal",
+    "routes": [
+      {
+        "method": "GET",
+        "path": "/list",
+        "query": "pageNum (default 1, >=1), pageSize (default 10, 1..100, offset <= 10000000)",
+        "behavior": "Merges direct yan_user_notification rows and eligible large-author yan_author_publish_event read-fanout rows (negative ID -e.id, default isRead=1, e.create_time >= f.create_time, excluding community_publish_event_dismissal and non-PUBLIC community_article_projection rows) ordered by isRead ASC, createTime DESC, id DESC in one REPEATABLE READ SQL view. Enriches actor profiles via knode-user public-profiles:batch and article visibility/titles via knode-content notification-metadata:batch outside SQL transactions. Empty page makes zero external calls."
+      },
+      {
+        "method": "GET",
+        "path": "/unread-count",
+        "behavior": "Counts only yan_user_notification rows with receiver_id=principal and is_read=0; read-fanout publish stream items are never counted as unread.",
+        "success": {"code": 200, "msg": "操作成功", "data": {"unreadCount": "3"}}
+      },
+      {
+        "method": "PUT",
+        "path": "/{id}/read",
+        "behavior": "Accepts canonical non-zero signed int64 ID (|id| in 1..9223372036854775807; invalid -> HTTP 200 code 515). Positive ID updates receiver-owned unread row; negative ID is an idempotent no-op returning 200."
+      },
+      {
+        "method": "PUT",
+        "path": "/read-all",
+        "behavior": "Marks all unread yan_user_notification rows owned by verified principal as is_read=1."
+      },
+      {
+        "method": "DELETE",
+        "path": "/{id}",
+        "behavior": "Positive ID deletes receiver-owned row in yan_user_notification. Negative ID (-publishEventId) records per-user dismissal in community_publish_event_dismissal only when receiver is eligible for that publish event, permanently hiding it for that receiver without affecting other followers or allowing arbitrary bogus ID bloat."
+      }
+    ],
+    "voContract": {
+      "fields": [
+        "id (signed int64 decimal string; negative for read-fanout publish stream)",
+        "type (ARTICLE_PUBLISHED | COMMENT | COMMENT_REPLY | FOLLOWED)",
+        "content (string | null)",
+        "isRead (0 | 1)",
+        "createTime (yyyy-MM-dd HH:mm:ss in GMT+8)",
+        "actorId (positive int64 decimal string | null)",
+        "actorNickName (string | null)",
+        "actorAvatar (string | null)",
+        "actorInfoStatus (FOUND | MISSING | UNAVAILABLE | NOT_APPLICABLE)",
+        "articleId (positive int64 decimal string | null)",
+        "articleTitle (string when PUBLIC | null otherwise)",
+        "articleVisibilityStatus (PUBLIC | UNAVAILABLE | TEMP_UNAVAILABLE | NOT_APPLICABLE)",
+        "commentId (positive int64 decimal string | null)",
+        "rootCommentId (signed int64 decimal string, -1 for roots | null)"
+      ],
+      "visibilityProtection": "Fail-closed: DRAFT, WITHDRAWN, DELETED, and MISSING articles always return articleTitle=null and articleVisibilityStatus=UNAVAILABLE. When knode-content metadata lookup is unreachable/unconfigured, returns articleTitle=null and articleVisibilityStatus=TEMP_UNAVAILABLE without falling back to stale cached titles."
+    }
+  },
+  "internalApi": {
+    "notificationsSummary": {
+      "method": "GET",
+      "path": "/internal/v1/community/notifications/summary",
+      "cacheControl": "no-store",
+      "dtoStyle": "bare JSON object",
+      "auth": {
+        "machine": "Required single Authorization: Bearer <service-jwt> (iss=knode-user, token_use=service, aud=knode-community, permission=community:notifications:read).",
+        "receiver": "Required single token header carrying verified blog user JWT + live authoritative Redis session. Rejects client-supplied query parameters such as receiverId (400 INVALID_ARGUMENT)."
+      },
+      "response": {
+        "example": {
+          "unreadCount": "2",
+          "latestNotificationId": "-15",
+          "asOf": "2026-11-24T12:00:00Z"
+        },
+        "rules": "Exact three fields {unreadCount, latestNotificationId, asOf}. unreadCount is canonical non-negative decimal string; latestNotificationId is signed decimal string of newest eligible notification or null when empty; asOf is UTC ISO-8601 instant."
+      }
+    }
+  },
+  "outboundDependencies": {
+    "knodeContent": {
+      "config": ["KNODE_CONTENT_ORIGIN"],
+      "endpoint": "POST /internal/v1/content/articles/notification-metadata:batch (aud=knode-content, permission=content:notification-metadata:read)"
+    }
+  },
+  "schema": {
+    "freshInstall": "knode-community/src/main/resources/db/community-schema.sql",
+    "upgradeFrom01A": "knode-community/src/main/resources/db/community-notification-02a-upgrade.sql",
+    "tablesAdded": [
+      "yan_user_notification",
+      "yan_author_publish_event",
+      "community_publish_event_dismissal",
+      "community_article_projection"
+    ],
+    "crossDatabaseJoins": "none"
+  }
+}

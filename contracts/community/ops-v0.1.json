@@ -1,0 +1,71 @@
+{
+  "contract": "knode-community-consumer-ops",
+  "version": "0.1.0",
+  "owner": "knode-community",
+  "audience": "knode-community",
+  "authentication": {
+    "required": "Authorization: Bearer <serviceToken>",
+    "viewerTokenHeaderAllowed": false,
+    "readPermission": "ops:read",
+    "retryPermission": "ops:retry"
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/internal/v1/ops/consumers/summary",
+      "permission": "ops:read",
+      "response200": {
+        "domain": "notification",
+        "status": "AVAILABLE",
+        "inbox": { "SUCCEEDED": "0", "IGNORED": "0", "DEAD": "0" },
+        "fanoutOutbox": { "PENDING": "0", "PROCESSING": "0", "SUCCEEDED": "0", "FAILED": "0", "DEAD": "0", "expiredProcessing": "0" },
+        "directOutbox": { "PENDING": "0", "PROCESSING": "0", "SUCCEEDED": "0", "FAILED": "0", "DEAD": "0", "expiredProcessing": "0" }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/internal/v1/ops/consumers/events",
+      "permission": "ops:read",
+      "query": {
+        "pageNum": "1..N",
+        "pageSize": "1..100",
+        "status": "optional PENDING|PROCESSING|SUCCEEDED|FAILED|DEAD"
+      },
+      "response200": {
+        "rows": "array of consumer task/event items with canonical UUID eventId and string retryCount",
+        "total": "non-negative decimal string"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/internal/v1/ops/consumers/retry",
+      "permission": "ops:retry",
+      "requestBody": {
+        "replayRequestId": "required [A-Za-z0-9._-]{1,64}",
+        "operator": "optional [A-Za-z0-9:._-]{1,128}"
+      },
+      "response200": {
+        "status": "ACCEPTED",
+        "replayRequestId": "<replayRequestId>",
+        "requeued": "non-negative decimal string"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/internal/v1/ops/consumers/{eventId}/retry",
+      "permission": "ops:retry",
+      "pathParams": { "eventId": "canonical UUID" },
+      "requestBody": {
+        "replayRequestId": "required [A-Za-z0-9._-]{1,64}",
+        "operator": "optional [A-Za-z0-9:._-]{1,128}"
+      },
+      "responses": {
+        "200": "ACCEPTED or NOOP with decimal string requeued",
+        "400": "INVALID_ARGUMENT",
+        "404": "RESOURCE_NOT_FOUND",
+        "409": "IDEMPOTENCY_CONFLICT or STATE_CONFLICT (active worker lease or poison event)",
+        "503": "DEPENDENCY_UNAVAILABLE"
+      }
+    }
+  ]
+}

@@ -179,7 +179,7 @@ export default {
 					return
 				}
 				getUnreadCount().then(response => {
-					this.unreadCount = response.unreadCount || 0
+					this.unreadCount = Math.max(0, Number(response && response.unreadCount) || 0)
 				}).catch(() => {})
 			},
 			openNotifications() {

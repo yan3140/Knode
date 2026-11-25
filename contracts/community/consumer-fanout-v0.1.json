@@ -1,0 +1,33 @@
+{
+  "name": "COMMUNITY-CONTENT-CONSUMER-AND-FANOUT-STAGE3",
+  "version": "0.1",
+  "stage": "COMMUNITY-03A",
+  "status": "implemented in knode-community; verified against H2 MySQL-mode concurrency/out-of-order/lease tests and end-to-end TLS Stream integration",
+  "consumer": {
+    "stream": "knode:<KNODE_ENVIRONMENT>:v1:events:content",
+    "group": "knode-community-v1",
+    "consumerId": "knode-community-<instance-uuid>",
+    "bootstrapOffset": "0-0 with MKSTREAM (never $ so pre-startup published events are never lost)",
+    "pendingRecovery": "XPENDING + XCLAIM for entries idle >= KNODE_COMMUNITY_STREAM_CLAIM_IDLE_MS (default 30000ms)",
+    "ackBoundary": "XACK executes strictly after the single local READ_COMMITTED SQL transaction (community_event_inbox + community_article_projection + outbox task enqueue) commits. Transient DB failures roll back and leave the entry in PEL without XACK.",
+    "supportedEvents": [
+      "ArticlePublished (v1/v2): updates projection and enqueues PUBLISH_FACT:<publicationFactId> once",
+      "ArticleContentChanged (v1/v2): advances projection monotonically; never triggers publish notification",
+      "ArticleVisibilityChanged (v1/v2): updates projection to PUBLIC or WITHDRAWN; republish never re-notifies",
+      "ArticleDeleted (v1/v2): permanent DELETED tombstone barrier; older events never resurrect visibility",
+      "CommentCreated / CommentReplied (v1): enqueues COMMENT:<commentId> / COMMENT_REPLY:<commentId> when actorId != receiverId",
+      "ArticleCounterChanged (v1): validated, recorded as IGNORED in inbox, and ACKed"
+    ],
+    "poisonHandling": "Malformed, oversized, or unsupported schema events are durably recorded as DEAD in community_event_inbox and ACKed so poison messages remain visible in ops without blocking healthy events.",
+    "outOfOrderGuarantee": "If ArticleContentChanged(rev=2) arrives before ArticlePublished(rev=1), projection retains rev=2/latest title while ArticlePublished still enqueues PUBLISH_FACT:<publicationFactId> so first-publication notifications are never lost."
+  },
+  "workers": {
+    "leaseSafety": "Every claim generates a fresh UUID lease_token with DB-clock locked_until. Completion, cursor advancement, and retry/DEAD transitions all require WHERE id=? AND status='PROCESSING' AND lease_token=?, preventing expired late workers from clobbering reclaimed tasks.",
+    "fanoutMode": "Followers >= KNODE_COMMUNITY_LARGE_AUTHOR_THRESHOLD (default 10000) writes single yan_author_publish_event row (read-fanout); otherwise writes yan_user_notification batches and advances cursor_follower_id atomically in the same SQL transaction.",
+    "retryAndDeadLetter": "Bounded exponential backoff up to max_retry (default 8), then transitions to visible DEAD state."
+  },
+  "configuration": {
+    "toggles": ["KNODE_COMMUNITY_STREAM_ENABLED (default false)", "KNODE_COMMUNITY_WORKER_ENABLED (default false)"],
+    "redisIsolation": "Standalone TLS Lettuce connection requiring distinct credentials from KNODE_AUTH_REDIS_*; numeric IP host; no XTRIM/MAXLEN/SCAN/KEYS."
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "name": "COMMUNITY-FOLLOW-AND-RELATIONS-STAGE1",
+  "version": "0.1.1",
+  "stage": "COMMUNITY-01A",
+  "status": "Implemented with active-counterparty filtering using the frozen User v0.1.1 contract",
+  "provider": "knode-community",
+  "publicApi": {
+    "prefixes": ["/api/blog/follow", "/follow"],
+    "routes": [
+      {
+        "method": "PUT",
+        "path": "/{followeeId}",
+        "auth": "required blog user JWT + live authoritative Redis session",
+        "behavior": "Rejects invalid int64 or self-follow with HTTP 200 code 515 before network/DB calls. Verifies target via POST /internal/v1/users/validity:batch (purpose=FOLLOW_TARGET): requires exists=true and active=true (else HTTP 200 code 515); User dependency failure fails closed with HTTP 503 code 500. Idempotently inserts yan_user_follow and atomically enqueues FOLLOWED:<followerId>:<followeeId> in yan_notification_delivery_outbox on first-ever follow; unfollow+refollow preserves historical SUCCEEDED/PENDING task without spamming duplicate notifications.",
+        "success": {"code": 200, "msg": "操作成功"}
+      },
+      {
+        "method": "DELETE",
+        "path": "/{followeeId}",
+        "auth": "required blog user JWT + live authoritative Redis session",
+        "behavior": "Deletes (follower_id, followee_id) owned by the verified principal idempotently. Never calls knode-user, allowing cleanup of relations to deleted/banned users or while knode-user is unavailable.",
+        "success": {"code": 200, "msg": "操作成功"}
+      },
+      {
+        "method": "GET",
+        "path": "/status/{followeeId}",
+        "auth": "required blog user JWT + live authoritative Redis session",
+        "success": {"code": 200, "msg": "操作成功", "data": {"following": true}}
+      },
+      {
+        "method": "GET",
+        "path": "/following",
+        "auth": "required blog user JWT + live authoritative Redis session",
+        "query": "pageNum (default 1, >=1), pageSize (default 10, 1..100, offset <= 10000000)",
+        "behavior": "Scans ordered relation rows in a bounded local REPEATABLE READ view. Resolve counterpart validity before filtering, then derive both total and the page using exists=true AND active=true. Preserve id DESC among retained rows. Profiles are fetched only for that page. No User call is needed if the owned relation list is empty. Dependency or budget failure is HTTP 503 code 500."
+      },
+      {
+        "method": "GET",
+        "path": "/followers",
+        "auth": "required blog user JWT + live authoritative Redis session",
+        "query": "pageNum (default 1, >=1), pageSize (default 10, 1..100, offset <= 10000000)",
+        "behavior": "Same eligibility, ordering, pagination and 503 behavior as /following, with the follower as counterparty."
+      },
+      {
+        "method": "GET",
+        "path": "/{userId}/following",
+        "auth": "anonymous GET allowed; optional single token header is strictly verified against JWT signature, live Redis session, and blog scope (401/403/503)",
+        "behavior": "Includes the requested owner in the same deduplicated eligibility lookup. Owner exists=false returns HTTP 200 code 515. Owner active=false alone does not prohibit the existing public entry. Counterparty filtering, total, page and 503 behavior match /following."
+      }
+    ],
+    "serialization": {
+      "idsAndTotals": "canonical decimal strings preserving 64-bit signed Long precision",
+      "followTime": "yyyy-MM-dd HH:mm:ss in GMT+8"
+    }
+  },
+  "internalApi": {
+    "relationsBatch": {
+      "method": "POST",
+      "path": "/internal/v1/community/relations:batch",
+      "cacheControl": "no-store",
+      "dtoStyle": "bare JSON object",
+      "auth": {
+        "machine": "Required single Authorization: Bearer <service-jwt> verified by ServiceTokenVerifier (iss=knode-user, token_use=service, aud=knode-community, permission=community:relations:read).",
+        "optionalViewer": "Optional single token header carrying a blog user JWT; verified against UserTokenVerifier and live authoritative Redis session (invalid/revoked -> 401 SESSION_REVOKED; non-blog scope -> 403 USER_ACCESS_DENIED; Redis outage -> 503 AUTH_STATE_UNAVAILABLE).",
+        "trust": "Supports overlapping multi-kid RSA >=2048-bit public keys via KNODE_AUTH_TRUSTED_PUBLIC_KEYS (and optional KNODE_COMMUNITY_OPS_PUBLIC_KEYS override)."
+      },
+      "request": {
+        "readLimits": {
+    "relationshipRows": "KNODE_COMMUNITY_RELATION_SCAN_LIMIT defaults to 20000 raw rows per request, allowing up to the default large-author threshold of 10000 in each direction for one profile. The internal batch shares the cap across directions; a relation matching both directions counts twice. SQL reads at most the remaining cap plus one to detect overflow. Capacity is configurable and overflow fails the whole request.",
+    "validityIds": "No separate distinct-account cap. All counterpart IDs (and the public-list owner where applicable) are deduplicated, bounded by the scanned rows plus the owner, then resolved in chunks of at most 100 within the same deadline. At most 8 calls per request and 32 across the Community instance share the existing validity Sentinel resource. No waiting queue, eligibility cache or retry. Saturation, a rejected or failed chunk, or deadline expiry fails the entire read and cancels outstanding local calls.",
+    "time": "After inbound authentication, a 3-second business-read deadline spans relation acquisition, validity, and optional profile enrichment. An upstream caller may set a shorter timeout. The Community data pool acquisition timeout is 750ms, the read transaction timeout is 1s, and each User HTTP exchange is capped at 1s within the remaining budget.",
+    "failure": "Capacity, deadline, User failure, or an incomplete/malformed/out-of-order response produces HTTP 503 (public code 500; internal DEPENDENCY_UNAVAILABLE). A page member whose profile has disappeared after eligibility also returns 503. No partial pages, guessed states or fabricated zero counts.",
+    "consistency": "The local relation snapshot is released before User calls. Independent User batches and Community SQL do not share a snapshot. An account is evaluated once using the validity result returned for its chunk and a later request re-reads its current state. Larger graphs require a separate eligibility data source or agreed capacity change."
+  },
+  "schema": {"userIds": ["9007199254740993", "42"]},
+        "rules": "Exact single key userIds; 1..100 canonical positive signed int64 decimal strings; deduplicated in first-occurrence order; no query string; max 8192 bytes."
+      },
+      "response": {
+        "example": {
+          "items": [
+            {"userId": "9007199254740993", "followingCount": "12", "followerCount": "7", "viewerFollowing": true},
+            {"userId": "42", "followingCount": "0", "followerCount": "3", "viewerFollowing": null}
+          ]
+        },
+        "rules": "Exact root field items; each item has exact four fields {userId, followingCount, followerCount, viewerFollowing} matching knode-content CommunityRelationClient. Counts are canonical non-negative decimal strings. Following counts eligible followees; followers counts eligible followers. Both directions share one local relation snapshot and one deduplicated eligibility map. viewerFollowing reflects the stored relation and is null for anonymous or self-view; otherwise boolean."
+      },
+      "errors": {
+        "400": "INVALID_ARGUMENT",
+        "401": ["INVALID_SERVICE_TOKEN", "SESSION_REVOKED"],
+        "403": ["SERVICE_PERMISSION_DENIED", "USER_ACCESS_DENIED"],
+        "503": ["AUTH_STATE_UNAVAILABLE", "DEPENDENCY_UNAVAILABLE"]
+      }
+    }
+  },
+  "outboundDependencies": {
+    "knodeUser": {
+      "config": ["KNODE_USER_ORIGIN", "KNODE_USER_SERVICE_ID", "KNODE_USER_BOOTSTRAP_SECRET"],
+      "endpoints": [
+        "POST /internal/v1/auth/service-tokens (aud=knode-user, cached in memory with pre-expiry refresh margin; human sessions/validity never cached)",
+        "POST /internal/v1/users/validity:batch (User v0.1.1, aud=knode-user, users:state:read, purpose=FOLLOW_TARGET)",
+        "POST /internal/v1/users/public-profiles:batch (users:public:read)"
+      ]
+    }
+  },
+  "schema": {
+    "file": "knode-community/src/main/resources/db/community-schema.sql",
+    "tables": [
+      "yan_user_follow (uk_yan_user_follow_pair(follower_id, followee_id), idx_yan_user_follow_follower(follower_id, id), idx_yan_user_follow_followee(followee_id, id))",
+      "yan_notification_delivery_outbox (uk_notification_delivery_task_key(task_key), idx_notification_delivery_pending(status, next_retry_at, id), lease_token, rerun_requested)"
+    ],
+    "crossDatabaseJoins": "none"
+  }
+}
