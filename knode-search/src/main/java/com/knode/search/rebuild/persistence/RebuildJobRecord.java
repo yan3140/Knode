@@ -23,6 +23,8 @@ public record RebuildJobRecord(
         RebuildPhase phase,
         String leaseOwner,
         Long leaseUntilMs,
+        long leaseGeneration,
+        boolean aliasSwitchUncertain,
         int switchAttempts,
         String lastError,
         String supersededByJobId,

@@ -1,4 +1,4 @@
--- Knode Search (05) Additive Upgrade DDL: SEARCH-02 -> SEARCH-03
+-- Knode Search (05) Additive Upgrade DDL: SEARCH-02 -> SEARCH-03 (including SEARCH-03-R1 columns)
 -- Target engine: dedicated independent MySQL 8 / InnoDB database, charset utf8mb4, UTC session/JDBC timezone.
 -- Manual deployment DDL only: run once on an existing SEARCH-02 schema while consumers/indexers are stopped.
 -- Preserves all existing SEARCH-02 inbox, failure, projection, and index task rows as index_generation = 1.
@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS search_rebuild_job (
     phase VARCHAR(32) NOT NULL,
     lease_owner VARCHAR(128) NULL,
     lease_until_ms BIGINT NULL,
+    lease_generation BIGINT NOT NULL DEFAULT 0,
+    alias_switch_uncertain TINYINT(1) NOT NULL DEFAULT 0,
     switch_attempts INT NOT NULL DEFAULT 0,
     last_error VARCHAR(512) NULL,
     superseded_by_job_id VARCHAR(64) NULL,

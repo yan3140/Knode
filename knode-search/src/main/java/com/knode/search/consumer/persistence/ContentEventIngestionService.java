@@ -94,7 +94,6 @@ public class ContentEventIngestionService {
         this.clock = clock;
     }
 
-
     private ContentEventIngestionService(
             ContentEventParser eventParser,
             SearchConsumerRepository repository,
@@ -233,8 +232,8 @@ public class ContentEventIngestionService {
                 throw new IllegalStateException(
                         "Cold-article visibility guard became active concurrently; retry ingestion");
             }
+            Long authoritativeRev = parsePositiveLongOrNull(preflightDecision.sourceRevision());
             if (!preflightDecision.isReadablePublic()) {
-                Long authoritativeRev = parsePositiveLongOrNull(preflightDecision.sourceRevision());
                 long barrierRev = authoritativeRev != null
                         ? Math.max(authoritativeRev, event.sourceRevision())
                         : event.sourceRevision();
@@ -264,6 +263,24 @@ public class ContentEventIngestionService {
                 repository.updateProjection(gen, hiddenBarrierProj);
                 repository.updateInboxStatus(event.eventId(), "STALE_IGNORED", nowMs);
                 return IngestionOutcome.STALE_IGNORED;
+            }
+            // Authoritative visibility is PUBLIC/READABLE: strictly verify sourceRevision equality!
+            if (authoritativeRev == null) {
+                throw new IllegalStateException(
+                        "Cold-article authoritative sourceRevision missing or invalid for article " + event.articleId());
+            }
+            if (event.sourceRevision() < authoritativeRev) {
+                // Late stale public event: ignore without advancing projection or version barrier to authoritativeRev
+                // so the real authoritative revision event can still be admitted and indexed when it arrives.
+                repository.updateInboxStatus(event.eventId(), "STALE_IGNORED", nowMs);
+                return IngestionOutcome.STALE_IGNORED;
+            }
+            if (event.sourceRevision() > authoritativeRev) {
+                // Content authoritative view lags behind the incoming event: roll back tx and retry without XACK.
+                throw new IllegalStateException(
+                        "Cold-article authoritative sourceRevision " + authoritativeRev
+                                + " behind event sourceRevision " + event.sourceRevision()
+                                + " for article " + event.articleId());
             }
         }
 

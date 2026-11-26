@@ -90,6 +90,10 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
         }
     }
 
+    public StubResponse applyUpdateAliasesBodyDirectly(String body) {
+        return handleUpdateAliases(body);
+    }
+
     public void refresh(String index) {
         synchronized (writtenDocuments) {
             for (Map.Entry<String, StoredDoc> entry : writtenDocuments.entrySet()) {
@@ -259,16 +263,28 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
                 return StubResponse.status(400, "{\"error\":\"missing_actions\"}");
             }
             synchronized (aliases) {
+                // Atomic precondition validation pass BEFORE mutating any alias bindings.
+                Map<String, Set<String>> staged = new LinkedHashMap<>();
+                for (Map.Entry<String, Set<String>> entry : aliases.entrySet()) {
+                    staged.put(entry.getKey(), new LinkedHashSet<>(entry.getValue()));
+                }
                 for (JsonNode action : actions) {
                     if (action.has("remove")) {
                         JsonNode rem = action.get("remove");
                         String alias = rem.path("alias").asText("");
                         String index = rem.path("index").asText("");
-                        Set<String> current = aliases.get(alias);
-                        if (current != null) {
+                        boolean mustExist = rem.path("must_exist").asBoolean(false);
+                        Set<String> current = staged.get(alias);
+                        boolean present = current != null && current.contains(index);
+                        if (mustExist && !present) {
+                            return StubResponse.status(404,
+                                    "{\"error\":{\"type\":\"aliases_not_found_exception\",\"reason\":\"aliases ["
+                                            + alias + "] missing on index [" + index + "]\"},\"status\":404}");
+                        }
+                        if (present) {
                             current.remove(index);
                             if (current.isEmpty()) {
-                                aliases.remove(alias);
+                                staged.remove(alias);
                             }
                         }
                     } else if (action.has("add")) {
@@ -277,10 +293,12 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
                         String index = add.path("index").asText("");
                         if (!alias.isEmpty() && !index.isEmpty()) {
                             createdIndices.add(index);
-                            aliases.computeIfAbsent(alias, k -> new LinkedHashSet<>()).add(index);
+                            staged.computeIfAbsent(alias, k -> new LinkedHashSet<>()).add(index);
                         }
                     }
                 }
+                aliases.clear();
+                aliases.putAll(staged);
             }
             return StubResponse.ok("{\"acknowledged\":true}");
         } catch (Exception ex) {

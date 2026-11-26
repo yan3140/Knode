@@ -156,7 +156,7 @@ class SearchRebuildSchemaUpgradeTest {
             assertThat(t1001.indexGeneration()).isEqualTo(1L);
             assertThat(t1001.targetProjectionRevision()).isEqualTo(3L);
 
-            // 4) Verify new SEARCH-03 rebuild job & candidate generation-2 isolation work immediately on upgraded DB.
+            // 4) Verify new SEARCH-03-R1 rebuild job & candidate generation-2 isolation work immediately on upgraded DB.
             RebuildJobRecord job = tx.execute(status -> rebuildRepo.startJobInCurrentTx(
                     "rb-upgrade-1", "knode_articles_search", "knode_articles_search_g1",
                     "req-upgrade-1", "inst-1", 60_000L, 1700000001000L));
@@ -165,6 +165,112 @@ class SearchRebuildSchemaUpgradeTest {
             assertThat(job.sourceGeneration()).isEqualTo(1L);
             assertThat(job.candidateGeneration()).isEqualTo(2L);
             assertThat(job.candidatePhysicalIndex()).isEqualTo("knode_articles_search_g2");
+            assertThat(job.leaseGeneration()).isEqualTo(1L);
+            assertThat(job.aliasSwitchUncertain()).isFalse();
+        }
+    }
+
+    @Test
+    void upgradesSearch03SchemaToSearch03R1PreservingExistingRebuildJobs() {
+        String dbName = "search_upgrade_r1_" + UUID.randomUUID().toString().replace("-", "");
+        HikariConfig hc = new HikariConfig();
+        hc.setJdbcUrl("jdbc:h2:mem:" + dbName + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1");
+        hc.setDriverClassName("org.h2.Driver");
+        hc.setUsername("sa");
+        hc.setPassword("");
+
+        try (HikariDataSource ds = new HikariDataSource(hc)) {
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+
+            // 1) Bootstrap SEARCH-03 schema (before lease_generation & alias_switch_uncertain existed).
+            jdbc.execute("""
+                    CREATE TABLE search_index_generation (
+                        alias_name VARCHAR(128) NOT NULL,
+                        active_generation BIGINT NOT NULL DEFAULT 1,
+                        active_physical_index VARCHAR(128) NOT NULL,
+                        require_cold_visibility_guard TINYINT(1) NOT NULL DEFAULT 0,
+                        cutover_state VARCHAR(32) NOT NULL DEFAULT 'NORMAL',
+                        cutover_job_id VARCHAR(64) NULL,
+                        previous_generation BIGINT NULL,
+                        previous_physical_index VARCHAR(128) NULL,
+                        target_generation BIGINT NULL,
+                        target_physical_index VARCHAR(128) NULL,
+                        cutover_started_at_ms BIGINT NULL,
+                        active_cache_invalidation_status VARCHAR(16) NOT NULL DEFAULT 'DONE',
+                        active_cache_invalidation_attempts INT NOT NULL DEFAULT 0,
+                        active_cache_invalidation_due_at_ms BIGINT NULL,
+                        active_cache_last_error VARCHAR(512) NULL,
+                        updated_at_ms BIGINT NOT NULL,
+                        PRIMARY KEY (alias_name)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """);
+            jdbc.execute("""
+                    CREATE TABLE search_rebuild_job (
+                        job_id VARCHAR(64) NOT NULL,
+                        alias_name VARCHAR(128) NOT NULL,
+                        active_lock_key VARCHAR(128) NULL,
+                        client_request_id VARCHAR(64) NOT NULL,
+                        snapshot_id VARCHAR(64) NULL,
+                        snapshot_expires_at_ms BIGINT NULL,
+                        snapshot_page_cursor VARCHAR(1024) NULL,
+                        snapshot_done TINYINT(1) NOT NULL DEFAULT 0,
+                        snapshot_pages_imported INT NOT NULL DEFAULT 0,
+                        snapshot_items_imported BIGINT NOT NULL DEFAULT 0,
+                        incremental_cursor VARCHAR(1024) NULL,
+                        incremental_cursor_expires_at_ms BIGINT NULL,
+                        last_commit_sequence BIGINT NOT NULL DEFAULT 0,
+                        incremental_commits_applied BIGINT NOT NULL DEFAULT 0,
+                        incremental_events_applied BIGINT NOT NULL DEFAULT 0,
+                        source_generation BIGINT NOT NULL,
+                        source_physical_index VARCHAR(128) NOT NULL,
+                        candidate_generation BIGINT NOT NULL,
+                        candidate_physical_index VARCHAR(128) NOT NULL,
+                        phase VARCHAR(32) NOT NULL,
+                        lease_owner VARCHAR(128) NULL,
+                        lease_until_ms BIGINT NULL,
+                        switch_attempts INT NOT NULL DEFAULT 0,
+                        last_error VARCHAR(512) NULL,
+                        superseded_by_job_id VARCHAR(64) NULL,
+                        created_at_ms BIGINT NOT NULL,
+                        updated_at_ms BIGINT NOT NULL,
+                        PRIMARY KEY (job_id),
+                        CONSTRAINT uk_search_rebuild_active_alias UNIQUE (active_lock_key)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """);
+
+            jdbc.update("""
+                    INSERT INTO search_rebuild_job (
+                        job_id, alias_name, active_lock_key, client_request_id, snapshot_id,
+                        snapshot_done, snapshot_pages_imported, snapshot_items_imported,
+                        last_commit_sequence, incremental_commits_applied, incremental_events_applied,
+                        source_generation, source_physical_index, candidate_generation, candidate_physical_index,
+                        phase, lease_owner, lease_until_ms, switch_attempts, created_at_ms, updated_at_ms
+                    ) VALUES (
+                        'rb-existing-03', 'knode_articles_search', 'knode_articles_search', 'req-03', 'snap-03',
+                        0, 1, 2, 0, 0, 0, 1, 'knode_articles_search_g1', 2, 'knode_articles_search_g2',
+                        'SNAPSHOT_IMPORTING', 'inst-old', 1700000000000, 0, 1699999990000, 1699999995000
+                    )
+                    """);
+
+            // 2) Execute additive SEARCH-03 -> SEARCH-03-R1 upgrade SQL.
+            ResourceDatabasePopulator r1Populator = new ResourceDatabasePopulator(
+                    new ClassPathResource("db/search-rebuild-03-r1-upgrade.sql"));
+            r1Populator.execute(ds);
+
+            ObjectMapper mapper = new ObjectMapper();
+            SearchConsumerRepository consumerRepo = new SearchConsumerRepository(jdbc, mapper);
+            SearchRebuildRepository rebuildRepo = new SearchRebuildRepository(jdbc, consumerRepo, mapper);
+            TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
+
+            RebuildJobRecord existing = rebuildRepo.findJob("rb-existing-03").orElseThrow();
+            assertThat(existing.phase()).isEqualTo(RebuildPhase.SNAPSHOT_IMPORTING);
+            assertThat(existing.leaseGeneration()).isEqualTo(0L);
+            assertThat(existing.aliasSwitchUncertain()).isFalse();
+
+            RebuildJobRecord leased = tx.execute(status -> rebuildRepo.acquireOrRenewLeaseInCurrentTx(
+                    "rb-existing-03", "inst-new", 30_000L, 1700000010000L)).orElseThrow();
+            assertThat(leased.leaseOwner()).isEqualTo("inst-new");
+            assertThat(leased.leaseGeneration()).isEqualTo(1L);
         }
     }
 }

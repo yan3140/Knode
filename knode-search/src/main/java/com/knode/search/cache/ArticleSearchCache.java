@@ -28,6 +28,7 @@ public class ArticleSearchCache {
     private final SearchCacheProperties properties;
     private final SearchMetrics searchMetrics;
     private final String epochKey;
+    private final String cutoverBypassKey;
 
     public ArticleSearchCache(
             @Qualifier("searchCacheRedisTemplate") ObjectProvider<StringRedisTemplate> redisTemplateProvider,
@@ -40,6 +41,7 @@ public class ArticleSearchCache {
         this.properties = properties;
         this.searchMetrics = searchMetrics;
         this.epochKey = SearchCacheInvalidator.epochKeyForEnvironment(environment);
+        this.cutoverBypassKey = SearchCacheInvalidator.cutoverBypassKeyForEnvironment(environment);
     }
 
     public Optional<String> currentEpoch(QueryBudget budget) {
@@ -47,6 +49,10 @@ public class ArticleSearchCache {
             return Optional.empty();
         }
         try {
+            String bypass = redisTemplate.opsForValue().get(cutoverBypassKey);
+            if (bypass != null && !bypass.isEmpty()) {
+                return Optional.empty();
+            }
             String raw = redisTemplate.opsForValue().get(epochKey);
             if (raw == null || raw.isEmpty()) {
                 return Optional.of("0");

@@ -18,6 +18,7 @@ import org.springframework.stereotype.Repository;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 @Repository
@@ -72,9 +73,10 @@ public class SearchRebuildRepository {
                         last_commit_sequence, incremental_commits_applied, incremental_events_applied,
                         source_generation, source_physical_index,
                         candidate_generation, candidate_physical_index,
-                        phase, lease_owner, lease_until_ms, switch_attempts,
+                        phase, lease_owner, lease_until_ms, lease_generation,
+                        alias_switch_uncertain, switch_attempts,
                         created_at_ms, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, 'INIT', ?, ?, 0, ?, ?)
+                    ) VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, 'INIT', ?, ?, 1, 0, 0, ?, ?)
                     """,
                     jobId,
                     aliasName,
@@ -140,6 +142,7 @@ public class SearchRebuildRepository {
                 UPDATE search_rebuild_job
                 SET lease_owner = ?,
                     lease_until_ms = ?,
+                    lease_generation = lease_generation + 1,
                     updated_at_ms = ?
                 WHERE job_id = ?
                 """,
@@ -149,6 +152,99 @@ public class SearchRebuildRepository {
                 jobId
         );
         return findJob(jobId);
+    }
+
+    /**
+     * Acquires an exclusive row lock on search_rebuild_job and verifies that the lease still belongs
+     * to expectedOwner, matches expectedJob.leaseGeneration(), has not expired, remains in expectedPhase,
+     * and (when requested) matches the expected snapshot or incremental cursor before any local writeback.
+     */
+    public RebuildJobRecord lockAndVerifyLeaseInCurrentTx(
+            RebuildJobRecord expectedJob,
+            String expectedOwner,
+            RebuildPhase expectedPhase,
+            boolean verifySnapshotCursor,
+            boolean verifyIncrementalCursor,
+            long nowMs) {
+        List<RebuildJobRecord> locked = jdbcTemplate.query(
+                selectJobSql("WHERE job_id = ? FOR UPDATE"),
+                jobRowMapper(),
+                expectedJob.jobId()
+        );
+        if (locked.isEmpty()) {
+            throw new StaleRebuildLeaseException(expectedJob.jobId(), "JOB_NOT_FOUND");
+        }
+        RebuildJobRecord current = locked.get(0);
+        if (current.leaseOwner() == null || !current.leaseOwner().equals(expectedOwner)) {
+            throw new StaleRebuildLeaseException(expectedJob.jobId(),
+                    "LEASE_OWNER_MISMATCH:expected=" + expectedOwner + ",actual=" + current.leaseOwner());
+        }
+        if (current.leaseGeneration() != expectedJob.leaseGeneration()) {
+            throw new StaleRebuildLeaseException(expectedJob.jobId(),
+                    "LEASE_GENERATION_MISMATCH:expected=" + expectedJob.leaseGeneration()
+                            + ",actual=" + current.leaseGeneration());
+        }
+        if (current.leaseUntilMs() == null || current.leaseUntilMs() <= nowMs) {
+            throw new StaleRebuildLeaseException(expectedJob.jobId(),
+                    "LEASE_EXPIRED:leaseUntilMs=" + current.leaseUntilMs() + ",nowMs=" + nowMs);
+        }
+        if (expectedPhase != null && current.phase() != expectedPhase) {
+            throw new StaleRebuildLeaseException(expectedJob.jobId(),
+                    "PHASE_DRIFTED:expected=" + expectedPhase + ",actual=" + current.phase());
+        }
+        if (verifySnapshotCursor) {
+            if (!Objects.equals(current.snapshotPageCursor(), expectedJob.snapshotPageCursor())
+                    || current.snapshotPagesImported() != expectedJob.snapshotPagesImported()) {
+                throw new StaleRebuildLeaseException(expectedJob.jobId(),
+                        "SNAPSHOT_CURSOR_DRIFTED:expectedPages=" + expectedJob.snapshotPagesImported()
+                                + ",actualPages=" + current.snapshotPagesImported());
+            }
+        }
+        if (verifyIncrementalCursor) {
+            if (!Objects.equals(current.incrementalCursor(), expectedJob.incrementalCursor())
+                    || current.lastCommitSequence() != expectedJob.lastCommitSequence()) {
+                throw new StaleRebuildLeaseException(expectedJob.jobId(),
+                        "INCREMENTAL_CURSOR_DRIFTED:expectedSeq=" + expectedJob.lastCommitSequence()
+                                + ",actualSeq=" + current.lastCommitSequence());
+            }
+        }
+        return current;
+    }
+
+    public void markAliasSwitchUncertainInCurrentTx(
+            RebuildJobRecord job,
+            String owner,
+            boolean uncertain,
+            String errorMessage,
+            long nowMs) {
+        lockAndVerifyLeaseInCurrentTx(job, owner, RebuildPhase.SWITCHING_ALIAS, false, false, nowMs);
+        if (errorMessage != null) {
+            jdbcTemplate.update(
+                    """
+                    UPDATE search_rebuild_job
+                    SET alias_switch_uncertain = ?,
+                        last_error = ?,
+                        updated_at_ms = ?
+                    WHERE job_id = ?
+                    """,
+                    uncertain ? 1 : 0,
+                    boundedError(errorMessage),
+                    nowMs,
+                    job.jobId()
+            );
+        } else {
+            jdbcTemplate.update(
+                    """
+                    UPDATE search_rebuild_job
+                    SET alias_switch_uncertain = ?,
+                        updated_at_ms = ?
+                    WHERE job_id = ?
+                    """,
+                    uncertain ? 1 : 0,
+                    nowMs,
+                    job.jobId()
+            );
+        }
     }
 
     public void updateSnapshotHandleInCurrentTx(
@@ -335,6 +431,7 @@ public class SearchRebuildRepository {
                 UPDATE search_rebuild_job
                 SET phase = 'FAILED',
                     active_lock_key = NULL,
+                    alias_switch_uncertain = 0,
                     last_error = ?,
                     updated_at_ms = ?
                 WHERE job_id = ?
@@ -386,6 +483,7 @@ public class SearchRebuildRepository {
                 UPDATE search_rebuild_job
                 SET phase = 'EXPIRED_SUPERSEDED',
                     active_lock_key = NULL,
+                    alias_switch_uncertain = 0,
                     superseded_by_job_id = ?,
                     last_error = ?,
                     updated_at_ms = ?
@@ -407,9 +505,10 @@ public class SearchRebuildRepository {
                     last_commit_sequence, incremental_commits_applied, incremental_events_applied,
                     source_generation, source_physical_index,
                     candidate_generation, candidate_physical_index,
-                    phase, lease_owner, lease_until_ms, switch_attempts,
+                    phase, lease_owner, lease_until_ms, lease_generation,
+                    alias_switch_uncertain, switch_attempts,
                     created_at_ms, updated_at_ms
-                ) VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, 'INIT', ?, ?, 0, ?, ?)
+                ) VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, 'INIT', ?, ?, 1, 0, 0, ?, ?)
                 """,
                 newJobId,
                 expiredJob.aliasName(),
@@ -493,6 +592,7 @@ public class SearchRebuildRepository {
                 """
                 UPDATE search_rebuild_job
                 SET phase = 'SWITCHING_ALIAS',
+                    alias_switch_uncertain = 0,
                     switch_attempts = switch_attempts + 1,
                     last_error = NULL,
                     updated_at_ms = ?
@@ -545,6 +645,7 @@ public class SearchRebuildRepository {
                     UPDATE search_rebuild_job
                     SET phase = 'FAILED',
                         active_lock_key = NULL,
+                        alias_switch_uncertain = 0,
                         last_error = ?,
                         updated_at_ms = ?
                     WHERE job_id = ?
@@ -558,6 +659,7 @@ public class SearchRebuildRepository {
                     """
                     UPDATE search_rebuild_job
                     SET phase = 'CUTOVER_PAUSING',
+                        alias_switch_uncertain = 0,
                         last_error = ?,
                         updated_at_ms = ?
                     WHERE job_id = ?
@@ -616,6 +718,7 @@ public class SearchRebuildRepository {
                     """
                     UPDATE search_rebuild_job
                     SET phase = 'CACHE_INVALIDATING',
+                        alias_switch_uncertain = 0,
                         last_error = NULL,
                         updated_at_ms = ?
                     WHERE job_id = ?
@@ -629,6 +732,7 @@ public class SearchRebuildRepository {
                     UPDATE search_rebuild_job
                     SET phase = 'COMPLETED',
                         active_lock_key = NULL,
+                        alias_switch_uncertain = 0,
                         last_error = NULL,
                         updated_at_ms = ?
                     WHERE job_id = ?
@@ -648,6 +752,7 @@ public class SearchRebuildRepository {
                 UPDATE search_rebuild_job
                 SET phase = 'COMPLETED',
                     active_lock_key = NULL,
+                    alias_switch_uncertain = 0,
                     last_error = NULL,
                     updated_at_ms = ?
                 WHERE job_id = ?
@@ -736,7 +841,8 @@ public class SearchRebuildRepository {
                        last_commit_sequence, incremental_commits_applied, incremental_events_applied,
                        source_generation, source_physical_index,
                        candidate_generation, candidate_physical_index,
-                       phase, lease_owner, lease_until_ms, switch_attempts,
+                       phase, lease_owner, lease_until_ms, lease_generation,
+                       alias_switch_uncertain, switch_attempts,
                        last_error, superseded_by_job_id, created_at_ms, updated_at_ms
                 FROM search_rebuild_job
                 """ + " " + whereClause;
@@ -766,6 +872,8 @@ public class SearchRebuildRepository {
                 RebuildPhase.valueOf(rs.getString("phase")),
                 rs.getString("lease_owner"),
                 nullableLong(rs, "lease_until_ms"),
+                rs.getLong("lease_generation"),
+                rs.getInt("alias_switch_uncertain") != 0,
                 rs.getInt("switch_attempts"),
                 rs.getString("last_error"),
                 rs.getString("superseded_by_job_id"),

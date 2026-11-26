@@ -16,5 +16,7 @@ public interface SearchIndexAdminClient {
 
     Set<String> getAliasTargets(String aliasName);
 
-    void switchAliasAtomically(String aliasName, Set<String> removeFromIndices, String targetPhysicalIndex);
+    AliasSwitchResult switchAliasAtomically(String aliasName, Set<String> removeFromIndices, String targetPhysicalIndex);
+
+    AliasSwitchResult removeAliasBindingsAtomically(String aliasName, Set<String> removeFromIndices);
 }

@@ -653,10 +653,10 @@ class SearchRebuildAndCutoverIntegrationTest {
         }
         assertThat(current.phase()).isEqualTo(RebuildPhase.SWITCHING_ALIAS);
 
-        // Part A: Confirmed pre-switch failure (ES _aliases returns 503 before mutating alias -> GET /_alias still shows g1).
+        // Part A: Confirmed pre-switch rejection (ES _aliases synchronously rejects with HTTP 400 -> GET /_alias still shows g1).
         esStub.setInterceptor((req, def) -> {
             if ("POST".equalsIgnoreCase(req.method()) && "/_aliases".equals(req.path())) {
-                return StatefulElasticsearchStub.StubResponse.status(503, "{\"error\":\"cluster_unavailable\"}");
+                return StatefulElasticsearchStub.StubResponse.status(400, "{\"error\":{\"type\":\"illegal_argument_exception\",\"reason\":\"rejected_pre_switch\"},\"status\":400}");
             }
             return def.get();
         });

@@ -1,7 +1,7 @@
 {
   "contractVersion": "0.1",
   "service": "knode-search",
-  "scope": "SEARCH-03 full snapshot rebuild, incremental cursor catchup, and atomic index alias cutover",
+  "scope": "SEARCH-03 full snapshot rebuild, incremental cursor catchup, and atomic index alias cutover (including SEARCH-03-R1 hardening)",
   "dependsOnContracts": [
     "contracts/content/article-snapshot-06a-v0.1.json",
     "contracts/shared/events/content-events-v0.1.json",
@@ -32,10 +32,11 @@
   "storageAndUpgrade": {
     "freshSchemaResource": "knode-search/src/main/resources/db/search-consumer-schema.sql",
     "additiveUpgradeResource": "knode-search/src/main/resources/db/search-rebuild-03-upgrade.sql",
+    "r1AdditiveUpgradeResource": "knode-search/src/main/resources/db/search-rebuild-03-r1-upgrade.sql",
     "tables": {
       "search_index_generation": "Per-alias active_generation, active_physical_index, cutover_state (NORMAL|CUTOVER_PAUSED|SWITCHING_ALIAS), active_rebuild_job_id, require_cold_visibility_guard, and cutover cache invalidation compensation state",
       "search_article_version_barrier": "Cross-generation monotonic max_content_revision and last_visibility floor preventing late pre-cutover resurrection",
-      "search_rebuild_job": "Resumable rebuild checkpoint and lease state with UNIQUE(active_lock_key) enforcing at most one active rebuild job per alias across instances",
+      "search_rebuild_job": "Resumable rebuild checkpoint and lease state with UNIQUE(active_lock_key), monotonic lease_generation fencing token, and alias_switch_uncertain state enforcing single-owner non-overlapping writebacks per alias across instances",
       "search_rebuild_event_log": "Rebuild-scoped idempotency log keyed by (candidate_generation, event_id), isolated from active search_event_inbox",
       "search_article_projection": "Composite PK (index_generation, article_id) isolating candidate projection from active generation",
       "search_index_task": "Composite PK (index_generation, article_id) with immutable target_index binding every worker write strictly to its task generation's physical index"
@@ -56,18 +57,19 @@
       "EXPIRED_SUPERSEDED",
       "FAILED"
     ],
+    "leaseFencing": "Every post-IO local SQL writeback locks search_rebuild_job FOR UPDATE first and verifies lease_owner, monotonic lease_generation, lease_until_ms > now, expected phase, and input snapshot/incremental cursor before mutating projections, tasks, event logs, cursors, or phase; stale instances abort with StaleRebuildLeaseException and roll back cleanly",
     "commitBatchAtomicity": "All events in a ChangeCommitBatch and the updated incremental_cursor commit in one SQL transaction; mid-batch failure rolls back the full batch leaving incremental_cursor unchanged",
     "zeroGapEventHandoff": "CUTOVER_PAUSING sets search_index_generation.cutover_state=CUTOVER_PAUSED under row lock; ContentEventIngestionService rejects online commits with CutoverPausedException without XACKing Stream entries; SearchIndexTaskWorker stops claiming online tasks; FINAL_CATCHUP drains all commits up to observed head strictly after pause; once SWITCHING_ALIAS completes and resets cutover_state=NORMAL, unacked post-cutover Stream events resume on active_generation=candidate_generation",
-    "coldArticleProtection": "After rebuild cutover sets require_cold_visibility_guard=1, any online PublicArticleEvent for an article without a projection in the active generation and above search_article_version_barrier performs a fail-closed authoritative Content visibility:batch (PUBLIC_SEARCH) check outside the SQL transaction; denied/deleted articles persist a durable hidden version barrier and never enter the new index"
+    "coldArticleProtection": "After rebuild cutover sets require_cold_visibility_guard=1, any online PublicArticleEvent for an article without a projection in the active generation and above search_article_version_barrier performs a fail-closed authoritative Content visibility:batch (PUBLIC_SEARCH) check outside the SQL transaction: denied/deleted articles persist a durable hidden version barrier; PUBLIC/READABLE responses strictly compare event sourceRevision against authoritative sourceRevision (event < authoritative -> STALE_IGNORED without marking authoritative revision applied; event > authoritative or missing authoritative revision -> retryable failure without XACK; exact equality -> admitted)"
   },
   "atomicAliasCutoverAndCache": {
     "preSwitchVerification": "Explicit ES refresh of candidate physical index, exact searchable=true/false document count equality against candidate projection, and sampled search-path (_search by ids with version=true) verification of public fields and tombstone field redaction",
-    "reconcileFirstRecovery": "Persists SWITCHING_ALIAS intent and source/target physical indices before ES POST /_aliases (retaining old physical index). On error or crash-restart, queries ES GET /_alias/{alias}: if alias points solely to candidatePhysicalIndex, reconciles forward to activate local generation and cache epoch without duplicate _aliases; if alias still points to sourcePhysicalIndex, confirmed pre-switch failure reverts cutover pause to NORMAL so old alias keeps serving",
+    "reconcileFirstRecovery": "Persists SWITCHING_ALIAS intent and alias_switch_uncertain=1 before ES POST /_aliases; every remove action carries must_exist=true so stale/duplicate switches cannot re-attach old indices; strictly validates acknowledged=true, errors!=true, and per-action results on HTTP 2xx and verifies GET /_alias/{alias} points solely to candidatePhysicalIndex before activation. Timeouts, IO drops, HTTP 408/5xx, unacknowledged, or partial failures keep SWITCHING_ALIAS and reconcile against authoritative ES alias state (never reverting to NORMAL on a single GET still showing sourcePhysicalIndex); partial dual bindings ({source, candidate}) atomically remove stale bindings via must_exist=true; only synchronous pre-switch HTTP 4xx (!=408) rejections with source intact revert to NORMAL",
     "lateOldWorkerIsolation": "Workers bind target_index from search_index_task at claim time; late in-flight g1 writes target only g1 and skip active cache epoch invalidation when task.indexGeneration != active_generation",
-    "cacheEpochHandoff": "Advances knode:<env>:v1:search:epoch via SearchCacheInvalidator after alias activation; slow pre-switch queries fail putIfEpochUnchanged and cannot poison new epoch; transient Redis INCR failure leaves CACHE_INVALIDATING and search_index_generation.active_cache_invalidation_status=PENDING for reliable compensation; public search remains DB-independent"
+    "cacheEpochHandoff": "Writes durable Redis cutover bypass marker knode:<env>:v1:search:cutover_bypass BEFORE ES POST /_aliases; while set, all query instances (including restarted instances, with zero DB dependency) bypass stale pre-cutover Redis cache reads (including empty-result cache) and writebacks and query ES via the active alias directly. Only after Redis INCR on knode:<env>:v1:search:epoch succeeds does SearchCacheInvalidator delete cutover_bypass; if INCR fails, cutover_bypass stays active until compensation completes"
   },
   "verificationBoundary": {
-    "verifiedInJvm": "Loopback HTTP Content snapshot/changes & visibility stubs, stateful loopback Elasticsearch HTTP stub (indices/refresh/alias/_aliases/_search/version=external), H2 MODE=MySQL fresh & SEARCH-02->SEARCH-03 upgrade DDL, simulated Redis Stream & cache epoch stores, and real KnodeSearchApplication Spring Boot context wiring",
+    "verifiedInJvm": "Loopback HTTP Content snapshot/changes & visibility stubs, stateful loopback Elasticsearch HTTP stub (indices/refresh/alias/_aliases with must_exist/_search/version=external, timeout/partial-failure/late-arrival simulation), H2 MODE=MySQL fresh + SEARCH-02->SEARCH-03 + SEARCH-03->SEARCH-03-R1 upgrade DDL, simulated Redis Stream & cache epoch/bypass stores, and real KnodeSearchApplication Spring Boot context wiring",
     "notVerifiedLocally": "Live Elasticsearch cluster shard routing/network partitions, live MySQL InnoDB deadlock contention, live Redis Cluster failover, and live knode-content/knode-auth end-to-end integration"
   }
 }

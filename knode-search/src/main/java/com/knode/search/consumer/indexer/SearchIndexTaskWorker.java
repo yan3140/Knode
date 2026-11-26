@@ -83,7 +83,6 @@ public class SearchIndexTaskWorker {
         this.clock = clock;
     }
 
-
     private SearchIndexTaskWorker(
             SearchConsumerRepository repository,
             TransactionTemplate transactionTemplate,
@@ -280,7 +279,11 @@ public class SearchIndexTaskWorker {
         }
 
         try {
-            cacheInvalidator.advanceEpoch();
+            if (!genCandidates.isEmpty()) {
+                cacheInvalidator.advanceEpochAndClearCutoverBypass();
+            } else {
+                cacheInvalidator.advanceEpoch();
+            }
         } catch (Exception cacheEx) {
             String err = "CACHE_COMPENSATION_" + cacheEx.getClass().getSimpleName();
             LOGGER.warn("event=search_cache_compensation_failed batchSize={} error={}", totalCandidates, err);

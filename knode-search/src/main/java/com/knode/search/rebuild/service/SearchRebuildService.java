@@ -10,6 +10,7 @@ import com.knode.search.consumer.event.ContentEventParser;
 import com.knode.search.consumer.event.ParsedContentEvent;
 import com.knode.search.consumer.indexer.SearchIndexTaskWorker;
 import com.knode.search.consumer.persistence.ArticleProjectionRecord;
+import com.knode.search.consumer.persistence.CacheInvalidationStatus;
 import com.knode.search.consumer.persistence.IndexGenerationState;
 import com.knode.search.consumer.persistence.SearchConsumerRepository;
 import com.knode.search.consumer.persistence.SearchIndexDocument;
@@ -23,11 +24,13 @@ import com.knode.search.rebuild.client.SnapshotArticleItem;
 import com.knode.search.rebuild.client.SnapshotHandle;
 import com.knode.search.rebuild.client.SnapshotPage;
 import com.knode.search.rebuild.config.SearchRebuildProperties;
+import com.knode.search.rebuild.es.AliasSwitchResult;
 import com.knode.search.rebuild.es.SearchIndexAdminClient;
 import com.knode.search.rebuild.es.SearchVisibleDoc;
 import com.knode.search.rebuild.persistence.RebuildJobRecord;
 import com.knode.search.rebuild.persistence.RebuildPhase;
 import com.knode.search.rebuild.persistence.SearchRebuildRepository;
+import com.knode.search.rebuild.persistence.StaleRebuildLeaseException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,6 +44,7 @@ import java.net.InetAddress;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -234,22 +238,28 @@ public class SearchRebuildService {
             indexAdminClient.ensurePhysicalIndex(job.candidatePhysicalIndex());
         } catch (Exception ex) {
             String err = "CANDIDATE_INDEX_PREPARE_FAILED:" + ex.getMessage();
-            recordTransientError(job.jobId(), err);
-            return new StepOutcome(StepStatus.RETRYABLE_ERROR, reload(job.jobId()), err);
+            return recordTransientErrorOrFenced(job, RebuildPhase.INIT, false, false, err);
         }
 
         QueryBudget budget = QueryBudget.start(Duration.ofMillis(rebuildProperties.getRequestTimeoutMs()));
         try {
             SnapshotHandle handle = snapshotClient.createSearchRebuildSnapshot(
                     job.clientRequestId(), budget, "rb-create-" + job.jobId());
-            transactionTemplate.executeWithoutResult(status -> rebuildRepository.updateSnapshotHandleInCurrentTx(
-                    job.jobId(),
-                    handle.snapshotId(),
-                    handle.incrementalCursor(),
-                    handle.expiresAt().toEpochMilli(),
-                    clock.millis()
-            ));
+            transactionTemplate.executeWithoutResult(status -> {
+                long nowMs = clock.millis();
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, RebuildPhase.INIT, false, false, nowMs);
+                rebuildRepository.updateSnapshotHandleInCurrentTx(
+                        job.jobId(),
+                        handle.snapshotId(),
+                        handle.incrementalCursor(),
+                        handle.expiresAt().toEpochMilli(),
+                        nowMs
+                );
+            });
             return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
         } catch (ContentSnapshotException snapEx) {
             return handleContentSnapshotException(job, snapEx);
         }
@@ -273,6 +283,9 @@ public class SearchRebuildService {
         try {
             transactionTemplate.executeWithoutResult(status -> {
                 long nowMs = clock.millis();
+                // Fence BEFORE writing any projection, index task, or page checkpoint!
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, RebuildPhase.SNAPSHOT_IMPORTING, true, false, nowMs);
                 for (SnapshotArticleItem item : page.items()) {
                     applySnapshotItemInTx(job, item, nowMs);
                 }
@@ -285,15 +298,17 @@ public class SearchRebuildService {
                 );
             });
             return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
         } catch (Exception dbEx) {
             String err = "SNAPSHOT_PAGE_PERSIST_FAILED:" + dbEx.getMessage();
             LOGGER.warn("event=search_rebuild_snapshot_page_failed jobId={} error={}", job.jobId(), err);
-            recordTransientError(job.jobId(), err);
-            return new StepOutcome(StepStatus.RETRYABLE_ERROR, reload(job.jobId()), err);
+            return recordTransientErrorOrFenced(job, RebuildPhase.SNAPSHOT_IMPORTING, true, false, err);
         }
     }
 
     private StepOutcome stepCatchupChanges(RebuildJobRecord job, boolean finalCatchup) {
+        RebuildPhase expectedPhase = finalCatchup ? RebuildPhase.FINAL_CATCHUP : RebuildPhase.INCREMENTAL_CATCHUP;
         QueryBudget budget = QueryBudget.start(Duration.ofMillis(rebuildProperties.getRequestTimeoutMs()));
         ChangeFeedPage page;
         try {
@@ -318,8 +333,7 @@ public class SearchRebuildService {
                 if (!parsed.isSuccess()) {
                     String err = "CHANGE_EVENT_PROTOCOL_ERROR:" + parsed.failure().errorCode()
                             + ":" + parsed.failure().errorMessage();
-                    recordTransientError(job.jobId(), err);
-                    return new StepOutcome(StepStatus.RETRYABLE_ERROR, reload(job.jobId()), err);
+                    return recordTransientErrorOrFenced(job, expectedPhase, false, true, err);
                 }
                 events.add(parsed.event());
                 totalEvents++;
@@ -342,6 +356,9 @@ public class SearchRebuildService {
         try {
             transactionTemplate.executeWithoutResult(status -> {
                 long nowMs = clock.millis();
+                // Fence BEFORE writing any rebuild event log, projection, index task, or cursor checkpoint!
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, expectedPhase, false, true, nowMs);
                 for (ParsedCommit commit : parsedCommits) {
                     for (ParsedContentEvent event : commit.events()) {
                         applyChangeEventInTx(job, commit.commitSequence(), event, nowMs);
@@ -359,11 +376,12 @@ public class SearchRebuildService {
                 );
             });
             return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
         } catch (Exception dbEx) {
             String err = "CHANGE_BATCH_PERSIST_FAILED:" + dbEx.getMessage();
             LOGGER.warn("event=search_rebuild_change_batch_failed jobId={} error={}", job.jobId(), err);
-            recordTransientError(job.jobId(), err);
-            return new StepOutcome(StepStatus.RETRYABLE_ERROR, reload(job.jobId()), err);
+            return recordTransientErrorOrFenced(job, expectedPhase, false, true, err);
         }
     }
 
@@ -372,29 +390,50 @@ public class SearchRebuildService {
         long dead = consumerRepository.countDeadTasks(job.candidateGeneration());
         if (dead > 0L) {
             String err = "CANDIDATE_INDEX_DEAD_TASKS:" + dead;
-            transactionTemplate.executeWithoutResult(status ->
-                    rebuildRepository.markJobFailedInCurrentTx(job.jobId(), job.aliasName(), err, clock.millis()));
-            return new StepOutcome(StepStatus.FAILED, reload(job.jobId()), err);
+            try {
+                transactionTemplate.executeWithoutResult(status -> {
+                    long nowMs = clock.millis();
+                    rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                            job, instanceId, RebuildPhase.CANDIDATE_INDEXING, false, false, nowMs);
+                    rebuildRepository.markJobFailedInCurrentTx(job.jobId(), job.aliasName(), err, nowMs);
+                });
+                return new StepOutcome(StepStatus.FAILED, reload(job.jobId()), err);
+            } catch (StaleRebuildLeaseException fenced) {
+                return leaseFencedOutcome(job, fenced);
+            }
         }
         long incomplete = consumerRepository.countIncompleteTasks(job.candidateGeneration());
         if (incomplete == 0L) {
-            transactionTemplate.executeWithoutResult(status ->
+            try {
+                transactionTemplate.executeWithoutResult(status -> {
+                    long nowMs = clock.millis();
+                    rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                            job, instanceId, RebuildPhase.CANDIDATE_INDEXING, false, false, nowMs);
                     rebuildRepository.updatePhaseInCurrentTx(
-                            job.jobId(), RebuildPhase.CUTOVER_PAUSING, null, clock.millis()));
-            return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+                            job.jobId(), RebuildPhase.CUTOVER_PAUSING, null, nowMs);
+                });
+                return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+            } catch (StaleRebuildLeaseException fenced) {
+                return leaseFencedOutcome(job, fenced);
+            }
         }
         return new StepOutcome(StepStatus.WAITING_RETRY, reload(job.jobId()), "INCOMPLETE_TASKS:" + incomplete);
     }
 
     private StepOutcome stepEnterCutoverPause(RebuildJobRecord job) {
         try {
-            transactionTemplate.executeWithoutResult(status ->
-                    rebuildRepository.enterCutoverPauseInCurrentTx(job, clock.millis()));
+            transactionTemplate.executeWithoutResult(status -> {
+                long nowMs = clock.millis();
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, RebuildPhase.CUTOVER_PAUSING, false, false, nowMs);
+                rebuildRepository.enterCutoverPauseInCurrentTx(job, nowMs);
+            });
             return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
         } catch (Exception ex) {
             String err = "CUTOVER_PAUSE_FAILED:" + ex.getMessage();
-            recordTransientError(job.jobId(), err);
-            return new StepOutcome(StepStatus.RETRYABLE_ERROR, reload(job.jobId()), err);
+            return recordTransientErrorOrFenced(job, RebuildPhase.CUTOVER_PAUSING, false, false, err);
         }
     }
 
@@ -404,9 +443,17 @@ public class SearchRebuildService {
         long dead = consumerRepository.countDeadTasks(job.candidateGeneration());
         if (dead > 0L) {
             String err = "FINAL_CANDIDATE_DEAD_TASKS:" + dead;
-            transactionTemplate.executeWithoutResult(status ->
-                    rebuildRepository.markJobFailedInCurrentTx(job.jobId(), job.aliasName(), err, clock.millis()));
-            return new StepOutcome(StepStatus.FAILED, reload(job.jobId()), err);
+            try {
+                transactionTemplate.executeWithoutResult(status -> {
+                    long nowMs = clock.millis();
+                    rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                            job, instanceId, RebuildPhase.VERIFYING_CANDIDATE, false, false, nowMs);
+                    rebuildRepository.markJobFailedInCurrentTx(job.jobId(), job.aliasName(), err, nowMs);
+                });
+                return new StepOutcome(StepStatus.FAILED, reload(job.jobId()), err);
+            } catch (StaleRebuildLeaseException fenced) {
+                return leaseFencedOutcome(job, fenced);
+            }
         }
         long incomplete = consumerRepository.countIncompleteTasks(job.candidateGeneration());
         if (incomplete > 0L) {
@@ -420,21 +467,34 @@ public class SearchRebuildService {
             if (mismatch != null) {
                 LOGGER.warn("event=search_rebuild_verification_failed jobId={} candidateIndex={} reason={}",
                         job.jobId(), job.candidatePhysicalIndex(), mismatch);
-                transactionTemplate.executeWithoutResult(status ->
-                        rebuildRepository.revertConfirmedPreSwitchFailureInCurrentTx(
-                                job, true, "CANDIDATE_VERIFY_FAILED:" + mismatch, clock.millis()));
+                transactionTemplate.executeWithoutResult(status -> {
+                    long nowMs = clock.millis();
+                    rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                            job, instanceId, RebuildPhase.VERIFYING_CANDIDATE, false, false, nowMs);
+                    rebuildRepository.revertConfirmedPreSwitchFailureInCurrentTx(
+                            job, true, "CANDIDATE_VERIFY_FAILED:" + mismatch, nowMs);
+                });
                 return new StepOutcome(StepStatus.FAILED, reload(job.jobId()), mismatch);
             }
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
         } catch (Exception ex) {
             String err = "CANDIDATE_VERIFY_ERROR:" + ex.getMessage();
-            recordTransientError(job.jobId(), err);
-            return new StepOutcome(StepStatus.RETRYABLE_ERROR, reload(job.jobId()), err);
+            return recordTransientErrorOrFenced(job, RebuildPhase.VERIFYING_CANDIDATE, false, false, err);
         }
 
         // Persist SWITCHING_ALIAS intent BEFORE issuing ES _aliases!
-        transactionTemplate.executeWithoutResult(status ->
-                rebuildRepository.enterSwitchingAliasInCurrentTx(job, clock.millis()));
-        return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+        try {
+            transactionTemplate.executeWithoutResult(status -> {
+                long nowMs = clock.millis();
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, RebuildPhase.VERIFYING_CANDIDATE, false, false, nowMs);
+                rebuildRepository.enterSwitchingAliasInCurrentTx(job, nowMs);
+            });
+            return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
+        }
     }
 
     private StepOutcome stepSwitchAliasOrReconcile(RebuildJobRecord job) {
@@ -443,8 +503,8 @@ public class SearchRebuildService {
             currentTargets = indexAdminClient.getAliasTargets(job.aliasName());
         } catch (Exception ex) {
             String err = "ALIAS_RECONCILE_READ_FAILED:" + ex.getMessage();
-            recordTransientError(job.jobId(), err);
-            return new StepOutcome(StepStatus.ALIAS_SWITCH_AMBIGUOUS, reload(job.jobId()), err);
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         }
 
         // Case 1: ES alias ALREADY points solely to candidatePhysicalIndex -> reconcile forward!
@@ -454,76 +514,241 @@ public class SearchRebuildService {
             return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
         }
 
-        // Case 2: Confirmed pre-switch state (either empty alias on bootstrap or pointing to sourcePhysicalIndex).
+        // Case 2: Partial alias binding (e.g., both source and candidate attached after partial failure) ->
+        // atomically remove stale non-candidate bindings (with must_exist=true) and re-verify!
+        if (currentTargets.contains(job.candidatePhysicalIndex()) && currentTargets.size() > 1) {
+            return repairPartialAliasWithCandidatePresent(job, currentTargets);
+        }
+
+        // Case 3: Previous alias switch request had uncertain/timed-out/unacknowledged outcome!
+        // Never revert to NORMAL solely because a GET still sees sourcePhysicalIndex — the in-flight
+        // request may still land late on ES! Keep SWITCHING_ALIAS gate and reconcile on subsequent ticks.
+        if (job.aliasSwitchUncertain()) {
+            if (currentTargets.isEmpty()) {
+                // Partial failure removed old binding without adding candidate -> add candidate only.
+                return repairEmptyAliasToCandidate(job);
+            }
+            String err = "ALIAS_SWITCH_IN_FLIGHT_UNCERTAIN:waiting_for_es_reconcile:targets=" + currentTargets;
+            LOGGER.warn("event=search_rebuild_alias_still_uncertain jobId={} alias={} targets={}",
+                    job.jobId(), job.aliasName(), currentTargets);
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
+
+        // Case 4: Fresh pre-switch state (empty on bootstrap or pointing solely to sourcePhysicalIndex).
         boolean validPreSwitch = currentTargets.isEmpty()
                 || currentTargets.equals(Set.of(job.sourcePhysicalIndex()));
         if (!validPreSwitch) {
             String err = "UNEXPECTED_ALIAS_TARGETS:" + currentTargets;
-            recordTransientError(job.jobId(), err);
-            return new StepOutcome(StepStatus.ALIAS_SWITCH_AMBIGUOUS, reload(job.jobId()), err);
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         }
 
-        // Issue ONE atomic ES _aliases switch (retaining old physical index).
+        // Verify lease is still valid before side effects on Redis or ES!
         try {
-            indexAdminClient.switchAliasAtomically(job.aliasName(), currentTargets, job.candidatePhysicalIndex());
-        } catch (Exception switchEx) {
-            String switchErr = "ALIAS_SWITCH_FAILED:" + switchEx.getMessage();
-            LOGGER.warn("event=search_rebuild_alias_switch_error jobId={} alias={} error={}",
-                    job.jobId(), job.aliasName(), switchErr);
-
-            // Immediately reconcile against authoritative ES alias state to distinguish pre-switch failure vs lost response!
-            Set<String> postTargets;
-            try {
-                postTargets = indexAdminClient.getAliasTargets(job.aliasName());
-            } catch (Exception postReadEx) {
-                // Ambiguous: cannot verify whether ES applied the switch -> keep SWITCHING_ALIAS for restart reconciliation!
-                String ambErr = "ALIAS_SWITCH_AMBIGUOUS:" + switchEx.getMessage() + ";postCheck=" + postReadEx.getMessage();
-                recordTransientError(job.jobId(), ambErr);
-                return new StepOutcome(StepStatus.ALIAS_SWITCH_AMBIGUOUS, reload(job.jobId()), ambErr);
-            }
-
-            if (postTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
-                // ES actually applied the atomic switch before response failed -> reconcile forward!
-                LOGGER.info("event=search_rebuild_alias_reconciled_after_lost_response jobId={} alias={} target={}",
-                        job.jobId(), job.aliasName(), job.candidatePhysicalIndex());
-                return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
-            }
-
-            if (postTargets.isEmpty() || postTargets.equals(Set.of(job.sourcePhysicalIndex()))) {
-                // Confirmed pre-switch failure: old alias is intact -> revert cutover pause so old generation keeps serving!
-                boolean exhausted = job.switchAttempts() >= rebuildProperties.getMaxSwitchAttempts();
-                transactionTemplate.executeWithoutResult(status ->
-                        rebuildRepository.revertConfirmedPreSwitchFailureInCurrentTx(
-                                job, exhausted, switchErr, clock.millis()));
-                return new StepOutcome(
-                        exhausted ? StepStatus.FAILED : StepStatus.PRE_SWITCH_FAILED_REVERTED,
-                        reload(job.jobId()),
-                        switchErr
-                );
-            }
-
-            String weirdErr = "ALIAS_SWITCH_UNEXPECTED_POST_TARGETS:" + postTargets;
-            recordTransientError(job.jobId(), weirdErr);
-            return new StepOutcome(StepStatus.ALIAS_SWITCH_AMBIGUOUS, reload(job.jobId()), weirdErr);
+            verifyLeaseActiveInTx(job, RebuildPhase.SWITCHING_ALIAS);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
         }
 
-        // Hook point for subclasses/tests to simulate crash between ES _aliases success and local SQL activation!
-        afterAtomicAliasSwitchBeforeLocalCommit(job);
+        // Enable cross-instance Redis cutover cache bypass BEFORE mutating ES alias!
+        // If writing cutover_bypass fails, abort BEFORE POST /_aliases so g1 keeps serving safely.
+        if (cacheInvalidator.isCacheEnabled()) {
+            try {
+                cacheInvalidator.enterCutoverBypass(job.jobId() + ":" + job.candidatePhysicalIndex());
+            } catch (Exception bypassEx) {
+                String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
+                LOGGER.warn("event=search_rebuild_cutover_bypass_failed jobId={} error={}", job.jobId(), err);
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err);
+            }
+        }
 
-        return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_SWITCHED_AND_ACTIVATED);
+        // Persist alias_switch_uncertain=1 BEFORE dispatching POST /_aliases so even a crash mid-flight
+        // preserves the SWITCHING_ALIAS timeout fence on recovery.
+        try {
+            transactionTemplate.executeWithoutResult(status ->
+                    rebuildRepository.markAliasSwitchUncertainInCurrentTx(
+                            job, instanceId, true, null, clock.millis()));
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
+        }
+
+        // Issue ONE atomic ES _aliases switch (remove carries must_exist=true; old physical index retained).
+        AliasSwitchResult switchResult = indexAdminClient.switchAliasAtomically(
+                job.aliasName(), currentTargets, job.candidatePhysicalIndex());
+
+        if (switchResult.isAcknowledged()) {
+            // Hook point for subclasses/tests to simulate crash between ES _aliases success and local SQL activation!
+            afterAtomicAliasSwitchBeforeLocalCommit(job);
+
+            // Confirm ES alias points SOLELY to candidatePhysicalIndex before activating new generation!
+            Set<String> confirmedTargets;
+            try {
+                confirmedTargets = indexAdminClient.getAliasTargets(job.aliasName());
+            } catch (Exception verifyEx) {
+                String err = "ALIAS_POST_SWITCH_VERIFY_FAILED:" + verifyEx.getMessage();
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                        StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+            }
+            if (confirmedTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+                return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_SWITCHED_AND_ACTIVATED);
+            }
+            String err = "ALIAS_POST_SWITCH_TARGET_MISMATCH:" + confirmedTargets;
+            LOGGER.warn("event=search_rebuild_alias_post_verify_mismatch jobId={} alias={} targets={}",
+                    job.jobId(), job.aliasName(), confirmedTargets);
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
+
+        // Non-acknowledged switch result: inspect ES authoritative alias state!
+        String switchErr = "ALIAS_SWITCH_" + switchResult.status().name() + ":" + switchResult.detail();
+        LOGGER.warn("event=search_rebuild_alias_switch_non_ack jobId={} alias={} status={} detail={}",
+                job.jobId(), job.aliasName(), switchResult.status(), switchResult.detail());
+
+        Set<String> postTargets;
+        try {
+            postTargets = indexAdminClient.getAliasTargets(job.aliasName());
+        } catch (Exception postReadEx) {
+            String ambErr = switchErr + ";postCheck=" + postReadEx.getMessage();
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, ambErr,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
+
+        if (postTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+            // ES actually switched cleanly to candidatePhysicalIndex -> reconcile forward!
+            LOGGER.info("event=search_rebuild_alias_reconciled_after_non_ack jobId={} alias={} target={}",
+                    job.jobId(), job.aliasName(), job.candidatePhysicalIndex());
+            return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
+        }
+
+        // ONLY revert to NORMAL on g1 if ES returned a synchronous pre-switch rejection (HTTP 4xx != 408)
+        // proving the request was refused and CANNOT arrive late, AND ES alias is still intact on source!
+        if (switchResult.isConfirmedPreSwitchRejected()
+                && (postTargets.isEmpty() || postTargets.equals(Set.of(job.sourcePhysicalIndex())))) {
+            boolean exhausted = job.switchAttempts() >= rebuildProperties.getMaxSwitchAttempts();
+            try {
+                transactionTemplate.executeWithoutResult(status -> {
+                    long nowMs = clock.millis();
+                    rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                            job, instanceId, RebuildPhase.SWITCHING_ALIAS, false, false, nowMs);
+                    rebuildRepository.revertConfirmedPreSwitchFailureInCurrentTx(
+                            job, exhausted, switchErr, nowMs);
+                });
+            } catch (StaleRebuildLeaseException fenced) {
+                return leaseFencedOutcome(job, fenced);
+            }
+            // Safe to clear cutover bypass now because switch was synchronously rejected and reverted to g1.
+            clearCutoverBypassBestEffort(job.jobId());
+            return new StepOutcome(
+                    exhausted ? StepStatus.FAILED : StepStatus.PRE_SWITCH_FAILED_REVERTED,
+                    reload(job.jobId()),
+                    switchErr
+            );
+        }
+
+        // Timeout, connection drop, 5xx, unacknowledged, or partial action failure:
+        // KEEP SWITCHING_ALIAS gate + alias_switch_uncertain=1 + cutover_bypass for subsequent reconciliation!
+        String holdErr = switchErr + ";postTargets=" + postTargets;
+        return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, holdErr,
+                StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+    }
+
+    private StepOutcome repairPartialAliasWithCandidatePresent(RebuildJobRecord job, Set<String> currentTargets) {
+        try {
+            verifyLeaseActiveInTx(job, RebuildPhase.SWITCHING_ALIAS);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
+        }
+        if (cacheInvalidator.isCacheEnabled()) {
+            try {
+                cacheInvalidator.enterCutoverBypass(job.jobId() + ":" + job.candidatePhysicalIndex());
+            } catch (Exception bypassEx) {
+                String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                        StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+            }
+        }
+        Set<String> staleIndices = new LinkedHashSet<>();
+        for (String target : currentTargets) {
+            if (!target.equals(job.candidatePhysicalIndex())) {
+                staleIndices.add(target);
+            }
+        }
+        LOGGER.warn("event=search_rebuild_alias_repairing_partial jobId={} alias={} removing={} keeping={}",
+                job.jobId(), job.aliasName(), staleIndices, job.candidatePhysicalIndex());
+        AliasSwitchResult repairResult = indexAdminClient.removeAliasBindingsAtomically(job.aliasName(), staleIndices);
+        Set<String> postTargets;
+        try {
+            postTargets = indexAdminClient.getAliasTargets(job.aliasName());
+        } catch (Exception readEx) {
+            String err = "ALIAS_PARTIAL_REPAIR_VERIFY_FAILED:" + readEx.getMessage();
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
+        if (postTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+            LOGGER.info("event=search_rebuild_alias_partial_repaired jobId={} alias={} target={}",
+                    job.jobId(), job.aliasName(), job.candidatePhysicalIndex());
+            return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
+        }
+        String err = "ALIAS_PARTIAL_REPAIR_INCOMPLETE:" + repairResult.status() + ":" + repairResult.detail()
+                + ";postTargets=" + postTargets;
+        return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+    }
+
+    private StepOutcome repairEmptyAliasToCandidate(RebuildJobRecord job) {
+        try {
+            verifyLeaseActiveInTx(job, RebuildPhase.SWITCHING_ALIAS);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
+        }
+        if (cacheInvalidator.isCacheEnabled()) {
+            try {
+                cacheInvalidator.enterCutoverBypass(job.jobId() + ":" + job.candidatePhysicalIndex());
+            } catch (Exception bypassEx) {
+                String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                        StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+            }
+        }
+        AliasSwitchResult addResult = indexAdminClient.switchAliasAtomically(
+                job.aliasName(), Set.of(), job.candidatePhysicalIndex());
+        Set<String> postTargets;
+        try {
+            postTargets = indexAdminClient.getAliasTargets(job.aliasName());
+        } catch (Exception readEx) {
+            String err = "ALIAS_EMPTY_REPAIR_VERIFY_FAILED:" + readEx.getMessage();
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
+        if (postTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+            return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
+        }
+        String err = "ALIAS_EMPTY_REPAIR_INCOMPLETE:" + addResult.status() + ":" + addResult.detail()
+                + ";postTargets=" + postTargets;
+        return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                StepStatus.ALIAS_SWITCH_AMBIGUOUS);
     }
 
     private StepOutcome activateCandidateAndAttemptCacheInvalidation(
             RebuildJobRecord job, StepStatus activationStatus) {
         boolean cacheEnabled = cacheInvalidator.isCacheEnabled();
-        transactionTemplate.executeWithoutResult(status ->
-                rebuildRepository.activateCandidateGenerationInCurrentTx(job, cacheEnabled, clock.millis()));
+        try {
+            transactionTemplate.executeWithoutResult(status -> {
+                long nowMs = clock.millis();
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, RebuildPhase.SWITCHING_ALIAS, false, false, nowMs);
+                rebuildRepository.activateCandidateGenerationInCurrentTx(job, cacheEnabled, nowMs);
+            });
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
+        }
         RebuildJobRecord activated = reload(job.jobId());
         if (!cacheEnabled) {
             return new StepOutcome(activationStatus, activated, null);
         }
         StepOutcome cacheOutcome = stepInvalidateCache(activated);
-        if (cacheOutcome.job().phase() == RebuildPhase.COMPLETED) {
+        if (cacheOutcome.job() != null && cacheOutcome.job().phase() == RebuildPhase.COMPLETED) {
             return new StepOutcome(activationStatus, cacheOutcome.job(), null);
         }
         return cacheOutcome;
@@ -531,32 +756,68 @@ public class SearchRebuildService {
 
     private StepOutcome stepInvalidateCache(RebuildJobRecord job) {
         if (!cacheInvalidator.isCacheEnabled()) {
-            transactionTemplate.executeWithoutResult(status ->
-                    rebuildRepository.markJobCompletedAfterCacheInvalidationInCurrentTx(job, clock.millis()));
-            return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+            try {
+                transactionTemplate.executeWithoutResult(status -> {
+                    long nowMs = clock.millis();
+                    rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                            job, instanceId, RebuildPhase.CACHE_INVALIDATING, false, false, nowMs);
+                    rebuildRepository.markJobCompletedAfterCacheInvalidationInCurrentTx(job, nowMs);
+                });
+                return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+            } catch (StaleRebuildLeaseException fenced) {
+                return leaseFencedOutcome(job, fenced);
+            }
         }
+
         try {
-            cacheInvalidator.advanceEpoch();
-            transactionTemplate.executeWithoutResult(status ->
-                    rebuildRepository.markJobCompletedAfterCacheInvalidationInCurrentTx(job, clock.millis()));
+            verifyLeaseActiveInTx(job, RebuildPhase.CACHE_INVALIDATING);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
+        }
+
+        Optional<IndexGenerationState> currentGen = consumerRepository.findGenerationState(job.aliasName());
+        boolean alreadyCompensated = currentGen.isPresent()
+                && currentGen.get().activeGeneration() == job.candidateGeneration()
+                && currentGen.get().activeCacheInvalidationStatus() == CacheInvalidationStatus.DONE;
+        try {
+            if (alreadyCompensated) {
+                cacheInvalidator.clearCutoverBypass();
+            } else {
+                cacheInvalidator.advanceEpochAndClearCutoverBypass();
+            }
+            transactionTemplate.executeWithoutResult(status -> {
+                long nowMs = clock.millis();
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, RebuildPhase.CACHE_INVALIDATING, false, false, nowMs);
+                rebuildRepository.markJobCompletedAfterCacheInvalidationInCurrentTx(job, nowMs);
+            });
             return new StepOutcome(StepStatus.PROGRESSED, reload(job.jobId()), null);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
         } catch (Exception cacheEx) {
             String err = "CUTOVER_CACHE_EPOCH_INCR_" + cacheEx.getClass().getSimpleName();
             LOGGER.warn("event=search_rebuild_cache_invalidation_failed jobId={} error={}", job.jobId(), err);
             Optional<IndexGenerationState> state = consumerRepository.findGenerationState(job.aliasName());
             int currentAttempts = state.map(IndexGenerationState::activeCacheInvalidationAttempts).orElse(0);
-            transactionTemplate.executeWithoutResult(status -> {
-                consumerRepository.markGenerationCacheInvalidationRetry(
-                        job.aliasName(),
-                        job.candidateGeneration(),
-                        currentAttempts,
-                        err,
-                        consumerProperties.getIndexer().getCacheCompensationBaseDelayMs(),
-                        consumerProperties.getIndexer().getCacheCompensationMaxDelayMs(),
-                        clock.millis()
-                );
-                rebuildRepository.recordTransientErrorInCurrentTx(job.jobId(), err, clock.millis());
-            });
+            try {
+                transactionTemplate.executeWithoutResult(status -> {
+                    long nowMs = clock.millis();
+                    rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                            job, instanceId, RebuildPhase.CACHE_INVALIDATING, false, false, nowMs);
+                    consumerRepository.markGenerationCacheInvalidationRetry(
+                            job.aliasName(),
+                            job.candidateGeneration(),
+                            currentAttempts,
+                            err,
+                            consumerProperties.getIndexer().getCacheCompensationBaseDelayMs(),
+                            consumerProperties.getIndexer().getCacheCompensationMaxDelayMs(),
+                            nowMs
+                    );
+                    rebuildRepository.recordTransientErrorInCurrentTx(job.jobId(), err, nowMs);
+                });
+            } catch (StaleRebuildLeaseException fenced) {
+                return leaseFencedOutcome(job, fenced);
+            }
             return new StepOutcome(StepStatus.CACHE_INVALIDATION_PENDING, reload(job.jobId()), err);
         }
     }
@@ -886,6 +1147,9 @@ public class SearchRebuildService {
     }
 
     private StepOutcome handleContentSnapshotException(RebuildJobRecord job, ContentSnapshotException ex) {
+        boolean verifySnapCursor = job.phase() == RebuildPhase.SNAPSHOT_IMPORTING;
+        boolean verifyIncCursor = job.phase() == RebuildPhase.INCREMENTAL_CATCHUP
+                || job.phase() == RebuildPhase.FINAL_CATCHUP;
         if (ex.isExpired410()) {
             String newJobId = generateJobId();
             String newClientRequestId = generateClientRequestId();
@@ -893,19 +1157,88 @@ public class SearchRebuildService {
             String reason = "HTTP_410_" + ex.errorCode() + ":" + ex.getMessage();
             LOGGER.warn("event=search_rebuild_expired_410_restarting oldJobId={} newJobId={} reason={}",
                     job.jobId(), newJobId, reason);
-            RebuildJobRecord replacement = transactionTemplate.execute(status ->
-                    rebuildRepository.expireAndRestartJobInCurrentTx(
-                            job, newJobId, newClientRequestId, instanceId, leaseDurationMs, reason, clock.millis()));
-            return new StepOutcome(StepStatus.EXPIRED_410_RESTARTED, replacement, reason);
+            try {
+                RebuildJobRecord replacement = transactionTemplate.execute(status -> {
+                    long nowMs = clock.millis();
+                    rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                            job, instanceId, job.phase(), verifySnapCursor, verifyIncCursor, nowMs);
+                    return rebuildRepository.expireAndRestartJobInCurrentTx(
+                            job, newJobId, newClientRequestId, instanceId, leaseDurationMs, reason, nowMs);
+                });
+                return new StepOutcome(StepStatus.EXPIRED_410_RESTARTED, replacement, reason);
+            } catch (StaleRebuildLeaseException fenced) {
+                return leaseFencedOutcome(job, fenced);
+            }
         }
         String err = "CONTENT_HTTP_" + ex.httpStatus() + "_" + ex.errorCode() + ":" + ex.getMessage();
         if (ex.isRetryable()) {
-            recordTransientError(job.jobId(), err);
-            return new StepOutcome(StepStatus.RETRYABLE_ERROR, reload(job.jobId()), err);
+            return recordTransientErrorOrFenced(job, job.phase(), verifySnapCursor, verifyIncCursor, err);
         }
+        try {
+            transactionTemplate.executeWithoutResult(status -> {
+                long nowMs = clock.millis();
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, job.phase(), verifySnapCursor, verifyIncCursor, nowMs);
+                rebuildRepository.markJobFailedInCurrentTx(job.jobId(), job.aliasName(), err, nowMs);
+            });
+            return new StepOutcome(StepStatus.FAILED, reload(job.jobId()), err);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
+        }
+    }
+
+    private void verifyLeaseActiveInTx(RebuildJobRecord job, RebuildPhase expectedPhase) {
         transactionTemplate.executeWithoutResult(status ->
-                rebuildRepository.markJobFailedInCurrentTx(job.jobId(), job.aliasName(), err, clock.millis()));
-        return new StepOutcome(StepStatus.FAILED, reload(job.jobId()), err);
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, expectedPhase, false, false, clock.millis()));
+    }
+
+    private StepOutcome recordTransientErrorOrFenced(
+            RebuildJobRecord job,
+            RebuildPhase expectedPhase,
+            boolean verifySnapshotCursor,
+            boolean verifyIncrementalCursor,
+            String err) {
+        return recordTransientErrorOrFenced(
+                job, expectedPhase, verifySnapshotCursor, verifyIncrementalCursor, err, StepStatus.RETRYABLE_ERROR);
+    }
+
+    private StepOutcome recordTransientErrorOrFenced(
+            RebuildJobRecord job,
+            RebuildPhase expectedPhase,
+            boolean verifySnapshotCursor,
+            boolean verifyIncrementalCursor,
+            String err,
+            StepStatus statusWhenHeld) {
+        try {
+            transactionTemplate.executeWithoutResult(status -> {
+                long nowMs = clock.millis();
+                rebuildRepository.lockAndVerifyLeaseInCurrentTx(
+                        job, instanceId, expectedPhase, verifySnapshotCursor, verifyIncrementalCursor, nowMs);
+                rebuildRepository.recordTransientErrorInCurrentTx(job.jobId(), err, nowMs);
+            });
+            return new StepOutcome(statusWhenHeld, reload(job.jobId()), err);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
+        }
+    }
+
+    private StepOutcome leaseFencedOutcome(RebuildJobRecord job, StaleRebuildLeaseException fenced) {
+        LOGGER.warn("event=search_rebuild_lease_lost_fenced jobId={} instanceId={} reason={}",
+                job.jobId(), instanceId, fenced.reason());
+        return new StepOutcome(StepStatus.LEASE_LOST_FENCED, reload(job.jobId()), fenced.reason());
+    }
+
+    private void clearCutoverBypassBestEffort(String jobId) {
+        if (!cacheInvalidator.isCacheEnabled()) {
+            return;
+        }
+        try {
+            cacheInvalidator.clearCutoverBypass();
+        } catch (Exception ex) {
+            LOGGER.warn("event=search_rebuild_cutover_bypass_clear_failed jobId={} error={}",
+                    jobId, ex.getMessage());
+        }
     }
 
     private String resolveInitialPhysicalIndex() {
@@ -922,11 +1255,6 @@ public class SearchRebuildService {
             // Fall back to canonical _g1 physical index naming.
         }
         return SearchRebuildRepository.physicalIndexName(aliasName, SearchConsumerRepository.DEFAULT_GENERATION);
-    }
-
-    private void recordTransientError(String jobId, String err) {
-        transactionTemplate.executeWithoutResult(status ->
-                rebuildRepository.recordTransientErrorInCurrentTx(jobId, err, clock.millis()));
     }
 
     private RebuildJobRecord reload(String jobId) {
@@ -968,6 +1296,7 @@ public class SearchRebuildService {
     public enum StepStatus {
         NO_ACTIVE_JOB,
         LEASE_HELD_BY_OTHER,
+        LEASE_LOST_FENCED,
         ALREADY_TERMINAL,
         PROGRESSED,
         WAITING_RETRY,

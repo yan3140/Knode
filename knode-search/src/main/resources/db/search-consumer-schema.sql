@@ -150,6 +150,8 @@ CREATE TABLE IF NOT EXISTS search_rebuild_job (
     phase VARCHAR(32) NOT NULL,
     lease_owner VARCHAR(128) NULL,
     lease_until_ms BIGINT NULL,
+    lease_generation BIGINT NOT NULL DEFAULT 0,
+    alias_switch_uncertain TINYINT(1) NOT NULL DEFAULT 0,
     switch_attempts INT NOT NULL DEFAULT 0,
     last_error VARCHAR(512) NULL,
     superseded_by_job_id VARCHAR(64) NULL,
