@@ -18,6 +18,7 @@ public class SearchCacheInvalidator {
     private final StringRedisTemplate redisTemplate;
     private final String epochKey;
     private final String cutoverBypassKey;
+    private final String cutoverBypassWatermarkKey;
 
     public SearchCacheInvalidator(
             @Qualifier("searchCacheRedisTemplate") ObjectProvider<StringRedisTemplate> redisTemplateProvider,
@@ -25,6 +26,7 @@ public class SearchCacheInvalidator {
         this.redisTemplate = redisTemplateProvider.getIfAvailable();
         this.epochKey = epochKeyForEnvironment(environment);
         this.cutoverBypassKey = cutoverBypassKeyForEnvironment(environment);
+        this.cutoverBypassWatermarkKey = cutoverBypassWatermarkKeyForEnvironment(environment);
     }
 
     public static String epochKeyForEnvironment(String rawEnvironment) {
@@ -35,6 +37,16 @@ public class SearchCacheInvalidator {
     public static String cutoverBypassKeyForEnvironment(String rawEnvironment) {
         String env = SearchConsumerRuntimeConfig.sanitizeEnvironment(rawEnvironment);
         return "knode:" + env + ":v1:search:cutover_bypass";
+    }
+
+    /**
+     * Durable monotonic high-water mark paired with cutover_bypass so stale delayed writes from an
+     * earlier attempt (e.g. g2:a1) remain atomically rejected even after a newer attempt (e.g. g2:a2)
+     * has completed and deleted cutover_bypass.
+     */
+    public static String cutoverBypassWatermarkKeyForEnvironment(String rawEnvironment) {
+        String env = SearchConsumerRuntimeConfig.sanitizeEnvironment(rawEnvironment);
+        return "knode:" + env + ":v1:search:cutover_bypass_watermark";
     }
 
     /**
@@ -82,6 +94,10 @@ public class SearchCacheInvalidator {
         return cutoverBypassKey;
     }
 
+    public String cutoverBypassWatermarkKey() {
+        return cutoverBypassWatermarkKey;
+    }
+
     /**
      * Enables durable cross-instance search cache bypass BEFORE ES alias cutover begins,
      * tagged with the cutover owner token so only that cutover (or its compensation) may clear it.
@@ -97,8 +113,11 @@ public class SearchCacheInvalidator {
     }
 
     /**
-     * Atomically activates cutover_bypass for (targetGeneration, switchAttempt) only if no newer
-     * cutover attempt already owns the key, preventing stale instances from overwriting a newer owner.
+     * Atomically activates cutover_bypass and advances the durable cutover_bypass_watermark for
+     * (targetGeneration, switchAttempt) ONLY if no newer attempt/generation has already been
+     * observed (active or cleared) and this exact attempt has not already been cleared.
+     * Prevents delayed stale-instance writes (e.g. g2:a1 arriving after g2:a2 completed and cleared
+     * cutover_bypass) from re-enabling bypass across instances.
      */
     public void enterCutoverBypass(String ownerToken, long targetGeneration, long switchAttempt) {
         if (redisTemplate == null) {
@@ -112,7 +131,7 @@ public class SearchCacheInvalidator {
         }
         Long written = redisTemplate.execute(
                 MONOTONIC_SET_BYPASS_SCRIPT,
-                List.of(cutoverBypassKey),
+                List.of(cutoverBypassKey, cutoverBypassWatermarkKey),
                 ownerToken.trim(),
                 Long.toString(targetGeneration),
                 Long.toString(switchAttempt));
@@ -122,7 +141,9 @@ public class SearchCacheInvalidator {
     }
 
     /**
-     * Atomically verifies cutover_bypass value equals expectedOwnerToken and deletes it via Redis Lua EVAL.
+     * Atomically verifies cutover_bypass value equals expectedOwnerToken, deletes it via Redis Lua EVAL,
+     * and records a monotonic CLEARED watermark so delayed writes from this or any earlier attempt cannot
+     * re-enable cutover_bypass after completion or rollback.
      * Returns true if the owned bypass marker was deleted, false if absent or owned by another cutover.
      */
     public boolean clearCutoverBypassIfOwned(String expectedOwnerToken) {
@@ -134,7 +155,7 @@ public class SearchCacheInvalidator {
         }
         Long removed = redisTemplate.execute(
                 COMPARE_AND_DELETE_SCRIPT,
-                List.of(cutoverBypassKey),
+                List.of(cutoverBypassKey, cutoverBypassWatermarkKey),
                 expectedOwnerToken.trim());
         return removed != null && removed > 0L;
     }
@@ -166,7 +187,29 @@ public class SearchCacheInvalidator {
     private static DefaultRedisScript<Long> createCompareAndDeleteScript() {
         DefaultRedisScript<Long> script = new DefaultRedisScript<>();
         script.setScriptText(
-                "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end");
+                "local eg, ea = string.match(ARGV[1], ':g(%d+):a(%d+)$') "
+                        + "if not eg then eg = string.match(ARGV[1], ':g(%d+)$') ea = '0' end "
+                        + "local cur = redis.call('GET', KEYS[1]) "
+                        + "local deleted = 0 "
+                        + "if cur == ARGV[1] then "
+                        + "deleted = redis.call('DEL', KEYS[1]) "
+                        + "elseif cur then "
+                        + "return 0 "
+                        + "end "
+                        + "if eg then "
+                        + "local egn = tonumber(eg) local ean = tonumber(ea) "
+                        + "local hwm = redis.call('GET', KEYS[2]) "
+                        + "local shouldUpdate = true "
+                        + "if hwm then "
+                        + "local hg, ha = string.match(hwm, '^(%d+):(%d+):[A-Z]+$') "
+                        + "if hg then "
+                        + "local hgn = tonumber(hg) local han = tonumber(ha) "
+                        + "if egn < hgn or (egn == hgn and ean < han) then shouldUpdate = false end "
+                        + "end "
+                        + "end "
+                        + "if shouldUpdate then redis.call('SET', KEYS[2], eg .. ':' .. ea .. ':CLEARED') end "
+                        + "end "
+                        + "return deleted");
         script.setResultType(Long.class);
         return script;
     }
@@ -174,14 +217,28 @@ public class SearchCacheInvalidator {
     private static DefaultRedisScript<Long> createMonotonicSetBypassScript() {
         DefaultRedisScript<Long> script = new DefaultRedisScript<>();
         script.setScriptText(
-                "local cur = redis.call('GET', KEYS[1]) "
-                        + "if not cur then redis.call('SET', KEYS[1], ARGV[1]) return 1 end "
+                "local ng = tonumber(ARGV[2]) local na = tonumber(ARGV[3]) "
+                        + "local hwm = redis.call('GET', KEYS[2]) "
+                        + "if hwm then "
+                        + "local hg, ha, hs = string.match(hwm, '^(%d+):(%d+):([A-Z]+)$') "
+                        + "if hg then "
+                        + "local hgn = tonumber(hg) local han = tonumber(ha) "
+                        + "if ng < hgn or (ng == hgn and na < han) then return 0 end "
+                        + "if ng == hgn and na == han and hs ~= 'ACTIVE' then return 0 end "
+                        + "end "
+                        + "end "
+                        + "local cur = redis.call('GET', KEYS[1]) "
+                        + "if cur then "
                         + "local cg, ca = string.match(cur, ':g(%d+):a(%d+)$') "
                         + "if not cg then cg = string.match(cur, ':g(%d+)$') ca = '0' end "
-                        + "local ng = tonumber(ARGV[2]) local na = tonumber(ARGV[3]) "
-                        + "if not cg or ng > tonumber(cg) or (ng == tonumber(cg) and na >= tonumber(ca)) then "
-                        + "redis.call('SET', KEYS[1], ARGV[1]) return 1 end "
-                        + "return 0");
+                        + "if cg then "
+                        + "local cgn = tonumber(cg) local can = tonumber(ca) "
+                        + "if ng < cgn or (ng == cgn and na < can) then return 0 end "
+                        + "end "
+                        + "end "
+                        + "redis.call('SET', KEYS[1], ARGV[1]) "
+                        + "redis.call('SET', KEYS[2], ARGV[2] .. ':' .. ARGV[3] .. ':ACTIVE') "
+                        + "return 1");
         script.setResultType(Long.class);
         return script;
     }

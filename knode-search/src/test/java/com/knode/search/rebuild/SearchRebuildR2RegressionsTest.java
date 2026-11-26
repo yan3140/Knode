@@ -184,7 +184,7 @@ class SearchRebuildR2RegressionsTest {
         consumerProps.getStream().setGroup(GROUP);
         consumerProps.getStream().setBatchSize(20);
         consumerProps.getStream().setBlockTimeoutMs(50L);
-        consumerProps.getStream().setMinIdleMs(10L);
+        consumerProps.getStream().setMinIdleMs(5000L);
         consumerProps.getStream().getRedis().setHost("127.0.0.1");
         consumerProps.getStream().getRedis().setPort(streamRedis.port());
         consumerProps.getStream().getRedis().setConnectTimeoutMs(400);
@@ -667,7 +667,7 @@ class SearchRebuildR2RegressionsTest {
 
         // 2) Content catches up and confirms PUBLIC v7 for 801 -> pending reclaim takes over the SAME record & eventId!
         visibilityTable.put("801", new VisibilityDecision("801", "7", "PUBLIC", "READABLE"));
-        streamRedis.agePendingEntry(STREAM_KEY, GROUP, recId801, 50L);
+        streamRedis.agePendingEntry(STREAM_KEY, GROUP, recId801, 10_000L);
 
         ContentStreamConsumer.PollSummary reclaimPoll = streamConsumer.pollOnce();
         assertThat(reclaimPoll.reclaimedCount()).isEqualTo(1);

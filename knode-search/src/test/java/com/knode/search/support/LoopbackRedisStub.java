@@ -27,6 +27,7 @@ public final class LoopbackRedisStub implements AutoCloseable {
     private final ExecutorService executor;
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final Map<String, Entry> store = new ConcurrentHashMap<>();
+    private final Object evalLock = new Object();
     private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
     private final Map<String, FaultRule> injectedErrors = new ConcurrentHashMap<>();
     private final List<List<String>> recordedCommands = new CopyOnWriteArrayList<>();
@@ -363,6 +364,78 @@ public final class LoopbackRedisStub implements AutoCloseable {
             writeError(out, "ERR value is not an integer or out of range");
             return;
         }
+        if (numKeys == 2 && args.size() >= 6
+                && script.contains("redis.call('DEL', KEYS[1])")
+                && script.contains("KEYS[2]")) {
+            String bypassKey = args.get(3);
+            String watermarkKey = args.get(4);
+            String expectedOwner = args.get(5);
+            long deleted;
+            synchronized (evalLock) {
+                long[] expectedRank = parseBypassOwnerRank(expectedOwner);
+                Entry curEntry = getActiveEntry(bypassKey);
+                String cur = curEntry == null ? null : curEntry.value();
+                if (expectedOwner.equals(cur)) {
+                    store.remove(bypassKey);
+                    deleted = 1L;
+                } else if (cur != null) {
+                    writeInteger(out, 0L);
+                    return;
+                } else {
+                    deleted = 0L;
+                }
+                if (expectedRank != null) {
+                    Entry hwmEntry = getActiveEntry(watermarkKey);
+                    BypassWatermark hwm = parseBypassWatermark(hwmEntry == null ? null : hwmEntry.value());
+                    boolean shouldUpdate = hwm == null
+                            || expectedRank[0] > hwm.gen()
+                            || (expectedRank[0] == hwm.gen() && expectedRank[1] >= hwm.attempt());
+                    if (shouldUpdate) {
+                        store.put(watermarkKey, new Entry(
+                                expectedRank[0] + ":" + expectedRank[1] + ":CLEARED", Long.MAX_VALUE));
+                    }
+                }
+            }
+            writeInteger(out, deleted);
+            return;
+        }
+        if (numKeys == 2 && args.size() >= 8
+                && script.contains("redis.call('SET', KEYS[1], ARGV[1])")
+                && script.contains("KEYS[2]")) {
+            String bypassKey = args.get(3);
+            String watermarkKey = args.get(4);
+            String newOwner = args.get(5);
+            long newGen = Long.parseLong(args.get(6));
+            long newAttempt = Long.parseLong(args.get(7));
+            boolean written;
+            synchronized (evalLock) {
+                Entry hwmEntry = getActiveEntry(watermarkKey);
+                BypassWatermark hwm = parseBypassWatermark(hwmEntry == null ? null : hwmEntry.value());
+                if (hwm != null) {
+                    if (newGen < hwm.gen() || (newGen == hwm.gen() && newAttempt < hwm.attempt())) {
+                        writeInteger(out, 0L);
+                        return;
+                    }
+                    if (newGen == hwm.gen() && newAttempt == hwm.attempt() && !"ACTIVE".equals(hwm.state())) {
+                        writeInteger(out, 0L);
+                        return;
+                    }
+                }
+                Entry curEntry = getActiveEntry(bypassKey);
+                if (curEntry != null) {
+                    long[] parsed = parseBypassOwnerRank(curEntry.value());
+                    if (parsed != null && (newGen < parsed[0] || (newGen == parsed[0] && newAttempt < parsed[1]))) {
+                        writeInteger(out, 0L);
+                        return;
+                    }
+                }
+                store.put(bypassKey, new Entry(newOwner, Long.MAX_VALUE));
+                store.put(watermarkKey, new Entry(newGen + ":" + newAttempt + ":ACTIVE", Long.MAX_VALUE));
+                written = true;
+            }
+            writeInteger(out, written ? 1L : 0L);
+            return;
+        }
         if (numKeys == 1 && args.size() >= 5
                 && script.contains("redis.call('GET', KEYS[1]) == ARGV[1]")
                 && script.contains("redis.call('DEL', KEYS[1])")) {
@@ -407,6 +480,24 @@ public final class LoopbackRedisStub implements AutoCloseable {
             return;
         }
         writeError(out, "ERR unsupported eval script in loopback stub");
+    }
+
+    private record BypassWatermark(long gen, long attempt, String state) {
+    }
+
+    private static BypassWatermark parseBypassWatermark(String value) {
+        if (value == null) {
+            return null;
+        }
+        String[] parts = value.split(":");
+        if (parts.length != 3) {
+            return null;
+        }
+        try {
+            return new BypassWatermark(Long.parseLong(parts[0]), Long.parseLong(parts[1]), parts[2]);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private static long[] parseBypassOwnerRank(String value) {

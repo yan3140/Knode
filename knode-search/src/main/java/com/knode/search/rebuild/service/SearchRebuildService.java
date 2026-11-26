@@ -570,6 +570,7 @@ public class SearchRebuildService {
         }
 
         if (cacheInvalidator.isCacheEnabled()) {
+            beforeEnterCutoverBypassInSwitch(job, bypassOwner);
             try {
                 cacheInvalidator.enterCutoverBypass(
                         bypassOwner, job.candidateGeneration(), effectiveSwitchAttempt(job));
@@ -860,11 +861,7 @@ public class SearchRebuildService {
         }
 
         Optional<IndexGenerationState> currentGen = consumerRepository.findGenerationState(job.aliasName());
-        String bypassOwner = currentGen
-                .filter(g -> g.activeGeneration() == job.candidateGeneration())
-                .map(IndexGenerationState::activeCutoverBypassOwner)
-                .filter(StringUtils::hasText)
-                .orElseGet(() -> cutoverBypassOwner(job));
+        String bypassOwner = resolveStepInvalidateCacheBypassOwner(job, currentGen);
         boolean alreadyCompensated = currentGen.isPresent()
                 && currentGen.get().activeGeneration() == job.candidateGeneration()
                 && currentGen.get().activeCacheInvalidationStatus() == CacheInvalidationStatus.DONE;
@@ -913,6 +910,10 @@ public class SearchRebuildService {
 
     protected void afterAtomicAliasSwitchBeforeLocalCommit(RebuildJobRecord job) {
         // Extension hook for failure-injection tests simulating crash after ES _aliases before SQL activation.
+    }
+
+    protected void beforeEnterCutoverBypassInSwitch(RebuildJobRecord job, String bypassOwner) {
+        // Extension hook for concurrency tests pausing right after lease verification and before Redis bypass write.
     }
 
     protected void beforeClearCutoverBypassAfterPreSwitchRevert(RebuildJobRecord job, String bypassOwner) {
@@ -1324,6 +1325,21 @@ public class SearchRebuildService {
 
     private static long effectiveSwitchAttempt(RebuildJobRecord job) {
         return Math.max(1L, job.switchAttempts());
+    }
+
+    private static String resolveStepInvalidateCacheBypassOwner(
+            RebuildJobRecord job, Optional<IndexGenerationState> currentGen) {
+        if (currentGen.isPresent() && currentGen.get().activeGeneration() == job.candidateGeneration()) {
+            IndexGenerationState gen = currentGen.get();
+            if (StringUtils.hasText(gen.activeCutoverBypassOwner())) {
+                return gen.activeCutoverBypassOwner().trim();
+            }
+            if (gen.activeCacheInvalidationStatus() == CacheInvalidationStatus.PENDING) {
+                // Upgraded SEARCH-03-R2 row: active_cutover_bypass_owner is NULL while Redis holds legacy "<alias>:g<N>".
+                return SearchCacheInvalidator.cutoverBypassOwnerToken(job.aliasName(), job.candidateGeneration());
+            }
+        }
+        return cutoverBypassOwner(job);
     }
 
     private static String cutoverBypassOwner(RebuildJobRecord job) {
