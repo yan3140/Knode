@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit;
 
 @Component
 public class SearchMetrics {
+    private final MeterRegistry registry;
     private final Timer querySuccess;
     private final Timer queryFailure;
     private final Counter cacheHit;
@@ -17,6 +18,7 @@ public class SearchMetrics {
     private final Counter visibilityExcluded;
 
     public SearchMetrics(MeterRegistry registry) {
+        this.registry = registry;
         this.querySuccess = Timer.builder("knode.search.query")
                 .description("Knode public article search latency")
                 .tag("result", "success")
@@ -58,5 +60,46 @@ public class SearchMetrics {
         if (count > 0) {
             visibilityExcluded.increment(count);
         }
+    }
+
+    public void recordOpsRetry(String scope, String outcome) {
+        Counter.builder("knode.search.ops.retry")
+                .description("Knode search ops/admin retry invocations")
+                .tag("scope", normalizeTag(scope))
+                .tag("outcome", normalizeTag(outcome))
+                .register(registry)
+                .increment();
+    }
+
+    public void recordAdminRebuild(String outcome) {
+        Counter.builder("knode.search.admin.rebuild")
+                .description("Knode search admin rebuild invocations")
+                .tag("outcome", normalizeTag(outcome))
+                .register(registry)
+                .increment();
+    }
+
+    public void recordAdminSync(String outcome) {
+        Counter.builder("knode.search.admin.sync")
+                .description("Knode search admin single-article sync invocations")
+                .tag("outcome", normalizeTag(outcome))
+                .register(registry)
+                .increment();
+    }
+
+    public void recordAuthDenied(String surface, int status) {
+        Counter.builder("knode.search.auth.denied")
+                .description("Knode search auth/authorization rejections")
+                .tag("surface", normalizeTag(surface))
+                .tag("status", Integer.toString(status))
+                .register(registry)
+                .increment();
+    }
+
+    private static String normalizeTag(String value) {
+        if (value == null || value.isBlank()) {
+            return "unknown";
+        }
+        return value.trim().toLowerCase(java.util.Locale.ROOT);
     }
 }

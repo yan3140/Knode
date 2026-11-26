@@ -3,6 +3,7 @@ package com.knode.search.rebuild;
 import com.knode.search.client.ServiceTokenClient;
 import com.knode.search.config.SearchClientsProperties;
 import com.knode.search.model.QueryBudget;
+import com.knode.search.rebuild.client.ArticleCurrentSnapshot;
 import com.knode.search.rebuild.client.ChangeFeedPage;
 import com.knode.search.rebuild.client.ContentSnapshotException;
 import com.knode.search.rebuild.client.HttpContentSnapshotClient;
@@ -16,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -181,5 +183,56 @@ class HttpContentSnapshotClientContractTest {
         assertThat(emptyChanges.done()).isTrue();
         assertThat(emptyChanges.commits()).isEmpty();
         assertThat(emptyChanges.nextCursor()).isNotBlank();
+    }
+
+    @Test
+    void fetchesCurrentSnapshotsBatchHandlesVisibilities401RefreshAndProtocolViolations() {
+        stub.putCurrentPublicArticle(LoopbackContentSnapshotStub.snapshotItem(
+                301L, 7L, "Public 301", "Sum 301", "Body 301",
+                2L, "Java", List.of("SpringCloud"), 99L, 4L, "2026-10-05T00:00:00Z"));
+        stub.putCurrentHiddenArticle(302L, "WITHDRAWN", 8L);
+        stub.putCurrentHiddenArticle(303L, "DELETED", 9L);
+
+        QueryBudget budget = QueryBudget.start(Duration.ofSeconds(5));
+        Map<Long, ArticleCurrentSnapshot> batch = client.fetchCurrentSnapshotsBatch(
+                List.of(301L, 302L, 303L, 304L), budget, "trace-batch-1");
+
+        assertThat(batch).containsOnlyKeys(301L, 302L, 303L, 304L);
+        assertThat(batch.get(301L).isReadablePublic()).isTrue();
+        assertThat(batch.get(301L).sourceRevision()).isEqualTo(7L);
+        assertThat(batch.get(301L).snapshot().title()).isEqualTo("Public 301");
+        assertThat(batch.get(302L).visibility()).isEqualTo("WITHDRAWN");
+        assertThat(batch.get(302L).decision()).isEqualTo("DENIED");
+        assertThat(batch.get(302L).snapshot()).isNull();
+        assertThat(batch.get(303L).visibility()).isEqualTo("DELETED");
+        assertThat(batch.get(304L).isMissing()).isTrue();
+        assertThat(batch.get(304L).sourceRevision()).isNull();
+
+        // Simulate 401 -> token invalidated and immediately refreshed on retry inside client
+        AtomicInteger attempts = new AtomicInteger(0);
+        stub.setInterceptor((req, def) -> {
+            if ("/internal/v1/content/articles/snapshots:batch".equals(req.path()) && attempts.incrementAndGet() == 1) {
+                return LoopbackContentSnapshotStub.HttpStubResponse.status(401, "{\"error\":{\"code\":\"UNAUTHORIZED\"}}");
+            }
+            return def.get();
+        });
+        Map<Long, ArticleCurrentSnapshot> retried = client.fetchCurrentSnapshotsBatch(
+                List.of(301L), budget, "trace-batch-401");
+        assertThat(retried.get(301L).isReadablePublic()).isTrue();
+        assertThat(invalidatedCalls).contains("knode-content:content:snapshot:read");
+
+        // Protocol violation: HIDDEN item must never carry a non-null snapshot
+        stub.setInterceptor((req, def) -> LoopbackContentSnapshotStub.HttpStubResponse.ok(
+                "{\"items\":[{\"articleId\":\"302\",\"visibility\":\"WITHDRAWN\",\"sourceRevision\":\"8\","
+                        + "\"decision\":\"DENIED\",\"snapshot\":{\"articleId\":\"302\"}}]}"));
+        assertThatThrownBy(() -> client.fetchCurrentSnapshotsBatch(List.of(302L), budget, "trace-batch-bad"))
+                .isInstanceOf(ContentSnapshotException.class)
+                .satisfies(ex -> assertThat(((ContentSnapshotException) ex).isRetryable()).isFalse());
+
+        // Protocol violation: omitted requested articleId
+        stub.setInterceptor((req, def) -> LoopbackContentSnapshotStub.HttpStubResponse.ok("{\"items\":[]}"));
+        assertThatThrownBy(() -> client.fetchCurrentSnapshotsBatch(List.of(301L), budget, "trace-batch-missing-id"))
+                .isInstanceOf(ContentSnapshotException.class)
+                .satisfies(ex -> assertThat(((ContentSnapshotException) ex).isRetryable()).isFalse());
     }
 }

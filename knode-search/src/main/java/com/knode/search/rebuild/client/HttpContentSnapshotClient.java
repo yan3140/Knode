@@ -39,6 +39,11 @@ public class HttpContentSnapshotClient implements ContentSnapshotClient {
 
     private static final String SNAPSHOTS_PATH = "/internal/v1/content/article-snapshots";
     private static final String CHANGES_PATH = "/internal/v1/content/article-changes";
+    private static final String SNAPSHOTS_BATCH_PATH = "/internal/v1/content/articles/snapshots:batch";
+    private static final Set<String> BATCH_RESPONSE_FIELDS = Set.of("items");
+    private static final Set<String> BATCH_ITEM_FIELDS = Set.of("articleId", "sourceRevision", "visibility", "decision", "snapshot");
+    private static final Set<String> ALLOWED_VISIBILITIES = Set.of("PUBLIC", "WITHDRAWN", "DRAFT", "DELETED", "MISSING");
+    private static final Set<String> ALLOWED_DECISIONS = Set.of("READABLE", "DENIED");
     private static final Pattern CLIENT_REQUEST_ID_PATTERN = Pattern.compile("^[A-Za-z0-9._-]{1,64}$");
     private static final Set<String> CREATE_FIELDS = Set.of("snapshotId", "incrementalCursor", "expiresAt");
     private static final Set<String> PAGE_FIELDS = Set.of("snapshotId", "items", "nextCursor", "done", "incrementalCursor");
@@ -168,6 +173,144 @@ public class HttpContentSnapshotClient implements ContentSnapshotClient {
         HttpResponse<String> response = send(req.build(), "fetch_article_changes");
         validateHttpStatus(response, "fetch_article_changes");
         return parseChangeFeedPage(response.body());
+    }
+
+    @Override
+    public Map<Long, ArticleCurrentSnapshot> fetchCurrentSnapshotsBatch(
+            List<Long> articleIds, QueryBudget budget, String requestId) {
+        if (articleIds == null || articleIds.isEmpty()) {
+            return Map.of();
+        }
+        List<Long> uniqueIds = new ArrayList<>();
+        Set<Long> seen = new HashSet<>();
+        List<String> idStrings = new ArrayList<>();
+        for (Long id : articleIds) {
+            if (id == null || id <= 0L) {
+                throw new IllegalArgumentException("articleIds must contain canonical positive int64 values");
+            }
+            if (seen.add(id)) {
+                uniqueIds.add(id);
+                idStrings.add(Long.toString(id));
+            }
+        }
+        if (uniqueIds.size() > 100) {
+            throw new IllegalArgumentException("snapshots:batch supports at most 100 unique articleIds");
+        }
+        String origin = requireContentOrigin();
+        String token = acquireSnapshotToken(budget, requestId);
+        Duration timeout = resolveTimeout(budget);
+
+        Map<String, Object> bodyMap = new LinkedHashMap<>();
+        bodyMap.put("articleIds", idStrings);
+        String requestBody;
+        try {
+            requestBody = strictMapper.writeValueAsString(bodyMap);
+        } catch (IOException ex) {
+            throw new IllegalStateException("Failed to serialize snapshots:batch request", ex);
+        }
+
+        URI uri = URI.create(origin + SNAPSHOTS_BATCH_PATH);
+        HttpRequest.Builder req = HttpRequest.newBuilder(uri)
+                .timeout(timeout)
+                .header("Authorization", "Bearer " + token)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8));
+        if (StringUtils.hasText(requestId)) {
+            req.header("X-Request-Id", requestId);
+        }
+
+        HttpResponse<String> response = send(req.build(), "snapshots_batch");
+        if (response.statusCode() == 401) {
+            serviceTokenClient.invalidate(CONTENT_AUDIENCE, SNAPSHOT_PERMISSIONS);
+            String refreshedToken = acquireSnapshotToken(budget, requestId);
+            Duration retryTimeout = resolveTimeout(budget);
+            HttpRequest.Builder retryReq = HttpRequest.newBuilder(uri)
+                    .timeout(retryTimeout)
+                    .header("Authorization", "Bearer " + refreshedToken)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8));
+            if (StringUtils.hasText(requestId)) {
+                retryReq.header("X-Request-Id", requestId);
+            }
+            response = send(retryReq.build(), "snapshots_batch");
+        }
+        validateHttpStatus(response, "snapshots_batch");
+        return parseCurrentSnapshotsBatch(response.body(), seen);
+    }
+
+    private Map<Long, ArticleCurrentSnapshot> parseCurrentSnapshotsBatch(String body, Set<Long> requestedIds) {
+        JsonNode root = parseStrictObject(body, "snapshots_batch");
+        requireOnlyAllowedFields(root, BATCH_RESPONSE_FIELDS, "snapshots_batch");
+        JsonNode itemsNode = root.get("items");
+        if (itemsNode == null || !itemsNode.isArray()) {
+            throw ContentSnapshotException.nonRetryable(200, "INVALID_SNAPSHOT_BATCH", "Missing items array");
+        }
+        Map<Long, ArticleCurrentSnapshot> results = new LinkedHashMap<>();
+        for (JsonNode itemNode : itemsNode) {
+            if (itemNode == null || !itemNode.isObject()) {
+                throw ContentSnapshotException.nonRetryable(200, "INVALID_SNAPSHOT_BATCH", "Batch item must be object");
+            }
+            requireOnlyAllowedFields(itemNode, BATCH_ITEM_FIELDS, "snapshots_batch.item");
+            long articleId = requirePositiveLong(itemNode.get("articleId"), "articleId");
+            if (!requestedIds.contains(articleId)) {
+                throw ContentSnapshotException.nonRetryable(200, "UNEXPECTED_ARTICLE_ID",
+                        "Unexpected articleId in snapshots:batch response: " + articleId);
+            }
+            String visibility = requireNonBlankText(itemNode.get("visibility"), "visibility");
+            String decision = requireNonBlankText(itemNode.get("decision"), "decision");
+            if (!ALLOWED_VISIBILITIES.contains(visibility) || !ALLOWED_DECISIONS.contains(decision)) {
+                throw ContentSnapshotException.nonRetryable(200, "INVALID_VISIBILITY_DECISION",
+                        "Unsupported visibility/decision in snapshots:batch: " + visibility + "/" + decision);
+            }
+            JsonNode revNode = itemNode.get("sourceRevision");
+            Long sourceRevision = null;
+            if (revNode != null && !revNode.isNull()) {
+                sourceRevision = requirePositiveLong(revNode, "sourceRevision");
+            }
+            JsonNode snapshotNode = itemNode.get("snapshot");
+            SnapshotArticleItem snapshot = null;
+            if ("PUBLIC".equals(visibility)) {
+                if (!"READABLE".equals(decision) || sourceRevision == null
+                        || snapshotNode == null || snapshotNode.isNull()) {
+                    throw ContentSnapshotException.nonRetryable(200, "INVALID_PUBLIC_SNAPSHOT",
+                            "PUBLIC item must have decision=READABLE, non-null sourceRevision and snapshot");
+                }
+                snapshot = parseSnapshotItem(snapshotNode);
+                if (snapshot.articleId() != articleId || snapshot.sourceRevision() != sourceRevision) {
+                    throw ContentSnapshotException.nonRetryable(200, "SNAPSHOT_IDENTITY_MISMATCH",
+                            "Nested snapshot articleId/sourceRevision mismatch");
+                }
+            } else {
+                if (!"DENIED".equals(decision)) {
+                    throw ContentSnapshotException.nonRetryable(200, "INVALID_HIDDEN_DECISION",
+                            "Non-PUBLIC item must have decision=DENIED");
+                }
+                if (snapshotNode != null && !snapshotNode.isNull()) {
+                    throw ContentSnapshotException.nonRetryable(200, "UNEXPECTED_HIDDEN_SNAPSHOT",
+                            "Non-PUBLIC item must not carry snapshot payload");
+                }
+                if ("MISSING".equals(visibility) && sourceRevision != null) {
+                    throw ContentSnapshotException.nonRetryable(200, "INVALID_MISSING_REVISION",
+                            "MISSING item must have null sourceRevision");
+                }
+                if (!"MISSING".equals(visibility) && sourceRevision == null) {
+                    throw ContentSnapshotException.nonRetryable(200, "MISSING_HIDDEN_REVISION",
+                            "Non-MISSING hidden item must carry positive sourceRevision");
+                }
+            }
+            if (results.put(articleId, new ArticleCurrentSnapshot(
+                    articleId, sourceRevision, visibility, decision, snapshot)) != null) {
+                throw ContentSnapshotException.nonRetryable(200, "DUPLICATE_ARTICLE_ID",
+                        "Duplicate articleId in snapshots:batch response: " + articleId);
+            }
+        }
+        if (results.size() != requestedIds.size()) {
+            throw ContentSnapshotException.nonRetryable(200, "INCOMPLETE_SNAPSHOT_BATCH",
+                    "snapshots:batch response did not return all requested articleIds");
+        }
+        return Map.copyOf(results);
     }
 
     private String requireContentOrigin() {

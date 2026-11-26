@@ -112,6 +112,17 @@ public class SearchIndexTaskWorker {
         return executeBatch(claimed, false);
     }
 
+    public Optional<TaskProcessOutcome> processSingleArticleImmediately(long articleId) {
+        long leaseDurationMs = Math.max(1, indexerProps.getLeaseSeconds()) * 1000L;
+        Optional<SearchIndexTaskRecord> claimed = transactionTemplate.execute(
+                status -> repository.claimSingleOnlineTaskInCurrentTx(
+                        aliasName, defaultPhysicalIndex, articleId, leaseDurationMs, clock.millis()));
+        if (claimed == null || claimed.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(executeClaimedTask(claimed.get(), true));
+    }
+
     private WorkerCycleSummary executeBatch(List<SearchIndexTaskRecord> claimed, boolean invalidateCache) {
         int applied = 0;
         int superseded = 0;

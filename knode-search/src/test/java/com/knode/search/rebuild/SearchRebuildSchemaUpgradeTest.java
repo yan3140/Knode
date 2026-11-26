@@ -11,6 +11,7 @@ import com.knode.search.consumer.persistence.SearchConsumerRepository;
 import com.knode.search.consumer.persistence.SearchIndexTaskRecord;
 import com.knode.search.rebuild.persistence.RebuildJobRecord;
 import com.knode.search.rebuild.persistence.RebuildPhase;
+import com.knode.search.ops.SearchOpsRepository;
 import com.knode.search.rebuild.persistence.SearchRebuildRepository;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -408,6 +409,65 @@ class SearchRebuildSchemaUpgradeTest {
             assertThat(r3Done).isTrue();
             assertThat(consumerRepo.findGenerationState("knode_articles_search").orElseThrow().activeCutoverBypassOwner())
                     .isNull();
+        }
+    }
+
+    @Test
+    void upgradesSearch03R3SchemaToSearch04AddingOpsReplayAuditTable() {
+        String dbName = "search_upgrade_04_" + UUID.randomUUID().toString().replace("-", "");
+        HikariConfig hc = new HikariConfig();
+        hc.setJdbcUrl("jdbc:h2:mem:" + dbName + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1");
+        hc.setDriverClassName("org.h2.Driver");
+        hc.setUsername("sa");
+        hc.setPassword("");
+
+        try (HikariDataSource ds = new HikariDataSource(hc)) {
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+
+            // Bootstrap complete SEARCH-03-R3 schema by running base consumer schema minus search_ops_replay_audit.
+            ResourceDatabasePopulator basePopulator = new ResourceDatabasePopulator(
+                    new ClassPathResource("db/search-consumer-schema.sql"));
+            basePopulator.execute(ds);
+            jdbc.execute("DROP TABLE search_ops_replay_audit");
+
+            // Seed existing SEARCH-03-R3 task & inbox rows.
+            jdbc.update("""
+                    INSERT INTO search_event_inbox (event_id, event_type, schema_version, aggregate_type, aggregate_id, source_revision, stream_record_id, status, received_at_ms, processed_at_ms)
+                    VALUES ('11111111-1111-4111-8111-111111111111', 'ArticlePublished', 1, 'article', '7001', 2, '1-0', 'APPLIED', 1700000000000, 1700000000000)
+                    """);
+            jdbc.update("""
+                    INSERT INTO search_index_task (index_generation, target_index, article_id, target_projection_revision, operation, payload_json, status, attempts, max_attempts, due_at_ms, claim_generation, es_applied_revision, cache_invalidation_status, cache_invalidation_attempts, updated_at_ms)
+                    VALUES (1, 'knode_articles_search_g1', 7001, 2, 'UPSERT', '{"id":7001,"searchable":true}', 'DEAD', 5, 5, 1700000000000, 1, 0, 'NONE', 0, 1700000000000)
+                    """);
+
+            // Execute additive SEARCH-04 upgrade SQL.
+            ResourceDatabasePopulator upgrade04 = new ResourceDatabasePopulator(
+                    new ClassPathResource("db/search-ops-04-upgrade.sql"));
+            upgrade04.execute(ds);
+
+            ObjectMapper mapper = new ObjectMapper();
+            SearchConsumerRepository consumerRepo = new SearchConsumerRepository(jdbc, mapper);
+            SearchOpsRepository opsRepo = new SearchOpsRepository(jdbc, consumerRepo);
+            TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
+
+            SearchOpsRepository.OpsSummaryDbSnapshot summary = opsRepo.loadSummarySnapshot(
+                    "knode_articles_search", "knode_articles_search_g1", 1700000010000L);
+            assertThat(summary.taskCounts().get("DEAD")).isEqualTo(1L);
+
+            Boolean inserted = tx.execute(status -> opsRepo.insertReplayAudit(new SearchOpsRepository.ReplayAuditRecord(
+                    "req-upgrade-04",
+                    "SINGLE_RETRY",
+                    "11111111-1111-4111-8111-111111111111",
+                    "abc123",
+                    "knode-content",
+                    "ops-admin",
+                    "ACCEPTED",
+                    1L,
+                    "{\"status\":\"ACCEPTED\"}",
+                    1700000010000L
+            )));
+            assertThat(inserted).isTrue();
+            assertThat(opsRepo.findReplayAuditForUpdate("req-upgrade-04")).isPresent();
         }
     }
 }

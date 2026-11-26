@@ -586,7 +586,53 @@ public final class LoopbackRedisStub implements AutoCloseable {
     }
 
     private void handleXPending(List<String> args, OutputStream out) throws IOException {
-        // XPENDING <stream> <group> [IDLE min] <start> <end> <count>
+        // Summary form: XPENDING <stream> <group>
+        if (args.size() == 3) {
+            String streamKey = args.get(1);
+            String groupName = args.get(2);
+            StreamState state = streams.get(streamKey);
+            if (state == null) {
+                writeError(out, "NOGROUP No such key '" + streamKey + "'");
+                return;
+            }
+            long total;
+            String minId = null;
+            String maxId = null;
+            Map<String, Long> perConsumer = new LinkedHashMap<>();
+            synchronized (state) {
+                GroupState group = state.groups.get(groupName);
+                if (group == null) {
+                    writeError(out, "NOGROUP No such consumer group '" + groupName + "'");
+                    return;
+                }
+                List<PendingRecord> sorted = new ArrayList<>(group.pending.values());
+                sorted.sort((a, b) -> compareStreamIds(a.id, b.id));
+                total = sorted.size();
+                if (!sorted.isEmpty()) {
+                    minId = sorted.get(0).id;
+                    maxId = sorted.get(sorted.size() - 1).id;
+                    for (PendingRecord rec : sorted) {
+                        perConsumer.merge(rec.consumer, 1L, Long::sum);
+                    }
+                }
+            }
+            writeArrayHeader(out, 4);
+            writeInteger(out, total);
+            writeBulkString(out, minId);
+            writeBulkString(out, maxId);
+            if (perConsumer.isEmpty()) {
+                writeNullArray(out);
+            } else {
+                writeArrayHeader(out, perConsumer.size());
+                for (Map.Entry<String, Long> entry : perConsumer.entrySet()) {
+                    writeArrayHeader(out, 2);
+                    writeBulkString(out, entry.getKey());
+                    writeBulkString(out, Long.toString(entry.getValue()));
+                }
+            }
+            return;
+        }
+        // Extended form: XPENDING <stream> <group> [IDLE min] <start> <end> <count>
         if (args.size() < 6) {
             writeError(out, "ERR wrong number of arguments for 'xpending'");
             return;

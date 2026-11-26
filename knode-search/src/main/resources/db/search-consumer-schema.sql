@@ -1,4 +1,4 @@
--- Knode Search (05) Consumer State, Dual-Version Projection, Index Task & Rebuild Cutover Schema
+-- Knode Search (05) Consumer State, Dual-Version Projection, Index Task, Rebuild Cutover & Ops Schema
 -- Target engine: dedicated independent MySQL 8 / InnoDB database, charset utf8mb4, UTC session/JDBC timezone.
 -- Manual deployment DDL only: never auto-executed by application startup.
 -- All *_ms columns store UTC epoch milliseconds.
@@ -128,6 +128,7 @@ CREATE INDEX idx_search_index_task_lease
 CREATE INDEX idx_search_index_task_cache
     ON search_index_task (cache_invalidation_status, cache_invalidation_due_at_ms);
 
+
 CREATE TABLE IF NOT EXISTS search_rebuild_job (
     job_id VARCHAR(64) NOT NULL,
     alias_name VARCHAR(128) NOT NULL,
@@ -180,3 +181,20 @@ CREATE TABLE IF NOT EXISTS search_rebuild_event_log (
 
 CREATE INDEX idx_search_rebuild_evt_commit
     ON search_rebuild_event_log (candidate_generation, commit_sequence);
+
+CREATE TABLE IF NOT EXISTS search_ops_replay_audit (
+    replay_request_id VARCHAR(64) NOT NULL,
+    operation_type VARCHAR(32) NOT NULL,
+    target_event_id VARCHAR(128) NULL,
+    request_fingerprint CHAR(64) NOT NULL,
+    caller_service VARCHAR(128) NOT NULL,
+    operator_id VARCHAR(128) NULL,
+    response_status VARCHAR(32) NOT NULL,
+    requeued_count BIGINT NOT NULL DEFAULT 0,
+    response_json TEXT NOT NULL,
+    created_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (replay_request_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE INDEX idx_search_ops_replay_time
+    ON search_ops_replay_audit (created_at_ms);

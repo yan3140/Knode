@@ -14,6 +14,7 @@ import io.lettuce.core.XReadArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import io.lettuce.core.models.stream.PendingMessage;
+import io.lettuce.core.models.stream.PendingMessages;
 import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,6 +28,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.UUID;
 
 @Component
@@ -199,6 +201,15 @@ public class LettuceContentStreamClient implements ContentStreamClient, AutoClos
         }
         Long acked = commands().xack(streamKey, groupName, recordIds.toArray(String[]::new));
         return acked == null ? 0L : acked;
+    }
+
+    @Override
+    public OptionalLong queryPendingCount() {
+        PendingMessages summary = commands().xpending(streamKey, groupName);
+        if (summary == null) {
+            return OptionalLong.of(0L);
+        }
+        return OptionalLong.of(Math.max(0L, summary.getCount()));
     }
 
     static String nextStreamId(String streamId) {

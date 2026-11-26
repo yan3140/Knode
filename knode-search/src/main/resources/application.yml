@@ -71,6 +71,28 @@ knode:
       content-visibility-timeout-ms: ${KNODE_SEARCH_CONTENT_VISIBILITY_TIMEOUT_MS:1000}
       content-snapshot-timeout-ms: ${KNODE_SEARCH_CONTENT_SNAPSHOT_TIMEOUT_MS:15000}
       token-refresh-skew-seconds: 10
+    auth:
+      expected-service-audience: ${KNODE_SEARCH_SERVICE_AUDIENCE:knode-search}
+      public-key-id: ${KNODE_AUTH_PUBLIC_KEY_ID:}
+      public-key-file: ${KNODE_AUTH_PUBLIC_KEY_FILE:}
+      session:
+        redis:
+          enabled: ${KNODE_AUTH_SESSION_REDIS_ENABLED:false}
+          host: ${KNODE_AUTH_REDIS_HOST:127.0.0.1}
+          port: ${KNODE_AUTH_REDIS_PORT:6379}
+          database: ${KNODE_AUTH_REDIS_DATABASE:0}
+          username: ${KNODE_AUTH_REDIS_USERNAME:}
+          password: ${KNODE_AUTH_REDIS_PASSWORD:}
+          tls: ${KNODE_AUTH_REDIS_TLS:false}
+          connect-timeout-ms: ${KNODE_AUTH_REDIS_CONNECT_TIMEOUT_MS:400}
+          command-timeout-ms: ${KNODE_AUTH_REDIS_COMMAND_TIMEOUT_MS:800}
+      admin:
+        me-connect-timeout-ms: ${KNODE_SEARCH_ADMIN_ME_CONNECT_TIMEOUT_MS:400}
+        me-timeout-ms: ${KNODE_SEARCH_ADMIN_ME_TIMEOUT_MS:1000}
+    ops:
+      default-batch-retry-limit: ${KNODE_SEARCH_OPS_RETRY_DEFAULT_LIMIT:50}
+      max-batch-retry-limit: ${KNODE_SEARCH_OPS_RETRY_MAX_LIMIT:100}
+      sync-timeout-ms: ${KNODE_SEARCH_ADMIN_SYNC_TIMEOUT_MS:5000}
     consumer:
       enabled: ${KNODE_SEARCH_CONSUMER_ENABLED:false}
       datasource:

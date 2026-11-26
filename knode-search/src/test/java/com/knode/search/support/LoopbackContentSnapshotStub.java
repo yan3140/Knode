@@ -47,6 +47,7 @@ public final class LoopbackContentSnapshotStub implements AutoCloseable {
     private final AtomicReference<BiFunction<RecordedHttpRequest, Supplier<HttpStubResponse>, HttpStubResponse>> interceptor =
             new AtomicReference<>();
     private volatile List<ObjectNode> currentLivePublicArticles = List.of();
+    private final Map<Long, ObjectNode> currentArticleBatchItems = new ConcurrentHashMap<>();
     private volatile Instant defaultExpiresAt = Instant.parse("2026-12-01T00:00:00Z");
 
     public LoopbackContentSnapshotStub() throws IOException {
@@ -69,6 +70,35 @@ public final class LoopbackContentSnapshotStub implements AutoCloseable {
         synchronized (this) {
             this.currentLivePublicArticles = List.copyOf(articles);
         }
+    }
+
+    public void putCurrentPublicArticle(ObjectNode snapshotNode) {
+        long id = Long.parseLong(snapshotNode.path("articleId").asText());
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("articleId", Long.toString(id));
+        item.put("visibility", "PUBLIC");
+        item.put("sourceRevision", snapshotNode.path("sourceRevision").asText());
+        item.put("decision", "READABLE");
+        item.set("snapshot", snapshotNode.deepCopy());
+        currentArticleBatchItems.put(id, item);
+    }
+
+    public void putCurrentHiddenArticle(long articleId, String visibility, long sourceRevision) {
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("articleId", Long.toString(articleId));
+        item.put("visibility", visibility);
+        item.put("sourceRevision", Long.toString(sourceRevision));
+        item.put("decision", "DENIED");
+        item.putNull("snapshot");
+        currentArticleBatchItems.put(articleId, item);
+    }
+
+    public void removeCurrentArticle(long articleId) {
+        currentArticleBatchItems.remove(articleId);
+    }
+
+    public void clearCurrentArticles() {
+        currentArticleBatchItems.clear();
     }
 
     public synchronized long appendCommitBatch(List<JsonNode> eventNodes) {
@@ -149,7 +179,81 @@ public final class LoopbackContentSnapshotStub implements AutoCloseable {
         if ("GET".equalsIgnoreCase(req.method()) && "/internal/v1/content/article-changes".equals(path)) {
             return handleFetchArticleChanges(query);
         }
+        if ("POST".equalsIgnoreCase(req.method()) && "/internal/v1/content/articles/snapshots:batch".equals(path)) {
+            return handleFetchSnapshotsBatch(req.body());
+        }
+        if ("POST".equalsIgnoreCase(req.method()) && "/internal/v1/content/articles/visibility:batch".equals(path)) {
+            return handleFetchVisibilityBatch(req.body());
+        }
         return HttpStubResponse.status(404, "{\"error\":{\"code\":\"NOT_FOUND\"}}");
+    }
+
+    private HttpStubResponse handleFetchVisibilityBatch(String body) {
+        try {
+            JsonNode root = MAPPER.readTree(body);
+            JsonNode ids = root.get("articleIds");
+            if (ids == null || !ids.isArray() || ids.isEmpty() || ids.size() > 100) {
+                return HttpStubResponse.status(400, "{\"error\":{\"code\":\"INVALID_ARGUMENT\"}}");
+            }
+            ObjectNode resp = MAPPER.createObjectNode();
+            ArrayNode items = resp.putArray("items");
+            for (JsonNode idNode : ids) {
+                long id = Long.parseLong(idNode.asText());
+                ObjectNode state = currentArticleBatchItems.get(id);
+                ObjectNode outItem = MAPPER.createObjectNode();
+                outItem.put("articleId", Long.toString(id));
+                if (state != null) {
+                    if (state.get("sourceRevision") == null || state.get("sourceRevision").isNull()) {
+                        outItem.putNull("sourceRevision");
+                    } else {
+                        outItem.put("sourceRevision", state.path("sourceRevision").asText());
+                    }
+                    outItem.put("visibility", state.path("visibility").asText());
+                    outItem.put("decision", state.path("decision").asText());
+                } else {
+                    outItem.putNull("sourceRevision");
+                    outItem.put("visibility", "MISSING");
+                    outItem.put("decision", "DENIED");
+                }
+                items.add(outItem);
+            }
+            return HttpStubResponse.ok(resp.toString());
+        } catch (Exception ex) {
+            return HttpStubResponse.status(400, "{\"error\":{\"code\":\"BAD_JSON\"}}");
+        }
+    }
+
+    private HttpStubResponse handleFetchSnapshotsBatch(String body) {
+        try {
+            JsonNode root = MAPPER.readTree(body);
+            JsonNode ids = root.get("articleIds");
+            if (ids == null || !ids.isArray() || ids.isEmpty() || ids.size() > 100) {
+                return HttpStubResponse.status(400, "{\"error\":{\"code\":\"INVALID_ARGUMENT\"}}");
+            }
+            ObjectNode resp = MAPPER.createObjectNode();
+            ArrayNode items = resp.putArray("items");
+            for (JsonNode idNode : ids) {
+                if (!idNode.isTextual()) {
+                    return HttpStubResponse.status(400, "{\"error\":{\"code\":\"INVALID_ARGUMENT\"}}");
+                }
+                long id = Long.parseLong(idNode.asText());
+                ObjectNode state = currentArticleBatchItems.get(id);
+                if (state != null) {
+                    items.add(state.deepCopy());
+                } else {
+                    ObjectNode missing = MAPPER.createObjectNode();
+                    missing.put("articleId", Long.toString(id));
+                    missing.put("visibility", "MISSING");
+                    missing.putNull("sourceRevision");
+                    missing.put("decision", "DENIED");
+                    missing.putNull("snapshot");
+                    items.add(missing);
+                }
+            }
+            return HttpStubResponse.ok(resp.toString());
+        } catch (Exception ex) {
+            return HttpStubResponse.status(400, "{\"error\":{\"code\":\"BAD_JSON\"}}");
+        }
     }
 
     private HttpStubResponse handleCreateSnapshot(String body) {

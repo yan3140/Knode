@@ -6,6 +6,7 @@ import co.elastic.clients.transport.rest5_client.Rest5ClientTransport;
 import co.elastic.clients.transport.rest5_client.low_level.Rest5Client;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.knode.search.ops.SearchOpsProperties;
 import io.lettuce.core.ClientOptions;
 import io.lettuce.core.SocketOptions;
 import org.apache.hc.core5.util.Timeout;
@@ -32,7 +33,8 @@ import java.time.Duration;
         SearchElasticsearchProperties.class,
         SearchQueryProperties.class,
         SearchCacheProperties.class,
-        SearchClientsProperties.class
+        SearchClientsProperties.class,
+        SearchOpsProperties.class
 })
 public class SearchRuntimeConfig {
 

@@ -534,6 +534,104 @@ public class SearchConsumerRepository {
                 gen.activeGeneration(), gen.activePhysicalIndex(), batchSize, leaseDurationMs, nowMs);
     }
 
+    public Optional<SearchIndexTaskRecord> claimSingleOnlineTaskInCurrentTx(
+            String aliasName, String defaultPhysicalIndex, long articleId, long leaseDurationMs, long nowMs) {
+        IndexGenerationState gen = ensureAndLockGeneration(aliasName, defaultPhysicalIndex, nowMs);
+        if (!gen.isNormal()) {
+            return Optional.empty();
+        }
+        long indexGeneration = gen.activeGeneration();
+        List<SearchIndexTaskRecord> locked = jdbcTemplate.query(
+                """
+                SELECT index_generation, article_id, target_index, target_projection_revision,
+                       operation, payload_json, status, attempts, max_attempts, due_at_ms,
+                       lease_until_ms, claim_generation, last_error, es_applied_revision,
+                       cache_invalidation_status, cache_invalidation_attempts,
+                       cache_invalidation_due_at_ms, cache_last_error, updated_at_ms
+                FROM search_index_task
+                WHERE index_generation = ? AND article_id = ?
+                FOR UPDATE
+                """,
+                indexTaskRowMapper(),
+                indexGeneration,
+                articleId
+        );
+        if (locked.isEmpty()) {
+            return Optional.empty();
+        }
+        SearchIndexTaskRecord current = locked.get(0);
+        boolean eligiblePending = current.status() == SearchIndexTaskStatus.PENDING && current.dueAtMs() <= nowMs;
+        boolean eligibleExpiredLease = current.status() == SearchIndexTaskStatus.LEASED
+                && current.leaseUntilMs() != null && current.leaseUntilMs() <= nowMs;
+        if (!eligiblePending && !eligibleExpiredLease) {
+            return Optional.empty();
+        }
+        int nextAttempts = eligibleExpiredLease ? current.attempts() + 1 : current.attempts();
+        if (eligibleExpiredLease && nextAttempts >= current.maxAttempts()) {
+            jdbcTemplate.update(
+                    """
+                    UPDATE search_index_task
+                    SET status = 'DEAD',
+                        attempts = ?,
+                        lease_until_ms = NULL,
+                        last_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
+                        updated_at_ms = ?
+                    WHERE index_generation = ? AND article_id = ?
+                    """,
+                    nextAttempts,
+                    nowMs,
+                    indexGeneration,
+                    articleId
+            );
+            return Optional.empty();
+        }
+        String boundTargetIndex = (current.targetIndex() != null && !current.targetIndex().isBlank())
+                ? current.targetIndex()
+                : (gen.activePhysicalIndex() == null ? "" : gen.activePhysicalIndex().trim());
+        long nextGeneration = current.claimGeneration() + 1L;
+        long leaseUntilMs = nowMs + Math.max(1_000L, leaseDurationMs);
+        jdbcTemplate.update(
+                """
+                UPDATE search_index_task
+                SET target_index = ?,
+                    status = 'LEASED',
+                    attempts = ?,
+                    lease_until_ms = ?,
+                    claim_generation = ?,
+                    updated_at_ms = ?
+                WHERE index_generation = ? AND article_id = ?
+                """,
+                boundTargetIndex,
+                nextAttempts,
+                leaseUntilMs,
+                nextGeneration,
+                nowMs,
+                indexGeneration,
+                articleId
+        );
+        return Optional.of(new SearchIndexTaskRecord(
+                current.indexGeneration(),
+                current.articleId(),
+                boundTargetIndex,
+                current.targetProjectionRevision(),
+                current.operation(),
+                current.payloadJson(),
+                SearchIndexTaskStatus.LEASED,
+                nextAttempts,
+                current.maxAttempts(),
+                current.dueAtMs(),
+                leaseUntilMs,
+                nextGeneration,
+                current.lastError(),
+                current.esAppliedRevision(),
+                current.cacheInvalidationStatus(),
+                current.cacheInvalidationAttempts(),
+                current.cacheInvalidationDueAtMs(),
+                current.cacheLastError(),
+                nowMs
+        ));
+    }
+
     public List<SearchIndexTaskRecord> claimDueTasksForGenerationInCurrentTx(
             long indexGeneration, String defaultTargetIndex, int batchSize, long leaseDurationMs, long nowMs) {
         List<Long> candidateIds = jdbcTemplate.query(
