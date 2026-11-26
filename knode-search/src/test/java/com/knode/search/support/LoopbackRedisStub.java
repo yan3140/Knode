@@ -11,6 +11,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -19,13 +20,15 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class LoopbackRedisStub implements AutoCloseable {
     private final ServerSocket serverSocket;
     private final ExecutorService executor;
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final Map<String, Entry> store = new ConcurrentHashMap<>();
-    private final Map<String, String> injectedErrors = new ConcurrentHashMap<>();
+    private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
+    private final Map<String, FaultRule> injectedErrors = new ConcurrentHashMap<>();
     private final List<List<String>> recordedCommands = new CopyOnWriteArrayList<>();
 
     public LoopbackRedisStub() throws IOException {
@@ -39,7 +42,11 @@ public final class LoopbackRedisStub implements AutoCloseable {
     }
 
     public void failCommand(String command, String errorMessage) {
-        injectedErrors.put(command.toUpperCase(Locale.ROOT), errorMessage);
+        injectedErrors.put(command.toUpperCase(Locale.ROOT), new FaultRule(errorMessage, new AtomicInteger(-1)));
+    }
+
+    public void failCommandTimes(String command, String errorMessage, int times) {
+        injectedErrors.put(command.toUpperCase(Locale.ROOT), new FaultRule(errorMessage, new AtomicInteger(times)));
     }
 
     public void clearFaults() {
@@ -48,6 +55,7 @@ public final class LoopbackRedisStub implements AutoCloseable {
 
     public void clearData() {
         store.clear();
+        streams.clear();
     }
 
     public void clearHistory() {
@@ -86,6 +94,61 @@ public final class LoopbackRedisStub implements AutoCloseable {
 
     public List<List<String>> recordedCommands() {
         return List.copyOf(recordedCommands);
+    }
+
+    // --- Test-harness Stream helpers (group setup & inspection only) ---
+
+    public void createGroup(String streamKey, String groupName) {
+        StreamState state = streams.computeIfAbsent(streamKey, k -> new StreamState());
+        synchronized (state) {
+            state.groups.computeIfAbsent(groupName, g -> new GroupState());
+        }
+    }
+
+    public String addStreamMessage(String streamKey, Map<String, String> fields) {
+        StreamState state = streams.computeIfAbsent(streamKey, k -> new StreamState());
+        synchronized (state) {
+            long seq = ++state.sequence;
+            String id = System.currentTimeMillis() + "-" + seq;
+            state.entries.add(new StreamEntry(id, new LinkedHashMap<>(fields)));
+            return id;
+        }
+    }
+
+    public int streamLength(String streamKey) {
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            return 0;
+        }
+        synchronized (state) {
+            return state.entries.size();
+        }
+    }
+
+    public int pendingCount(String streamKey, String groupName) {
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            return 0;
+        }
+        synchronized (state) {
+            GroupState group = state.groups.get(groupName);
+            return group == null ? 0 : group.pending.size();
+        }
+    }
+
+    public void agePendingEntries(String streamKey, String groupName, long deltaMs) {
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            return;
+        }
+        synchronized (state) {
+            GroupState group = state.groups.get(groupName);
+            if (group != null) {
+                for (PendingRecord rec : group.pending.values()) {
+                    rec.deliveredAtMs -= deltaMs;
+                }
+            }
+        }
     }
 
     private void acceptLoop() {
@@ -132,13 +195,35 @@ public final class LoopbackRedisStub implements AutoCloseable {
     }
 
     private String resolveFault(String op) {
-        String direct = injectedErrors.get(op);
+        String direct = consumeFault(op);
         if (direct != null) {
             return direct;
         }
-        if (("SET".equals(op) || "SETEX".equals(op) || "PSETEX".equals(op)) && injectedErrors.containsKey("WRITE")) {
-            return injectedErrors.get("WRITE");
+        if ("SET".equals(op) || "SETEX".equals(op) || "PSETEX".equals(op)) {
+            return consumeFault("WRITE");
         }
+        return null;
+    }
+
+    private String consumeFault(String key) {
+        FaultRule rule = injectedErrors.get(key);
+        if (rule == null) {
+            return null;
+        }
+        int remaining = rule.remaining().get();
+        if (remaining < 0) {
+            return rule.message();
+        }
+        while (remaining > 0) {
+            if (rule.remaining().compareAndSet(remaining, remaining - 1)) {
+                if (remaining - 1 == 0) {
+                    injectedErrors.remove(key, rule);
+                }
+                return rule.message();
+            }
+            remaining = rule.remaining().get();
+        }
+        injectedErrors.remove(key, rule);
         return null;
     }
 
@@ -204,7 +289,223 @@ public final class LoopbackRedisStub implements AutoCloseable {
                 }
                 writeInteger(out, removed);
             }
+            case "XREADGROUP" -> handleXReadGroup(args, out);
+            case "XPENDING" -> handleXPending(args, out);
+            case "XCLAIM" -> handleXClaim(args, out);
+            case "XACK" -> handleXAck(args, out);
             default -> writeError(out, "ERR unknown command '" + op + "'");
+        }
+    }
+
+    private void handleXReadGroup(List<String> args, OutputStream out) throws IOException {
+        // XREADGROUP GROUP <group> <consumer> [COUNT n] [BLOCK ms] STREAMS <stream> >
+        int idx = 1;
+        if (idx + 2 >= args.size() || !"GROUP".equalsIgnoreCase(args.get(idx))) {
+            writeError(out, "ERR syntax error");
+            return;
+        }
+        String groupName = args.get(idx + 1);
+        String consumerName = args.get(idx + 2);
+        idx += 3;
+        int count = Integer.MAX_VALUE;
+        while (idx < args.size()) {
+            String token = args.get(idx).toUpperCase(Locale.ROOT);
+            if ("COUNT".equals(token) && idx + 1 < args.size()) {
+                count = Integer.parseInt(args.get(idx + 1));
+                idx += 2;
+            } else if ("BLOCK".equals(token) && idx + 1 < args.size()) {
+                idx += 2;
+            } else if ("STREAMS".equals(token)) {
+                idx++;
+                break;
+            } else {
+                idx++;
+            }
+        }
+        if (idx + 1 >= args.size()) {
+            writeError(out, "ERR syntax error in XREADGROUP");
+            return;
+        }
+        String streamKey = args.get(idx);
+        String idArg = args.get(idx + 1);
+
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            writeError(out, "NOGROUP No such key '" + streamKey + "' or consumer group '" + groupName + "'");
+            return;
+        }
+        List<StreamEntry> delivered = new ArrayList<>();
+        synchronized (state) {
+            GroupState group = state.groups.get(groupName);
+            if (group == null) {
+                writeError(out, "NOGROUP No such consumer group '" + groupName + "'");
+                return;
+            }
+            if (">".equals(idArg)) {
+                long now = System.currentTimeMillis();
+                while (group.nextIndex < state.entries.size() && delivered.size() < count) {
+                    StreamEntry entry = state.entries.get(group.nextIndex++);
+                    delivered.add(entry);
+                    group.pending.put(entry.id(), new PendingRecord(entry.id(), consumerName, now, 1));
+                }
+            }
+        }
+        if (delivered.isEmpty()) {
+            writeNullArray(out);
+            return;
+        }
+        // RESP2 XREADGROUP: *1 [ *2 [ streamKey, *N [ *2 [ id, *2M [ f1, v1, ... ] ] ] ] ]
+        writeArrayHeader(out, 1);
+        writeArrayHeader(out, 2);
+        writeBulkString(out, streamKey);
+        writeStreamEntries(out, delivered);
+    }
+
+    private void handleXPending(List<String> args, OutputStream out) throws IOException {
+        // XPENDING <stream> <group> [IDLE min] <start> <end> <count>
+        if (args.size() < 6) {
+            writeError(out, "ERR wrong number of arguments for 'xpending'");
+            return;
+        }
+        String streamKey = args.get(1);
+        String groupName = args.get(2);
+        int idx = 3;
+        long minIdleFilter = -1L;
+        if ("IDLE".equalsIgnoreCase(args.get(idx)) && idx + 1 < args.size()) {
+            minIdleFilter = Long.parseLong(args.get(idx + 1));
+            idx += 2;
+        }
+        if (idx + 2 >= args.size()) {
+            writeError(out, "ERR syntax error in XPENDING");
+            return;
+        }
+        int count = Integer.parseInt(args.get(idx + 2));
+
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            writeError(out, "NOGROUP No such key '" + streamKey + "'");
+            return;
+        }
+        List<PendingSnapshot> items = new ArrayList<>();
+        synchronized (state) {
+            GroupState group = state.groups.get(groupName);
+            if (group == null) {
+                writeError(out, "NOGROUP No such consumer group '" + groupName + "'");
+                return;
+            }
+            long now = System.currentTimeMillis();
+            for (PendingRecord rec : group.pending.values()) {
+                long idle = Math.max(0L, now - rec.deliveredAtMs);
+                if (minIdleFilter >= 0L && idle < minIdleFilter) {
+                    continue;
+                }
+                items.add(new PendingSnapshot(rec.id, rec.consumer, idle, rec.deliveryCount));
+                if (items.size() >= count) {
+                    break;
+                }
+            }
+        }
+        writeArrayHeader(out, items.size());
+        for (PendingSnapshot item : items) {
+            writeArrayHeader(out, 4);
+            writeBulkString(out, item.id());
+            writeBulkString(out, item.consumer());
+            writeInteger(out, item.idleMs());
+            writeInteger(out, item.deliveryCount());
+        }
+    }
+
+    private void handleXClaim(List<String> args, OutputStream out) throws IOException {
+        // XCLAIM <stream> <group> <consumer> <min-idle-time> <id> [id ...]
+        if (args.size() < 6) {
+            writeError(out, "ERR wrong number of arguments for 'xclaim'");
+            return;
+        }
+        String streamKey = args.get(1);
+        String groupName = args.get(2);
+        String consumerName = args.get(3);
+        long minIdleMs = Long.parseLong(args.get(4));
+
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            writeError(out, "NOGROUP No such key '" + streamKey + "'");
+            return;
+        }
+        List<StreamEntry> claimed = new ArrayList<>();
+        synchronized (state) {
+            GroupState group = state.groups.get(groupName);
+            if (group == null) {
+                writeError(out, "NOGROUP No such consumer group '" + groupName + "'");
+                return;
+            }
+            long now = System.currentTimeMillis();
+            for (int i = 5; i < args.size(); i++) {
+                String id = args.get(i);
+                PendingRecord rec = group.pending.get(id);
+                if (rec == null) {
+                    continue;
+                }
+                long idle = Math.max(0L, now - rec.deliveredAtMs);
+                if (idle < minIdleMs) {
+                    continue;
+                }
+                rec.consumer = consumerName;
+                rec.deliveredAtMs = now;
+                rec.deliveryCount++;
+                StreamEntry entry = findStreamEntry(state, id);
+                if (entry != null) {
+                    claimed.add(entry);
+                }
+            }
+        }
+        writeStreamEntries(out, claimed);
+    }
+
+    private void handleXAck(List<String> args, OutputStream out) throws IOException {
+        if (args.size() < 4) {
+            writeError(out, "ERR wrong number of arguments for 'xack'");
+            return;
+        }
+        String streamKey = args.get(1);
+        String groupName = args.get(2);
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            writeInteger(out, 0L);
+            return;
+        }
+        long acked = 0L;
+        synchronized (state) {
+            GroupState group = state.groups.get(groupName);
+            if (group != null) {
+                for (int i = 3; i < args.size(); i++) {
+                    if (group.pending.remove(args.get(i)) != null) {
+                        acked++;
+                    }
+                }
+            }
+        }
+        writeInteger(out, acked);
+    }
+
+    private static StreamEntry findStreamEntry(StreamState state, String id) {
+        for (StreamEntry entry : state.entries) {
+            if (entry.id().equals(id)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    private static void writeStreamEntries(OutputStream out, List<StreamEntry> entries) throws IOException {
+        writeArrayHeader(out, entries.size());
+        for (StreamEntry entry : entries) {
+            writeArrayHeader(out, 2);
+            writeBulkString(out, entry.id());
+            writeArrayHeader(out, entry.fields().size() * 2);
+            for (Map.Entry<String, String> kv : entry.fields().entrySet()) {
+                writeBulkString(out, kv.getKey());
+                writeBulkString(out, kv.getValue());
+            }
         }
     }
 
@@ -330,6 +631,14 @@ public final class LoopbackRedisStub implements AutoCloseable {
         out.write((':' + Long.toString(value) + "\r\n").getBytes(StandardCharsets.UTF_8));
     }
 
+    private static void writeArrayHeader(OutputStream out, int size) throws IOException {
+        out.write(('*' + Integer.toString(size) + "\r\n").getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void writeNullArray(OutputStream out) throws IOException {
+        out.write("*-1\r\n".getBytes(StandardCharsets.UTF_8));
+    }
+
     private static void writeBulkString(OutputStream out, String value) throws IOException {
         if (value == null) {
             out.write("$-1\r\n".getBytes(StandardCharsets.UTF_8));
@@ -349,5 +658,39 @@ public final class LoopbackRedisStub implements AutoCloseable {
     }
 
     private record Entry(String value, long expiresAtMs) {
+    }
+
+    private record FaultRule(String message, AtomicInteger remaining) {
+    }
+
+    private record StreamEntry(String id, Map<String, String> fields) {
+    }
+
+    private record PendingSnapshot(String id, String consumer, long idleMs, long deliveryCount) {
+    }
+
+    private static final class PendingRecord {
+        final String id;
+        String consumer;
+        long deliveredAtMs;
+        long deliveryCount;
+
+        PendingRecord(String id, String consumer, long deliveredAtMs, long deliveryCount) {
+            this.id = id;
+            this.consumer = consumer;
+            this.deliveredAtMs = deliveredAtMs;
+            this.deliveryCount = deliveryCount;
+        }
+    }
+
+    private static final class GroupState {
+        int nextIndex = 0;
+        final Map<String, PendingRecord> pending = new LinkedHashMap<>();
+    }
+
+    private static final class StreamState {
+        long sequence = 0L;
+        final List<StreamEntry> entries = new ArrayList<>();
+        final Map<String, GroupState> groups = new LinkedHashMap<>();
     }
 }

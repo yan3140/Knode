@@ -1,0 +1,142 @@
+{
+  "contractId": "SEARCH-CONSUMER-INDEXING",
+  "version": "0.1-draft",
+  "status": "candidate",
+  "owner": "05-search (knode-search)",
+  "taskRef": "SEARCH-02",
+  "description": "Independent content event consumption, dual-version article projection, durable index task worker with Elasticsearch external conditional versioning, and bounded search cache invalidation for knode-search.",
+  "upstreamContracts": {
+    "relay": "contracts/content/relay-v0.1.json",
+    "article": "contracts/content/article-write-candidate-v0.1.json",
+    "counter": "contracts/content/counter-v0.1.json",
+    "comment": "contracts/content/comment-v0.1.json",
+    "publicSearch": "contracts/search/public-search-v0.1.json"
+  },
+  "storage": {
+    "engine": "Dedicated independent MySQL 8 / InnoDB database for 05-search",
+    "charset": "utf8mb4",
+    "timezone": "UTC (all *_ms columns store UTC epoch milliseconds)",
+    "ddlPath": "knode-search/src/main/resources/db/search-consumer-schema.sql",
+    "autoMigration": false,
+    "tables": {
+      "search_event_inbox": "Primary key event_id (immutable business deduplication); records APPLIED, STALE_IGNORED, or IGNORED (valid non-search events such as CommentCreated/CommentReplied v1).",
+      "search_event_failure": "Primary key failure_key ('event:' + validEventId or 'stream:' + streamRecordId when eventId is absent/invalid); durably archives malformed protocol messages with fixed error_code, sanitized error_message, payload_sha256, and payload_bytes.",
+      "search_article_projection": "Primary key article_id; dual-version state (content_revision vs counter_revision), durable visibility/delete barrier (NONE/PUBLIC/WITHDRAWN/DELETED), and domain-local monotonic projection_revision.",
+      "search_index_task": "Primary key article_id; target_projection_revision, operation (UPSERT/TOMBSTONE), complete recoverable payload_json, status (PENDING/LEASED/DONE/DEAD), attempts/max_attempts, due_at_ms, lease_until_ms, claim_generation, last_error, es_applied_revision, and durable cache_invalidation_status (NONE/PENDING/DONE) compensation columns."
+    },
+    "queryIsolation": "Public search path (GET /api/blog/search and GET /search) never requires or reads the consumer database. SEARCH-01 continues to build and run standalone with knode.search.consumer.enabled=false and no datasource configured."
+  },
+  "streamTransport": {
+    "streamKey": "knode:<KNODE_ENVIRONMENT>:v1:events:content",
+    "fieldFormat": "Single field 'event' containing raw UTF-8 JSON (max 8,000,000 UTF-8 bytes)",
+    "consumerGroup": "knode-search-v1 (pre-provisioned by deployment or isolated test harness; never created by runtime code)",
+    "consumerName": "Unique per instance (configurable, defaults to knode-search-<host>-<uuid8>)",
+    "isolation": "Dedicated standalone Lettuce connection separate from search cache Redis; autoReconnect disabled with bounded connect/command timeouts and optional TLS.",
+    "runtimeCommands": [
+      "XREADGROUP",
+      "XPENDING",
+      "XCLAIM",
+      "XACK",
+      "AUTH",
+      "HELLO",
+      "PING",
+      "CLIENT SETINFO"
+    ],
+    "forbiddenCommands": [
+      "XGROUP",
+      "XTRIM",
+      "XDEL",
+      "MAXLEN",
+      "KEYS",
+      "SCAN",
+      "FLUSHDB",
+      "FLUSHALL"
+    ],
+    "ackOrdering": "Single READ COMMITTED SQL transaction performs eventId deduplication, Inbox registration, locked dual-version projection update, and durable index task persistence. XACK executes strictly after SQL commit. SQL rollback performs zero XACK. Post-commit XACK failure leaves message pending for reclaim and idempotent Inbox deduplication. Malformed protocol messages are committed to search_event_failure before XACK so poison messages cannot block the Stream."
+  },
+  "eventCompatibility": {
+    "article": {
+      "aggregateType": "ARTICLE",
+      "schemaVersions": [1, 2],
+      "eventTypes": [
+        "ArticlePublished",
+        "ArticleContentChanged",
+        "ArticleVisibilityChanged",
+        "ArticleDeleted"
+      ],
+      "rules": [
+        "Article v2 PUBLIC payload requires isTop ('0' or '1'); v1 treats isTop as optional.",
+        "Non-first v2 public updates of legacy rows allow null publicationFactId and publishedAt; ArticlePublished and v1 require them.",
+        "WITHDRAWN and DELETED payloads forbid body/text fields (content, title, summary, thumbnail, category, tags) and reject nested reason objects."
+      ]
+    },
+    "counter": {
+      "aggregateType": "ARTICLE_COUNTER",
+      "schemaVersions": [1],
+      "eventTypes": ["ArticleCounterChanged"],
+      "exactPayloadFields": ["articleId", "viewCount", "counterRevision"],
+      "rules": [
+        "Envelope sourceRevision must equal payload counterRevision.",
+        "Never creates or resurrects full text in Elasticsearch, never overwrites content_revision, and never flips WITHDRAWN/DELETED back to PUBLIC."
+      ]
+    },
+    "nonSearchIgnored": {
+      "aggregateType": "COMMENT",
+      "schemaVersions": [1],
+      "eventTypes": ["CommentCreated", "CommentReplied"],
+      "behavior": "Validated against preview/field bounds, recorded in search_event_inbox with status IGNORED for audit, never mutates projection or index tasks."
+    }
+  },
+  "projectionRules": {
+    "contentDimension": "Advances strictly when event.sourceRevision > current.content_revision. Persists WITHDRAWN/DELETED visibility and revision as a durable delete barrier; rejects older content or delete events as STALE_IGNORED.",
+    "counterDimension": "Advances strictly when event.counterRevision > current.counter_revision. Public article snapshots with older counterRevision preserve existing newer view_count/counter_revision. Counter events arriving before content store view_count/counter_revision without creating an ES task and merge when valid public content arrives.",
+    "projectionRevision": "Monotonic per-article domain-local revision incremented in the same locked SQL transaction whenever an effective state transition requires ES synchronization. Always decoupled from content sourceRevision."
+  },
+  "indexWorker": {
+    "targetIndexConfig": "knode.search.elasticsearch.index (same explicit 05-owned index/alias as public query path)",
+    "documentId": "Canonical articleId decimal string",
+    "esSourceRevisionField": "Always equals projection content_revision (never projection_revision)",
+    "conditionalVersioning": "PUT /{index}/_doc/{articleId}?version={targetProjectionRevision}&version_type=external&refresh={wait_for|true}",
+    "tombstoneDocument": {
+      "fields": ["id", "sourceRevision", "searchable=false"],
+      "forbiddenFields": ["title", "summary", "content", "categoryId", "categoryName", "tagNames", "thumbnail", "viewCount", "createTime"]
+    },
+    "claimAndFencing": "Short READ COMMITTED SQL transaction claims bounded due PENDING rows or expired LEASED rows (lease_until_ms <= now), assigning fresh lease_until_ms and monotonically incremented claim_generation. ES network I/O runs strictly outside SQL transactions. Completion, retry, and DEAD transitions conditionally require matching article_id, target_projection_revision, claim_generation, and status='LEASED'.",
+    "conflict409Handling": {
+      "esVersionGreater": "Classified as SUPERSEDED; newer ES state preserved and stale task completed conditionally.",
+      "esVersionEqualAndExactMatch": "Verified via GET /{index}/_doc/{articleId}; classified as IDEMPOTENT_APPLIED (recovers ES-applied-but-SQL-mark-failed crash).",
+      "other409": "Classified as CONFLICT_UNVERIFIED; retained as visible failure and retried with bounded exponential backoff until DEAD."
+    },
+    "retryExhaustion": "On reaching maxAttempts, task transitions to DEAD while preserving attempts, last_error, and full recoverable payload_json."
+  },
+  "cacheInvalidation": {
+    "epochKey": "knode:<KNODE_ENVIRONMENT>:v1:search:epoch",
+    "mechanism": "After ES write succeeds with refresh visibility (wait_for/true), worker executes O(1) INCR on knode:<env>:v1:search:epoch (zero KEYS/SCAN). Public queries capture currentEpoch before querying ES, namespace result keys with ':e<epoch>', and re-verify epoch unchanged before writing to cache so concurrent slow queries cannot write stale results into the active cache epoch.",
+    "compensation": "If Redis INCR fails, search_index_task retains cache_invalidation_status='PENDING' with bounded backoff due time and error detail; subsequent worker cycles retry INCR and conditionally mark DONE matching es_applied_revision."
+  },
+  "defaults": {
+    "knode.search.consumer.enabled": false,
+    "knode.search.consumer.stream.enabled": false,
+    "knode.search.consumer.stream.worker-enabled": false,
+    "knode.search.consumer.indexer.enabled": false,
+    "knode.search.consumer.indexer.worker-enabled": false
+  },
+  "verificationBoundary": {
+    "verifiedInSearch02": [
+      "H2 MySQL-mode execution of verbatim db/search-consumer-schema.sql with READ COMMITTED transactions",
+      "Real LettuceContentStreamClient against isolated loopback RESP Stream stub (XREADGROUP/XPENDING/XCLAIM/XACK)",
+      "Real ElasticsearchClient against stateful loopback ES 9 stub enforcing external version 409 conflicts",
+      "Real ArticleSearchCache and SearchCacheInvalidator against separate isolated loopback Redis stub",
+      "Deterministic CountDownLatch concurrency proofs for stale worker fencing, late in-flight ES upsert/tombstone 409 rejection, and concurrent stale query anti-writeback",
+      "All 14 SEARCH-01 regression tests with consumer disabled and no consumer database configured"
+    ],
+    "pendingIntegration": [
+      "Native MySQL 8 / InnoDB DDL execution and locking query-plan verification",
+      "Native Redis 7 ACL least-privilege + TLS verification for both Stream and Cache accounts",
+      "Native Elasticsearch 9 cluster external versioning and refresh=wait_for verification",
+      "Live cross-service integration with knode-content Relay, knode-user, and Gateway",
+      "Snapshot full rebuild, incremental cursor catch-up, and index alias switch (SEARCH-03)",
+      "Admin search endpoints and SEARCH-OPS facade"
+    ]
+  }
+}

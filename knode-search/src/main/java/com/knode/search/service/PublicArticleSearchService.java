@@ -59,9 +59,14 @@ public class PublicArticleSearchService {
         QueryBudget budget = QueryBudget.start(Duration.ofMillis(Math.max(1L, queryProperties.getTotalTimeoutMs())));
 
         try {
+            Optional<String> epochBefore = query.cacheCandidate()
+                    ? articleSearchCache.currentEpoch(budget)
+                    : Optional.empty();
             boolean fromCache = false;
             SearchCandidatePage candidatePage;
-            Optional<SearchCandidatePage> cached = articleSearchCache.get(query, budget);
+            Optional<SearchCandidatePage> cached = epochBefore.isPresent()
+                    ? articleSearchCache.get(query, epochBefore.get(), budget)
+                    : Optional.empty();
             if (cached.isPresent()) {
                 candidatePage = cached.get();
                 fromCache = true;
@@ -88,7 +93,7 @@ public class PublicArticleSearchService {
             }
 
             searchMetrics.recordVisibilityExcluded(excludedCount);
-            updateCacheAfterVerification(query, candidatePage, fromCache, excludedCount, budget);
+            updateCacheAfterVerification(query, epochBefore.orElse(null), candidatePage, fromCache, excludedCount, budget);
 
             searchMetrics.recordQuery(true, System.nanoTime() - startNanos);
             return result;
@@ -149,18 +154,22 @@ public class PublicArticleSearchService {
 
     private void updateCacheAfterVerification(
             SearchQuery query,
+            String epochBefore,
             SearchCandidatePage candidatePage,
             boolean fromCache,
             int excludedCount,
             QueryBudget budget) {
+        if (epochBefore == null) {
+            return;
+        }
         if (excludedCount > 0) {
             if (fromCache) {
-                articleSearchCache.evict(query);
+                articleSearchCache.evict(query, epochBefore);
             }
             return;
         }
         if (!fromCache) {
-            articleSearchCache.put(query, candidatePage, budget);
+            articleSearchCache.putIfEpochUnchanged(query, epochBefore, candidatePage, budget);
         }
     }
 

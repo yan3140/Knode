@@ -8,6 +8,10 @@ spring:
     exclude:
       - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
       - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.JdbcTemplateAutoConfiguration
+      - org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration
   jackson:
     time-zone: GMT+8
     date-format: yyyy-MM-dd HH:mm:ss
@@ -66,3 +70,44 @@ knode:
       user-token-timeout-ms: ${KNODE_SEARCH_USER_TOKEN_TIMEOUT_MS:800}
       content-visibility-timeout-ms: ${KNODE_SEARCH_CONTENT_VISIBILITY_TIMEOUT_MS:1000}
       token-refresh-skew-seconds: 10
+    consumer:
+      enabled: ${KNODE_SEARCH_CONSUMER_ENABLED:false}
+      datasource:
+        url: ${KNODE_SEARCH_DB_URL:}
+        driver-class-name: ${KNODE_SEARCH_DB_DRIVER:com.mysql.cj.jdbc.Driver}
+        username: ${KNODE_SEARCH_DB_USERNAME:}
+        password: ${KNODE_SEARCH_DB_PASSWORD:}
+        maximum-pool-size: ${KNODE_SEARCH_DB_MAX_POOL_SIZE:10}
+        connection-timeout-ms: ${KNODE_SEARCH_DB_CONN_TIMEOUT_MS:3000}
+        transaction-timeout-seconds: ${KNODE_SEARCH_DB_TX_TIMEOUT_SECONDS:5}
+      stream:
+        enabled: ${KNODE_SEARCH_STREAM_ENABLED:false}
+        worker-enabled: ${KNODE_SEARCH_STREAM_WORKER_ENABLED:false}
+        group: ${KNODE_SEARCH_STREAM_GROUP:knode-search-v1}
+        consumer-name: ${KNODE_SEARCH_STREAM_CONSUMER_NAME:}
+        batch-size: ${KNODE_SEARCH_STREAM_BATCH_SIZE:10}
+        block-timeout-ms: ${KNODE_SEARCH_STREAM_BLOCK_TIMEOUT_MS:200}
+        min-idle-ms: ${KNODE_SEARCH_STREAM_MIN_IDLE_MS:30000}
+        poll-delay-ms: ${KNODE_SEARCH_STREAM_POLL_DELAY_MS:1000}
+        redis:
+          host: ${KNODE_SEARCH_STREAM_REDIS_HOST:127.0.0.1}
+          port: ${KNODE_SEARCH_STREAM_REDIS_PORT:6379}
+          database: ${KNODE_SEARCH_STREAM_REDIS_DATABASE:0}
+          username: ${KNODE_SEARCH_STREAM_REDIS_USERNAME:}
+          password: ${KNODE_SEARCH_STREAM_REDIS_PASSWORD:}
+          tls: ${KNODE_SEARCH_STREAM_REDIS_TLS:false}
+          connect-timeout-ms: ${KNODE_SEARCH_STREAM_REDIS_CONNECT_TIMEOUT_MS:400}
+          command-timeout-ms: ${KNODE_SEARCH_STREAM_REDIS_COMMAND_TIMEOUT_MS:800}
+      indexer:
+        enabled: ${KNODE_SEARCH_INDEXER_ENABLED:false}
+        worker-enabled: ${KNODE_SEARCH_INDEXER_WORKER_ENABLED:false}
+        batch-size: ${KNODE_SEARCH_INDEXER_BATCH_SIZE:10}
+        lease-seconds: ${KNODE_SEARCH_INDEXER_LEASE_SECONDS:30}
+        max-attempts: ${KNODE_SEARCH_INDEXER_MAX_ATTEMPTS:5}
+        base-retry-delay-ms: ${KNODE_SEARCH_INDEXER_BASE_RETRY_DELAY_MS:1000}
+        max-retry-delay-ms: ${KNODE_SEARCH_INDEXER_MAX_RETRY_DELAY_MS:60000}
+        poll-delay-ms: ${KNODE_SEARCH_INDEXER_POLL_DELAY_MS:1000}
+        refresh-policy: ${KNODE_SEARCH_INDEXER_REFRESH_POLICY:wait_for}
+        cache-compensation-batch-size: ${KNODE_SEARCH_CACHE_COMP_BATCH_SIZE:20}
+        cache-compensation-base-delay-ms: ${KNODE_SEARCH_CACHE_COMP_BASE_DELAY_MS:1000}
+        cache-compensation-max-delay-ms: ${KNODE_SEARCH_CACHE_COMP_MAX_DELAY_MS:30000}

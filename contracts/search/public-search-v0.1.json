@@ -3,8 +3,8 @@
   "version": "0.1-draft",
   "status": "draft",
   "owner": "05-search (knode-search)",
-  "taskRef": "SEARCH-01",
-  "description": "Public article search HTTP contract, visibility fail-closed rules, and bounded cache semantics for knode-search.",
+  "taskRef": "SEARCH-01 / SEARCH-02",
+  "description": "Public article search HTTP contract, visibility fail-closed rules, and bounded epoch-versioned cache semantics for knode-search.",
   "endpoints": [
     {
       "method": "GET",
@@ -176,7 +176,8 @@
   },
   "cache": {
     "keyNamespace": {
-      "resultKey": "knode:<environment>:v1:search:result:<sha256-32hex>",
+      "epochKey": "knode:<environment>:v1:search:epoch",
+      "resultKey": "knode:<environment>:v1:search:result:<sha256-32hex>:e<epoch>",
       "admissionKey": "knode:<environment>:v1:search:admit:<sha256-32hex>",
       "fingerprintInputs": [
         "elasticsearchIndex",
@@ -186,6 +187,10 @@
         "sort",
         "highlightContent"
       ]
+    },
+    "invalidation": {
+      "strategy": "O(1) INCR on epochKey after ES index visibility (no KEYS/SCAN); queries read epoch before ES and verify epoch unchanged before cache writeback so concurrent stale queries cannot pollute the active cache epoch.",
+      "contractRef": "contracts/search/consumer-indexing-v0.1.json"
     },
     "admission": {
       "pageNumEquals": 1,
@@ -209,7 +214,7 @@
     }
   },
   "elasticsearch": {
-    "accessMode": "read-only",
+    "accessMode": "read-only on public query path; conditional external-version write on disabled-by-default indexer worker",
     "indexCreationOnStartupOrQuery": false,
     "indexConfigProperty": "knode.search.elasticsearch.index",
     "queryFields": [
