@@ -340,12 +340,49 @@ public final class LoopbackRedisStub implements AutoCloseable {
                 }
                 writeInteger(out, removed);
             }
+            case "EVALSHA" -> writeError(out, "NOSCRIPT No matching script. Please use EVAL.");
+            case "EVAL" -> handleEval(args, out);
             case "XREADGROUP" -> handleXReadGroup(args, out);
             case "XPENDING" -> handleXPending(args, out);
             case "XCLAIM" -> handleXClaim(args, out);
             case "XACK" -> handleXAck(args, out);
             default -> writeError(out, "ERR unknown command '" + op + "'");
         }
+    }
+
+    private void handleEval(List<String> args, OutputStream out) throws IOException {
+        if (args.size() < 3) {
+            writeError(out, "ERR wrong number of arguments for 'eval'");
+            return;
+        }
+        String script = args.get(1);
+        int numKeys;
+        try {
+            numKeys = Integer.parseInt(args.get(2));
+        } catch (NumberFormatException ex) {
+            writeError(out, "ERR value is not an integer or out of range");
+            return;
+        }
+        if (numKeys == 1 && args.size() >= 5
+                && script.contains("redis.call('GET', KEYS[1]) == ARGV[1]")
+                && script.contains("redis.call('DEL', KEYS[1])")) {
+            String key = args.get(3);
+            String expected = args.get(4);
+            AtomicBoolean deleted = new AtomicBoolean(false);
+            store.compute(key, (k, existing) -> {
+                if (existing == null || existing.expiresAtMs() <= System.currentTimeMillis()) {
+                    return null;
+                }
+                if (expected.equals(existing.value())) {
+                    deleted.set(true);
+                    return null;
+                }
+                return existing;
+            });
+            writeInteger(out, deleted.get() ? 1L : 0L);
+            return;
+        }
+        writeError(out, "ERR unsupported eval script in loopback stub");
     }
 
     private void handleXReadGroup(List<String> args, OutputStream out) throws IOException {

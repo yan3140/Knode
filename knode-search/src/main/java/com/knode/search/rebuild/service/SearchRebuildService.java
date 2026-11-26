@@ -498,6 +498,9 @@ public class SearchRebuildService {
     }
 
     private StepOutcome stepSwitchAliasOrReconcile(RebuildJobRecord job) {
+        String attachFence = SearchIndexAdminClient.attachFenceAlias(job.candidatePhysicalIndex());
+        String bypassOwner = cutoverBypassOwner(job);
+
         Set<String> currentTargets;
         try {
             currentTargets = indexAdminClient.getAliasTargets(job.aliasName());
@@ -507,8 +510,12 @@ public class SearchRebuildService {
                     StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         }
 
-        // Case 1: ES alias ALREADY points solely to candidatePhysicalIndex -> reconcile forward!
+        // Case 1: ES alias ALREADY points solely to candidatePhysicalIndex -> ensure attach fence disarmed, then activate!
         if (currentTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+            StepOutcome fenceHold = ensureAttachFenceDisarmedOrHold(job, attachFence);
+            if (fenceHold != null) {
+                return fenceHold;
+            }
             LOGGER.info("event=search_rebuild_alias_reconciled_forward jobId={} alias={} target={}",
                     job.jobId(), job.aliasName(), job.candidatePhysicalIndex());
             return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
@@ -517,16 +524,13 @@ public class SearchRebuildService {
         // Case 2: Partial alias binding (e.g., both source and candidate attached after partial failure) ->
         // atomically remove stale non-candidate bindings (with must_exist=true) and re-verify!
         if (currentTargets.contains(job.candidatePhysicalIndex()) && currentTargets.size() > 1) {
-            return repairPartialAliasWithCandidatePresent(job, currentTargets);
+            return repairPartialAliasWithCandidatePresent(job, currentTargets, attachFence);
         }
 
         // Case 3: Previous alias switch request had uncertain/timed-out/unacknowledged outcome!
-        // Never revert to NORMAL solely because a GET still sees sourcePhysicalIndex — the in-flight
-        // request may still land late on ES! Keep SWITCHING_ALIAS gate and reconcile on subsequent ticks.
         if (job.aliasSwitchUncertain()) {
             if (currentTargets.isEmpty()) {
-                // Partial failure removed old binding without adding candidate -> add candidate only.
-                return repairEmptyAliasToCandidate(job);
+                return repairEmptyAliasToCandidate(job, attachFence);
             }
             String err = "ALIAS_SWITCH_IN_FLIGHT_UNCERTAIN:waiting_for_es_reconcile:targets=" + currentTargets;
             LOGGER.warn("event=search_rebuild_alias_still_uncertain jobId={} alias={} targets={}",
@@ -544,18 +548,30 @@ public class SearchRebuildService {
                     StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         }
 
-        // Verify lease is still valid before side effects on Redis or ES!
         try {
             verifyLeaseActiveInTx(job, RebuildPhase.SWITCHING_ALIAS);
         } catch (StaleRebuildLeaseException fenced) {
             return leaseFencedOutcome(job, fenced);
         }
 
-        // Enable cross-instance Redis cutover cache bypass BEFORE mutating ES alias!
-        // If writing cutover_bypass fails, abort BEFORE POST /_aliases so g1 keeps serving safely.
+        if (currentTargets.isEmpty()) {
+            try {
+                Set<String> fenceTargets = indexAdminClient.getAliasTargets(attachFence);
+                if (!fenceTargets.contains(job.candidatePhysicalIndex())) {
+                    String err = "ALIAS_BOOTSTRAP_ATTACH_FENCE_MISSING:fence=" + attachFence;
+                    return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                            StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+                }
+            } catch (Exception fenceReadEx) {
+                String err = "ALIAS_BOOTSTRAP_FENCE_READ_FAILED:" + fenceReadEx.getMessage();
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                        StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+            }
+        }
+
         if (cacheInvalidator.isCacheEnabled()) {
             try {
-                cacheInvalidator.enterCutoverBypass(job.jobId() + ":" + job.candidatePhysicalIndex());
+                cacheInvalidator.enterCutoverBypass(bypassOwner);
             } catch (Exception bypassEx) {
                 String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
                 LOGGER.warn("event=search_rebuild_cutover_bypass_failed jobId={} error={}", job.jobId(), err);
@@ -563,8 +579,6 @@ public class SearchRebuildService {
             }
         }
 
-        // Persist alias_switch_uncertain=1 BEFORE dispatching POST /_aliases so even a crash mid-flight
-        // preserves the SWITCHING_ALIAS timeout fence on recovery.
         try {
             transactionTemplate.executeWithoutResult(status ->
                     rebuildRepository.markAliasSwitchUncertainInCurrentTx(
@@ -573,15 +587,11 @@ public class SearchRebuildService {
             return leaseFencedOutcome(job, fenced);
         }
 
-        // Issue ONE atomic ES _aliases switch (remove carries must_exist=true; old physical index retained).
-        AliasSwitchResult switchResult = indexAdminClient.switchAliasAtomically(
-                job.aliasName(), currentTargets, job.candidatePhysicalIndex());
+        AliasSwitchResult switchResult = indexAdminClient.switchAliasAtomicallyWithFence(
+                job.aliasName(), currentTargets, job.candidatePhysicalIndex(), attachFence);
 
         if (switchResult.isAcknowledged()) {
-            // Hook point for subclasses/tests to simulate crash between ES _aliases success and local SQL activation!
             afterAtomicAliasSwitchBeforeLocalCommit(job);
-
-            // Confirm ES alias points SOLELY to candidatePhysicalIndex before activating new generation!
             Set<String> confirmedTargets;
             try {
                 confirmedTargets = indexAdminClient.getAliasTargets(job.aliasName());
@@ -591,6 +601,10 @@ public class SearchRebuildService {
                         StepStatus.ALIAS_SWITCH_AMBIGUOUS);
             }
             if (confirmedTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+                StepOutcome fenceHold = ensureAttachFenceDisarmedOrHold(job, attachFence);
+                if (fenceHold != null) {
+                    return fenceHold;
+                }
                 return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_SWITCHED_AND_ACTIVATED);
             }
             String err = "ALIAS_POST_SWITCH_TARGET_MISMATCH:" + confirmedTargets;
@@ -600,7 +614,6 @@ public class SearchRebuildService {
                     StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         }
 
-        // Non-acknowledged switch result: inspect ES authoritative alias state!
         String switchErr = "ALIAS_SWITCH_" + switchResult.status().name() + ":" + switchResult.detail();
         LOGGER.warn("event=search_rebuild_alias_switch_non_ack jobId={} alias={} status={} detail={}",
                 job.jobId(), job.aliasName(), switchResult.status(), switchResult.detail());
@@ -615,14 +628,15 @@ public class SearchRebuildService {
         }
 
         if (postTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
-            // ES actually switched cleanly to candidatePhysicalIndex -> reconcile forward!
+            StepOutcome fenceHold = ensureAttachFenceDisarmedOrHold(job, attachFence);
+            if (fenceHold != null) {
+                return fenceHold;
+            }
             LOGGER.info("event=search_rebuild_alias_reconciled_after_non_ack jobId={} alias={} target={}",
                     job.jobId(), job.aliasName(), job.candidatePhysicalIndex());
             return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
         }
 
-        // ONLY revert to NORMAL on g1 if ES returned a synchronous pre-switch rejection (HTTP 4xx != 408)
-        // proving the request was refused and CANNOT arrive late, AND ES alias is still intact on source!
         if (switchResult.isConfirmedPreSwitchRejected()
                 && (postTargets.isEmpty() || postTargets.equals(Set.of(job.sourcePhysicalIndex())))) {
             boolean exhausted = job.switchAttempts() >= rebuildProperties.getMaxSwitchAttempts();
@@ -637,8 +651,7 @@ public class SearchRebuildService {
             } catch (StaleRebuildLeaseException fenced) {
                 return leaseFencedOutcome(job, fenced);
             }
-            // Safe to clear cutover bypass now because switch was synchronously rejected and reverted to g1.
-            clearCutoverBypassBestEffort(job.jobId());
+            clearCutoverBypassBestEffort(job.jobId(), bypassOwner);
             return new StepOutcome(
                     exhausted ? StepStatus.FAILED : StepStatus.PRE_SWITCH_FAILED_REVERTED,
                     reload(job.jobId()),
@@ -646,14 +659,13 @@ public class SearchRebuildService {
             );
         }
 
-        // Timeout, connection drop, 5xx, unacknowledged, or partial action failure:
-        // KEEP SWITCHING_ALIAS gate + alias_switch_uncertain=1 + cutover_bypass for subsequent reconciliation!
         String holdErr = switchErr + ";postTargets=" + postTargets;
         return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, holdErr,
                 StepStatus.ALIAS_SWITCH_AMBIGUOUS);
     }
 
-    private StepOutcome repairPartialAliasWithCandidatePresent(RebuildJobRecord job, Set<String> currentTargets) {
+    private StepOutcome repairPartialAliasWithCandidatePresent(
+            RebuildJobRecord job, Set<String> currentTargets, String attachFence) {
         try {
             verifyLeaseActiveInTx(job, RebuildPhase.SWITCHING_ALIAS);
         } catch (StaleRebuildLeaseException fenced) {
@@ -661,7 +673,7 @@ public class SearchRebuildService {
         }
         if (cacheInvalidator.isCacheEnabled()) {
             try {
-                cacheInvalidator.enterCutoverBypass(job.jobId() + ":" + job.candidatePhysicalIndex());
+                cacheInvalidator.enterCutoverBypass(cutoverBypassOwner(job));
             } catch (Exception bypassEx) {
                 String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
                 return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
@@ -686,6 +698,10 @@ public class SearchRebuildService {
                     StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         }
         if (postTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+            StepOutcome fenceHold = ensureAttachFenceDisarmedOrHold(job, attachFence);
+            if (fenceHold != null) {
+                return fenceHold;
+            }
             LOGGER.info("event=search_rebuild_alias_partial_repaired jobId={} alias={} target={}",
                     job.jobId(), job.aliasName(), job.candidatePhysicalIndex());
             return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
@@ -696,7 +712,7 @@ public class SearchRebuildService {
                 StepStatus.ALIAS_SWITCH_AMBIGUOUS);
     }
 
-    private StepOutcome repairEmptyAliasToCandidate(RebuildJobRecord job) {
+    private StepOutcome repairEmptyAliasToCandidate(RebuildJobRecord job, String attachFence) {
         try {
             verifyLeaseActiveInTx(job, RebuildPhase.SWITCHING_ALIAS);
         } catch (StaleRebuildLeaseException fenced) {
@@ -704,15 +720,43 @@ public class SearchRebuildService {
         }
         if (cacheInvalidator.isCacheEnabled()) {
             try {
-                cacheInvalidator.enterCutoverBypass(job.jobId() + ":" + job.candidatePhysicalIndex());
+                cacheInvalidator.enterCutoverBypass(cutoverBypassOwner(job));
             } catch (Exception bypassEx) {
                 String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
                 return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
                         StepStatus.ALIAS_SWITCH_AMBIGUOUS);
             }
         }
-        AliasSwitchResult addResult = indexAdminClient.switchAliasAtomically(
-                job.aliasName(), Set.of(), job.candidatePhysicalIndex());
+        Set<String> fenceTargets;
+        try {
+            fenceTargets = indexAdminClient.getAliasTargets(attachFence);
+        } catch (Exception fenceReadEx) {
+            String err = "ALIAS_EMPTY_REPAIR_FENCE_READ_FAILED:" + fenceReadEx.getMessage();
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
+        if (!fenceTargets.contains(job.candidatePhysicalIndex())) {
+            try {
+                Set<String> recheckTargets = indexAdminClient.getAliasTargets(job.aliasName());
+                if (recheckTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+                    StepOutcome fenceHold = ensureAttachFenceDisarmedOrHold(job, attachFence);
+                    if (fenceHold != null) {
+                        return fenceHold;
+                    }
+                    return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
+                }
+                String err = "ALIAS_EMPTY_REPAIR_FENCE_CONSUMED:fence=" + attachFence + ";targets=" + recheckTargets;
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                        StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+            } catch (Exception recheckEx) {
+                String err = "ALIAS_EMPTY_REPAIR_RECHECK_FAILED:" + recheckEx.getMessage();
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                        StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+            }
+        }
+
+        AliasSwitchResult addResult = indexAdminClient.switchAliasAtomicallyWithFence(
+                job.aliasName(), Set.of(), job.candidatePhysicalIndex(), attachFence);
         Set<String> postTargets;
         try {
             postTargets = indexAdminClient.getAliasTargets(job.aliasName());
@@ -722,12 +766,47 @@ public class SearchRebuildService {
                     StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         }
         if (postTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+            StepOutcome fenceHold = ensureAttachFenceDisarmedOrHold(job, attachFence);
+            if (fenceHold != null) {
+                return fenceHold;
+            }
             return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
         }
         String err = "ALIAS_EMPTY_REPAIR_INCOMPLETE:" + addResult.status() + ":" + addResult.detail()
                 + ";postTargets=" + postTargets;
         return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
                 StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+    }
+
+    private StepOutcome ensureAttachFenceDisarmedOrHold(RebuildJobRecord job, String attachFence) {
+        Set<String> fenceTargets;
+        try {
+            fenceTargets = indexAdminClient.getAliasTargets(attachFence);
+        } catch (Exception readEx) {
+            String err = "ALIAS_ATTACH_FENCE_VERIFY_FAILED:" + readEx.getMessage();
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
+        if (fenceTargets.isEmpty()) {
+            return null;
+        }
+        LOGGER.warn("event=search_rebuild_disarming_remaining_attach_fence jobId={} fence={} targets={}",
+                job.jobId(), attachFence, fenceTargets);
+        AliasSwitchResult disarm = indexAdminClient.removeAliasBindingsAtomically(attachFence, fenceTargets);
+        try {
+            Set<String> remaining = indexAdminClient.getAliasTargets(attachFence);
+            if (remaining.isEmpty()) {
+                return null;
+            }
+            String err = "ALIAS_ATTACH_FENCE_DISARM_INCOMPLETE:" + disarm.status() + ":" + disarm.detail()
+                    + ";remaining=" + remaining;
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        } catch (Exception verifyEx) {
+            String err = "ALIAS_ATTACH_FENCE_DISARM_VERIFY_FAILED:" + verifyEx.getMessage();
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
     }
 
     private StepOutcome activateCandidateAndAttemptCacheInvalidation(
@@ -775,15 +854,16 @@ public class SearchRebuildService {
             return leaseFencedOutcome(job, fenced);
         }
 
+        String bypassOwner = cutoverBypassOwner(job);
         Optional<IndexGenerationState> currentGen = consumerRepository.findGenerationState(job.aliasName());
         boolean alreadyCompensated = currentGen.isPresent()
                 && currentGen.get().activeGeneration() == job.candidateGeneration()
                 && currentGen.get().activeCacheInvalidationStatus() == CacheInvalidationStatus.DONE;
         try {
             if (alreadyCompensated) {
-                cacheInvalidator.clearCutoverBypass();
+                cacheInvalidator.clearCutoverBypassIfOwned(bypassOwner);
             } else {
-                cacheInvalidator.advanceEpochAndClearCutoverBypass();
+                cacheInvalidator.advanceEpochAndClearCutoverBypassIfOwned(bypassOwner);
             }
             transactionTemplate.executeWithoutResult(status -> {
                 long nowMs = clock.millis();
@@ -1229,15 +1309,19 @@ public class SearchRebuildService {
         return new StepOutcome(StepStatus.LEASE_LOST_FENCED, reload(job.jobId()), fenced.reason());
     }
 
-    private void clearCutoverBypassBestEffort(String jobId) {
+    private static String cutoverBypassOwner(RebuildJobRecord job) {
+        return SearchCacheInvalidator.cutoverBypassOwnerToken(job.aliasName(), job.candidateGeneration());
+    }
+
+    private void clearCutoverBypassBestEffort(String jobId, String expectedOwnerToken) {
         if (!cacheInvalidator.isCacheEnabled()) {
             return;
         }
         try {
-            cacheInvalidator.clearCutoverBypass();
+            cacheInvalidator.clearCutoverBypassIfOwned(expectedOwnerToken);
         } catch (Exception ex) {
-            LOGGER.warn("event=search_rebuild_cutover_bypass_clear_failed jobId={} error={}",
-                    jobId, ex.getMessage());
+            LOGGER.warn("event=search_rebuild_cutover_bypass_clear_failed jobId={} owner={} error={}",
+                    jobId, expectedOwnerToken, ex.getMessage());
         }
     }
 

@@ -5,10 +5,15 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
 
 @Component
 public class SearchCacheInvalidator {
+    private static final DefaultRedisScript<Long> COMPARE_AND_DELETE_SCRIPT = createCompareAndDeleteScript();
+
     private final StringRedisTemplate redisTemplate;
     private final String epochKey;
     private final String cutoverBypassKey;
@@ -31,6 +36,21 @@ public class SearchCacheInvalidator {
         return "knode:" + env + ":v1:search:cutover_bypass";
     }
 
+    /**
+     * Canonical cutover bypass owner token bound to a specific alias and monotonic target generation.
+     * Shared across rebuild cutover, pre-switch rollback, and background cache invalidation compensation
+     * so stale workers from an earlier generation can never delete a subsequent generation's bypass.
+     */
+    public static String cutoverBypassOwnerToken(String aliasName, long targetGeneration) {
+        if (aliasName == null || aliasName.isBlank()) {
+            throw new IllegalArgumentException("aliasName must be non-blank");
+        }
+        if (targetGeneration <= 0L) {
+            throw new IllegalArgumentException("targetGeneration must be positive");
+        }
+        return aliasName.trim() + ":g" + targetGeneration;
+    }
+
     public boolean isCacheEnabled() {
         return redisTemplate != null;
     }
@@ -44,24 +64,35 @@ public class SearchCacheInvalidator {
     }
 
     /**
-     * Enables durable cross-instance search cache bypass BEFORE ES alias cutover begins.
-     * Any query instance (including freshly restarted instances) seeing this marker skips
-     * stale pre-cutover Redis cache reads and writebacks and queries ES via the active alias
-     * directly until epoch invalidation succeeds and clears the marker.
+     * Enables durable cross-instance search cache bypass BEFORE ES alias cutover begins,
+     * tagged with the cutover owner token so only that cutover (or its compensation) may clear it.
      */
-    public void enterCutoverBypass(String marker) {
+    public void enterCutoverBypass(String ownerToken) {
         if (redisTemplate == null) {
             return;
         }
-        String value = (marker == null || marker.isBlank()) ? "1" : marker.trim();
-        redisTemplate.opsForValue().set(cutoverBypassKey, value);
+        if (ownerToken == null || ownerToken.isBlank()) {
+            throw new IllegalArgumentException("ownerToken must be non-blank");
+        }
+        redisTemplate.opsForValue().set(cutoverBypassKey, ownerToken.trim());
     }
 
-    public void clearCutoverBypass() {
+    /**
+     * Atomically verifies cutover_bypass value equals expectedOwnerToken and deletes it via Redis Lua EVAL.
+     * Returns true if the owned bypass marker was deleted, false if absent or owned by another cutover.
+     */
+    public boolean clearCutoverBypassIfOwned(String expectedOwnerToken) {
         if (redisTemplate == null) {
-            return;
+            return false;
         }
-        redisTemplate.delete(cutoverBypassKey);
+        if (expectedOwnerToken == null || expectedOwnerToken.isBlank()) {
+            throw new IllegalArgumentException("expectedOwnerToken must be non-blank");
+        }
+        Long removed = redisTemplate.execute(
+                COMPARE_AND_DELETE_SCRIPT,
+                List.of(cutoverBypassKey),
+                expectedOwnerToken.trim());
+        return removed != null && removed > 0L;
     }
 
     public long advanceEpoch() {
@@ -77,15 +108,22 @@ public class SearchCacheInvalidator {
 
     /**
      * Advances the search cache epoch via Redis INCR and ONLY clears the cutover bypass marker
-     * after INCR has succeeded. If INCR fails, the bypass marker remains set so all query
-     * instances continue isolating post-cutover reads from stale pre-cutover cache entries.
+     * after INCR has succeeded AND only if the bypass marker still belongs to expectedOwnerToken.
      */
-    public long advanceEpochAndClearCutoverBypass() {
+    public long advanceEpochAndClearCutoverBypassIfOwned(String expectedOwnerToken) {
         if (redisTemplate == null) {
             return 0L;
         }
         long next = advanceEpoch();
-        redisTemplate.delete(cutoverBypassKey);
+        clearCutoverBypassIfOwned(expectedOwnerToken);
         return next;
+    }
+
+    private static DefaultRedisScript<Long> createCompareAndDeleteScript() {
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>();
+        script.setScriptText(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end");
+        script.setResultType(Long.class);
+        return script;
     }
 }

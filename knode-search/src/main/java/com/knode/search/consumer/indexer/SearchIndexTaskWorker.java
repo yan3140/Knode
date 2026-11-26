@@ -271,18 +271,26 @@ public class SearchIndexTaskWorker {
                 }
             }
             for (SearchConsumerRepository.GenerationCacheCompensationCandidate gen : genCandidates) {
-                transactionTemplate.executeWithoutResult(status ->
+                Boolean done = transactionTemplate.execute(status ->
                         repository.markGenerationCacheInvalidationDone(gen.aliasName(), gen.activeGeneration(), nowMs));
-                completed++;
+                if (Boolean.TRUE.equals(done)) {
+                    completed++;
+                }
             }
             return new CacheCompensationSummary(totalCandidates, completed, 0);
         }
 
+        beforeExecutingCacheCompensation(candidates, genCandidates);
+
         try {
+            cacheInvalidator.advanceEpoch();
             if (!genCandidates.isEmpty()) {
-                cacheInvalidator.advanceEpochAndClearCutoverBypass();
-            } else {
-                cacheInvalidator.advanceEpoch();
+                afterCacheEpochAdvancedBeforeBypassClear(genCandidates);
+                for (SearchConsumerRepository.GenerationCacheCompensationCandidate gen : genCandidates) {
+                    String ownerToken = SearchCacheInvalidator.cutoverBypassOwnerToken(
+                            gen.aliasName(), gen.activeGeneration());
+                    cacheInvalidator.clearCutoverBypassIfOwned(ownerToken);
+                }
             }
         } catch (Exception cacheEx) {
             String err = "CACHE_COMPENSATION_" + cacheEx.getClass().getSimpleName();
@@ -304,7 +312,7 @@ public class SearchIndexTaskWorker {
                 }
             }
             for (SearchConsumerRepository.GenerationCacheCompensationCandidate gen : genCandidates) {
-                transactionTemplate.executeWithoutResult(status ->
+                Boolean updated = transactionTemplate.execute(status ->
                         repository.markGenerationCacheInvalidationRetry(
                                 gen.aliasName(),
                                 gen.activeGeneration(),
@@ -313,7 +321,9 @@ public class SearchIndexTaskWorker {
                                 indexerProps.getCacheCompensationBaseDelayMs(),
                                 indexerProps.getCacheCompensationMaxDelayMs(),
                                 nowMs));
-                rescheduled++;
+                if (Boolean.TRUE.equals(updated)) {
+                    rescheduled++;
+                }
             }
             return new CacheCompensationSummary(totalCandidates, 0, rescheduled);
         }
@@ -328,11 +338,24 @@ public class SearchIndexTaskWorker {
             }
         }
         for (SearchConsumerRepository.GenerationCacheCompensationCandidate gen : genCandidates) {
-            transactionTemplate.executeWithoutResult(status ->
+            Boolean done = transactionTemplate.execute(status ->
                     repository.markGenerationCacheInvalidationDone(gen.aliasName(), gen.activeGeneration(), nowMs));
-            completed++;
+            if (Boolean.TRUE.equals(done)) {
+                completed++;
+            }
         }
         return new CacheCompensationSummary(totalCandidates, completed, 0);
+    }
+
+    protected void beforeExecutingCacheCompensation(
+            List<SearchConsumerRepository.CacheCompensationCandidate> taskCandidates,
+            List<SearchConsumerRepository.GenerationCacheCompensationCandidate> generationCandidates) {
+        // Extension hook for concurrency/pause regression tests.
+    }
+
+    protected void afterCacheEpochAdvancedBeforeBypassClear(
+            List<SearchConsumerRepository.GenerationCacheCompensationCandidate> generationCandidates) {
+        // Extension hook for concurrency/pause regression tests.
     }
 
     public enum TaskProcessOutcome {

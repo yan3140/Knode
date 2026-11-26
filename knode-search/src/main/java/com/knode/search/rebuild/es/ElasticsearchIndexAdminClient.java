@@ -52,13 +52,22 @@ public class ElasticsearchIndexAdminClient implements SearchIndexAdminClient {
             throw new IllegalArgumentException("physicalIndex must be non-blank");
         }
         String index = physicalIndex.trim();
+        String fenceAlias = SearchIndexAdminClient.attachFenceAlias(index);
         try {
             boolean exists = elasticsearchClient.indices().exists(r -> r.index(index)).value();
             if (exists) {
+                if (getAliasTargets(fenceAlias).isEmpty()) {
+                    AliasSwitchResult arm = executeAliasActions(List.of(addAction(index, fenceAlias)));
+                    if (!arm.isAcknowledged()) {
+                        throw new IllegalStateException(
+                                "ES ensurePhysicalIndex failed to arm attach fence: " + arm.detail());
+                    }
+                }
                 return;
             }
             elasticsearchClient.indices().create(c -> c
                     .index(index)
+                    .aliases(fenceAlias, a -> a)
                     .mappings(m -> m
                             .properties("id", p -> p.long_(l -> l))
                             .properties("sourceRevision", p -> p.keyword(k -> k))
@@ -198,6 +207,50 @@ public class ElasticsearchIndexAdminClient implements SearchIndexAdminClient {
             }
         }
         actions.add(addAction(target, alias));
+        return executeAliasActions(actions);
+    }
+
+    @Override
+    public AliasSwitchResult switchAliasAtomicallyWithFence(
+            String aliasName,
+            Set<String> removeFromIndices,
+            String targetPhysicalIndex,
+            String attachFenceAlias) {
+        if (!StringUtils.hasText(aliasName) || !StringUtils.hasText(targetPhysicalIndex)) {
+            throw new IllegalArgumentException("aliasName and targetPhysicalIndex must be non-blank");
+        }
+        String alias = aliasName.trim();
+        String target = targetPhysicalIndex.trim();
+        String fence = StringUtils.hasText(attachFenceAlias) ? attachFenceAlias.trim() : null;
+
+        List<String> normalizedRemovals = new ArrayList<>();
+        if (removeFromIndices != null) {
+            for (String oldIndex : removeFromIndices) {
+                if (StringUtils.hasText(oldIndex) && !oldIndex.trim().equals(target)) {
+                    normalizedRemovals.add(oldIndex.trim());
+                }
+            }
+        }
+
+        List<Map<String, Object>> actions = new ArrayList<>();
+        if (normalizedRemovals.isEmpty()) {
+            // Empty-alias bootstrap or empty-alias repair MUST NEVER emit an unconditional bare add().
+            // Atomically consume the one-shot birth-certificate attach fence on targetPhysicalIndex via must_exist=true.
+            if (fence == null) {
+                throw new IllegalArgumentException(
+                        "attachFenceAlias is required when attaching an empty alias to " + target);
+            }
+            actions.add(removeActionWithMustExist(target, fence));
+            actions.add(addAction(target, alias));
+        } else {
+            for (String oldIndex : normalizedRemovals) {
+                actions.add(removeActionWithMustExist(oldIndex, alias));
+            }
+            actions.add(addAction(target, alias));
+            if (fence != null) {
+                actions.add(removeActionWithMustExist(target, fence));
+            }
+        }
         return executeAliasActions(actions);
     }
 

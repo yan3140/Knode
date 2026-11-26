@@ -203,6 +203,7 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
                             "{\"error\":{\"type\":\"resource_already_exists_exception\",\"reason\":\"index ["
                                     + index + "] already exists\"},\"status\":400}");
                 }
+                registerAliasesFromCreateIndexBody(index, req.body());
                 return StubResponse.ok("{\"acknowledged\":true,\"shards_acknowledged\":true,\"index\":\"" + index + "\"}");
             }
         }
@@ -231,6 +232,29 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
             return handleSearch(URLDecoder.decode(parts[1], StandardCharsets.UTF_8), query, req.body());
         }
         return StubResponse.status(404, "{\"error\":\"not_found\"}");
+    }
+
+    private void registerAliasesFromCreateIndexBody(String index, String body) {
+        if (body == null || body.isBlank()) {
+            return;
+        }
+        try {
+            JsonNode root = MAPPER.readTree(body);
+            JsonNode aliasesNode = root.get("aliases");
+            if (aliasesNode != null && aliasesNode.isObject()) {
+                synchronized (aliases) {
+                    var fields = aliasesNode.fields();
+                    while (fields.hasNext()) {
+                        String aliasName = fields.next().getKey();
+                        if (aliasName != null && !aliasName.isBlank()) {
+                            aliases.computeIfAbsent(aliasName, k -> new LinkedHashSet<>()).add(index);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Non-JSON or empty create body.
+        }
     }
 
     private StubResponse handleGetAlias(String alias) {

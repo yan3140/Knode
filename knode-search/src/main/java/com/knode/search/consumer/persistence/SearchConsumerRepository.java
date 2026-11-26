@@ -87,8 +87,8 @@ public class SearchConsumerRepository {
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
-    public void markGenerationCacheInvalidationDone(String aliasName, long expectedGeneration, long nowMs) {
-        jdbcTemplate.update(
+    public boolean markGenerationCacheInvalidationDone(String aliasName, long expectedGeneration, long nowMs) {
+        int updated = jdbcTemplate.update(
                 """
                 UPDATE search_index_generation
                 SET active_cache_invalidation_status = 'DONE',
@@ -103,9 +103,10 @@ public class SearchConsumerRepository {
                 aliasName,
                 expectedGeneration
         );
+        return updated == 1;
     }
 
-    public void markGenerationCacheInvalidationRetry(
+    public boolean markGenerationCacheInvalidationRetry(
             String aliasName,
             long expectedGeneration,
             int currentAttempts,
@@ -115,7 +116,7 @@ public class SearchConsumerRepository {
             long nowMs) {
         int nextAttempts = currentAttempts + 1;
         long delayMs = computeBackoffMs(nextAttempts, baseDelayMs, maxDelayMs);
-        jdbcTemplate.update(
+        int updated = jdbcTemplate.update(
                 """
                 UPDATE search_index_generation
                 SET active_cache_invalidation_attempts = ?,
@@ -133,6 +134,7 @@ public class SearchConsumerRepository {
                 aliasName,
                 expectedGeneration
         );
+        return updated == 1;
     }
 
     public List<GenerationCacheCompensationCandidate> findDueGenerationCacheInvalidations(long nowMs) {

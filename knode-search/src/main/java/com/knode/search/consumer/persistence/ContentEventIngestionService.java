@@ -232,19 +232,34 @@ public class ContentEventIngestionService {
                 throw new IllegalStateException(
                         "Cold-article visibility guard became active concurrently; retry ingestion");
             }
+            // Step 1: Verify authoritative sourceRevision is trustworthy and at least covers event.sourceRevision()
+            // BEFORE acting on visibility. A missing, invalid, or lagging authoritative revision (e.g., WITHDRAWN v6
+            // for an incoming PUBLIC v7) must roll back and remain retryable without XACK, inbox commit, or barrier update.
             Long authoritativeRev = parsePositiveLongOrNull(preflightDecision.sourceRevision());
+            if (authoritativeRev == null) {
+                throw new IllegalStateException(
+                        "Cold-article authoritative sourceRevision missing or invalid for article "
+                                + event.articleId() + " (visibility=" + preflightDecision.visibility()
+                                + ", decision=" + preflightDecision.decision() + ")");
+            }
+            if (authoritativeRev < event.sourceRevision()) {
+                throw new IllegalStateException(
+                        "Cold-article authoritative sourceRevision " + authoritativeRev
+                                + " behind event sourceRevision " + event.sourceRevision()
+                                + " for article " + event.articleId()
+                                + " (visibility=" + preflightDecision.visibility()
+                                + ", decision=" + preflightDecision.decision() + ")");
+            }
+            // Step 2: authoritativeRev >= event.sourceRevision() is confirmed.
             if (!preflightDecision.isReadablePublic()) {
-                long barrierRev = authoritativeRev != null
-                        ? Math.max(authoritativeRev, event.sourceRevision())
-                        : event.sourceRevision();
                 ArticleVisibility barrierVisibility = "WITHDRAWN".equalsIgnoreCase(preflightDecision.visibility())
                         ? ArticleVisibility.WITHDRAWN
                         : ArticleVisibility.DELETED;
-                repository.advanceVersionBarrierIfHigher(event.articleId(), barrierRev, barrierVisibility, nowMs);
+                repository.advanceVersionBarrierIfHigher(event.articleId(), authoritativeRev, barrierVisibility, nowMs);
                 ArticleProjectionRecord hiddenBarrierProj = new ArticleProjectionRecord(
                         event.articleId(),
                         true,
-                        barrierRev,
+                        authoritativeRev,
                         barrierVisibility,
                         current.counterRevision(),
                         current.viewCount(),
@@ -264,23 +279,12 @@ public class ContentEventIngestionService {
                 repository.updateInboxStatus(event.eventId(), "STALE_IGNORED", nowMs);
                 return IngestionOutcome.STALE_IGNORED;
             }
-            // Authoritative visibility is PUBLIC/READABLE: strictly verify sourceRevision equality!
-            if (authoritativeRev == null) {
-                throw new IllegalStateException(
-                        "Cold-article authoritative sourceRevision missing or invalid for article " + event.articleId());
-            }
+            // Step 3: Authoritative visibility is PUBLIC/READABLE with authoritativeRev >= event.sourceRevision().
             if (event.sourceRevision() < authoritativeRev) {
                 // Late stale public event: ignore without advancing projection or version barrier to authoritativeRev
                 // so the real authoritative revision event can still be admitted and indexed when it arrives.
                 repository.updateInboxStatus(event.eventId(), "STALE_IGNORED", nowMs);
                 return IngestionOutcome.STALE_IGNORED;
-            }
-            if (event.sourceRevision() > authoritativeRev) {
-                // Content authoritative view lags behind the incoming event: roll back tx and retry without XACK.
-                throw new IllegalStateException(
-                        "Cold-article authoritative sourceRevision " + authoritativeRev
-                                + " behind event sourceRevision " + event.sourceRevision()
-                                + " for article " + event.articleId());
             }
         }
 
