@@ -4,7 +4,8 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.Refresh;
 import co.elastic.clients.elasticsearch._types.VersionType;
-import co.elastic.clients.elasticsearch.core.GetResponse;
+import co.elastic.clients.elasticsearch.core.SearchResponse;
+import co.elastic.clients.elasticsearch.core.search.Hit;
 import co.elastic.clients.transport.rest5_client.low_level.ResponseException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -72,13 +73,13 @@ public class ElasticsearchArticleIndexWriter implements ArticleIndexWriter {
             return IndexWriteResult.applied();
         } catch (ElasticsearchException esEx) {
             if (esEx.status() == 409) {
-                return verifyConflict(docId, version, task.operation(), expectedDoc);
+                return verifyConflictOnSearchPath(docId, version, task.operation(), expectedDoc);
             }
             return IndexWriteResult.failed("ES_HTTP_" + esEx.status());
         } catch (ResponseException respEx) {
             int status = respEx.getResponse() == null ? 0 : respEx.getResponse().getStatusCode();
             if (status == 409) {
-                return verifyConflict(docId, version, task.operation(), expectedDoc);
+                return verifyConflictOnSearchPath(docId, version, task.operation(), expectedDoc);
             }
             return IndexWriteResult.failed("ES_HTTP_" + status);
         } catch (Exception ex) {
@@ -86,30 +87,49 @@ public class ElasticsearchArticleIndexWriter implements ArticleIndexWriter {
         }
     }
 
-    private IndexWriteResult verifyConflict(
+    /**
+     * Verifies a 409 conflict strictly on the refreshed target search path (POST /{index}/_search
+     * with ids query and version=true) instead of realtime GET, so unrefreshed writes remain retryable
+     * and never advance the search cache epoch prematurely.
+     */
+    private IndexWriteResult verifyConflictOnSearchPath(
             String docId,
             long expectedVersion,
             SearchIndexOperation operation,
             SearchIndexDocument expectedDoc) {
         try {
-            GetResponse<JsonNode> current = elasticsearchClient.get(req -> req
+            SearchResponse<JsonNode> response = elasticsearchClient.search(req -> req
                     .index(indexName)
-                    .id(docId), JsonNode.class);
-            if (!current.found() || current.version() == null) {
-                return IndexWriteResult.conflictUnverified("ES_409_DOC_NOT_FOUND_OR_NO_VERSION");
+                    .size(1)
+                    .version(true)
+                    .query(q -> q.ids(ids -> ids.values(docId))), JsonNode.class);
+            Hit<JsonNode> matchedHit = null;
+            if (response.hits() != null && response.hits().hits() != null) {
+                for (Hit<JsonNode> hit : response.hits().hits()) {
+                    if (hit != null && docId.equals(hit.id())) {
+                        matchedHit = hit;
+                        break;
+                    }
+                }
             }
-            long actualVersion = current.version();
-            if (actualVersion > expectedVersion) {
+            if (matchedHit == null) {
+                return IndexWriteResult.conflictUnverified("ES_409_NOT_YET_SEARCH_VISIBLE");
+            }
+            Long visibleVersion = matchedHit.version();
+            if (visibleVersion == null) {
+                return IndexWriteResult.conflictUnverified("ES_409_SEARCH_HIT_MISSING_VERSION");
+            }
+            if (visibleVersion > expectedVersion) {
                 return IndexWriteResult.superseded();
             }
-            if (actualVersion == expectedVersion) {
-                JsonNode source = current.source();
+            if (visibleVersion == expectedVersion) {
+                JsonNode source = matchedHit.source();
                 if (matchesExpectedDocument(source, operation, expectedDoc)) {
                     return IndexWriteResult.idempotentApplied();
                 }
                 return IndexWriteResult.conflictUnverified("ES_409_SAME_VERSION_CONTENT_MISMATCH");
             }
-            return IndexWriteResult.conflictUnverified("ES_409_LOWER_VERSION_OBSERVED:" + actualVersion);
+            return IndexWriteResult.conflictUnverified("ES_409_SEARCH_STALE_VERSION:" + visibleVersion);
         } catch (ElasticsearchException esEx) {
             return IndexWriteResult.conflictUnverified("ES_409_VERIFY_HTTP_" + esEx.status());
         } catch (ResponseException respEx) {

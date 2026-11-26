@@ -108,8 +108,14 @@ public final class LoopbackRedisStub implements AutoCloseable {
     public String addStreamMessage(String streamKey, Map<String, String> fields) {
         StreamState state = streams.computeIfAbsent(streamKey, k -> new StreamState());
         synchronized (state) {
-            long seq = ++state.sequence;
-            String id = System.currentTimeMillis() + "-" + seq;
+            long now = System.currentTimeMillis();
+            if (now > state.lastMs) {
+                state.lastMs = now;
+                state.lastSeq = 0L;
+            } else {
+                state.lastSeq++;
+            }
+            String id = state.lastMs + "-" + state.lastSeq;
             state.entries.add(new StreamEntry(id, new LinkedHashMap<>(fields)));
             return id;
         }
@@ -136,6 +142,35 @@ public final class LoopbackRedisStub implements AutoCloseable {
         }
     }
 
+    public List<String> pendingRecordIds(String streamKey, String groupName) {
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            return List.of();
+        }
+        synchronized (state) {
+            GroupState group = state.groups.get(groupName);
+            if (group == null) {
+                return List.of();
+            }
+            return List.copyOf(group.pending.keySet());
+        }
+    }
+
+    public String pendingConsumerOf(String streamKey, String groupName, String recordId) {
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            return null;
+        }
+        synchronized (state) {
+            GroupState group = state.groups.get(groupName);
+            if (group == null) {
+                return null;
+            }
+            PendingRecord rec = group.pending.get(recordId);
+            return rec == null ? null : rec.consumer;
+        }
+    }
+
     public void agePendingEntries(String streamKey, String groupName, long deltaMs) {
         StreamState state = streams.get(streamKey);
         if (state == null) {
@@ -145,6 +180,22 @@ public final class LoopbackRedisStub implements AutoCloseable {
             GroupState group = state.groups.get(groupName);
             if (group != null) {
                 for (PendingRecord rec : group.pending.values()) {
+                    rec.deliveredAtMs -= deltaMs;
+                }
+            }
+        }
+    }
+
+    public void agePendingEntry(String streamKey, String groupName, String recordId, long deltaMs) {
+        StreamState state = streams.get(streamKey);
+        if (state == null) {
+            return;
+        }
+        synchronized (state) {
+            GroupState group = state.groups.get(groupName);
+            if (group != null) {
+                PendingRecord rec = group.pending.get(recordId);
+                if (rec != null) {
                     rec.deliveredAtMs -= deltaMs;
                 }
             }
@@ -298,7 +349,6 @@ public final class LoopbackRedisStub implements AutoCloseable {
     }
 
     private void handleXReadGroup(List<String> args, OutputStream out) throws IOException {
-        // XREADGROUP GROUP <group> <consumer> [COUNT n] [BLOCK ms] STREAMS <stream> >
         int idx = 1;
         if (idx + 2 >= args.size() || !"GROUP".equalsIgnoreCase(args.get(idx))) {
             writeError(out, "ERR syntax error");
@@ -354,7 +404,6 @@ public final class LoopbackRedisStub implements AutoCloseable {
             writeNullArray(out);
             return;
         }
-        // RESP2 XREADGROUP: *1 [ *2 [ streamKey, *N [ *2 [ id, *2M [ f1, v1, ... ] ] ] ] ]
         writeArrayHeader(out, 1);
         writeArrayHeader(out, 2);
         writeBulkString(out, streamKey);
@@ -379,6 +428,8 @@ public final class LoopbackRedisStub implements AutoCloseable {
             writeError(out, "ERR syntax error in XPENDING");
             return;
         }
+        String startSpec = args.get(idx);
+        String endSpec = args.get(idx + 1);
         int count = Integer.parseInt(args.get(idx + 2));
 
         StreamState state = streams.get(streamKey);
@@ -394,7 +445,12 @@ public final class LoopbackRedisStub implements AutoCloseable {
                 return;
             }
             long now = System.currentTimeMillis();
-            for (PendingRecord rec : group.pending.values()) {
+            List<PendingRecord> sorted = new ArrayList<>(group.pending.values());
+            sorted.sort((a, b) -> compareStreamIds(a.id, b.id));
+            for (PendingRecord rec : sorted) {
+                if (!matchesLowerBound(rec.id, startSpec) || !matchesUpperBound(rec.id, endSpec)) {
+                    continue;
+                }
                 long idle = Math.max(0L, now - rec.deliveredAtMs);
                 if (minIdleFilter >= 0L && idle < minIdleFilter) {
                     continue;
@@ -415,8 +471,45 @@ public final class LoopbackRedisStub implements AutoCloseable {
         }
     }
 
+    private static boolean matchesLowerBound(String id, String startSpec) {
+        if (startSpec == null || "-".equals(startSpec)) {
+            return true;
+        }
+        if (startSpec.startsWith("(")) {
+            return compareStreamIds(id, startSpec.substring(1)) > 0;
+        }
+        return compareStreamIds(id, startSpec) >= 0;
+    }
+
+    private static boolean matchesUpperBound(String id, String endSpec) {
+        if (endSpec == null || "+".equals(endSpec)) {
+            return true;
+        }
+        if (endSpec.startsWith("(")) {
+            return compareStreamIds(id, endSpec.substring(1)) < 0;
+        }
+        return compareStreamIds(id, endSpec) <= 0;
+    }
+
+    private static int compareStreamIds(String a, String b) {
+        long[] pa = parseStreamId(a);
+        long[] pb = parseStreamId(b);
+        int cmp = Long.compareUnsigned(pa[0], pb[0]);
+        return cmp != 0 ? cmp : Long.compareUnsigned(pa[1], pb[1]);
+    }
+
+    private static long[] parseStreamId(String id) {
+        int dash = id.indexOf('-');
+        if (dash < 0) {
+            return new long[]{Long.parseUnsignedLong(id), 0L};
+        }
+        return new long[]{
+                Long.parseUnsignedLong(id.substring(0, dash)),
+                Long.parseUnsignedLong(id.substring(dash + 1))
+        };
+    }
+
     private void handleXClaim(List<String> args, OutputStream out) throws IOException {
-        // XCLAIM <stream> <group> <consumer> <min-idle-time> <id> [id ...]
         if (args.size() < 6) {
             writeError(out, "ERR wrong number of arguments for 'xclaim'");
             return;
@@ -689,7 +782,8 @@ public final class LoopbackRedisStub implements AutoCloseable {
     }
 
     private static final class StreamState {
-        long sequence = 0L;
+        long lastMs = 0L;
+        long lastSeq = 0L;
         final List<StreamEntry> entries = new ArrayList<>();
         final Map<String, GroupState> groups = new LinkedHashMap<>();
     }

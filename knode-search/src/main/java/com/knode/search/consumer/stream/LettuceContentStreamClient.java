@@ -15,6 +15,7 @@ import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import io.lettuce.core.models.stream.PendingMessage;
 import jakarta.annotation.PreDestroy;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -31,14 +32,19 @@ import java.util.UUID;
 @Component
 @ConditionalOnProperty(prefix = "knode.search.consumer.stream", name = "enabled", havingValue = "true")
 public class LettuceContentStreamClient implements ContentStreamClient, AutoCloseable {
+    private static final int MAX_PENDING_SCAN_PAGES = 4;
+
     private final String streamKey;
     private final String groupName;
     private final String consumerName;
     private final RedisURI redisUri;
     private final RedisClient redisClient;
     private final Object connectionLock = new Object();
+    private final Object pendingCursorLock = new Object();
     private StatefulRedisConnection<String, String> connection;
+    private String pendingCursor = "-";
 
+    @Autowired
     public LettuceContentStreamClient(
             SearchConsumerProperties properties,
             @Value("${knode.environment:local}") String environment) {
@@ -113,20 +119,49 @@ public class LettuceContentStreamClient implements ContentStreamClient, AutoClos
         int boundedBatch = Math.max(1, batchSize);
         long safeMinIdleMs = Math.max(0L, minIdleMs);
         RedisCommands<String, String> commands = commands();
-        List<PendingMessage> pending = commands.xpending(
-                streamKey,
-                groupName,
-                Range.unbounded(),
-                Limit.from(boundedBatch)
-        );
-        if (pending == null || pending.isEmpty()) {
-            return List.of();
-        }
+
         List<String> eligibleIds = new ArrayList<>();
-        for (PendingMessage item : pending) {
-            if (item != null && item.getId() != null && item.getMsSinceLastDelivery() >= safeMinIdleMs) {
-                eligibleIds.add(item.getId());
-                if (eligibleIds.size() >= boundedBatch) {
+        synchronized (pendingCursorLock) {
+            boolean wrappedToHead = false;
+            for (int page = 0; page < MAX_PENDING_SCAN_PAGES && eligibleIds.size() < boundedBatch; page++) {
+                String startCursor = this.pendingCursor;
+                Range<String> range = "-".equals(startCursor)
+                        ? Range.unbounded()
+                        : Range.from(Range.Boundary.including(startCursor), Range.Boundary.unbounded());
+                List<PendingMessage> pending = commands.xpending(
+                        streamKey,
+                        groupName,
+                        range,
+                        Limit.from(boundedBatch)
+                );
+                if (pending == null || pending.isEmpty()) {
+                    this.pendingCursor = "-";
+                    if (!"-".equals(startCursor) && !wrappedToHead) {
+                        wrappedToHead = true;
+                        continue;
+                    }
+                    break;
+                }
+                for (PendingMessage item : pending) {
+                    if (item != null && item.getId() != null && item.getMsSinceLastDelivery() >= safeMinIdleMs) {
+                        eligibleIds.add(item.getId());
+                        if (eligibleIds.size() >= boundedBatch) {
+                            break;
+                        }
+                    }
+                }
+                if (pending.size() < boundedBatch) {
+                    // Reached tail of PEL; wrap cursor back to head.
+                    this.pendingCursor = "-";
+                    if (eligibleIds.isEmpty() && !"-".equals(startCursor) && !wrappedToHead) {
+                        wrappedToHead = true;
+                        continue;
+                    }
+                    break;
+                }
+                String lastId = pending.get(pending.size() - 1).getId();
+                this.pendingCursor = nextStreamId(lastId);
+                if (!eligibleIds.isEmpty()) {
                     break;
                 }
             }
@@ -164,6 +199,29 @@ public class LettuceContentStreamClient implements ContentStreamClient, AutoClos
         }
         Long acked = commands().xack(streamKey, groupName, recordIds.toArray(String[]::new));
         return acked == null ? 0L : acked;
+    }
+
+    static String nextStreamId(String streamId) {
+        if (streamId == null || streamId.isBlank()) {
+            return "-";
+        }
+        int dash = streamId.indexOf('-');
+        if (dash <= 0 || dash >= streamId.length() - 1) {
+            return "-";
+        }
+        try {
+            long ms = Long.parseUnsignedLong(streamId.substring(0, dash));
+            long seq = Long.parseUnsignedLong(streamId.substring(dash + 1));
+            if (seq == -1L) {
+                if (ms == -1L) {
+                    return "-";
+                }
+                return Long.toUnsignedString(ms + 1L) + "-0";
+            }
+            return Long.toUnsignedString(ms) + "-" + Long.toUnsignedString(seq + 1L);
+        } catch (NumberFormatException ignored) {
+            return "-";
+        }
     }
 
     private RedisCommands<String, String> commands() {

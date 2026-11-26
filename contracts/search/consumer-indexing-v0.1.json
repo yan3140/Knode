@@ -3,7 +3,7 @@
   "version": "0.1-draft",
   "status": "candidate",
   "owner": "05-search (knode-search)",
-  "taskRef": "SEARCH-02",
+  "taskRef": "SEARCH-02 / SEARCH-02-R1",
   "description": "Independent content event consumption, dual-version article projection, durable index task worker with Elasticsearch external conditional versioning, and bounded search cache invalidation for knode-search.",
   "upstreamContracts": {
     "relay": "contracts/content/relay-v0.1.json",
@@ -32,6 +32,7 @@
     "consumerGroup": "knode-search-v1 (pre-provisioned by deployment or isolated test harness; never created by runtime code)",
     "consumerName": "Unique per instance (configurable, defaults to knode-search-<host>-<uuid8>)",
     "isolation": "Dedicated standalone Lettuce connection separate from search cache Redis; autoReconnect disabled with bounded connect/command timeouts and optional TLS.",
+    "pendingReclaim": "Bounded cursor scan over XPENDING <stream> <group> <cursor> + <batchSize> (advancing cursor to nextStreamId(lastId) across pages even when a head page has zero idle entries, bounded per poll, wrapping back to '-' at PEL tail), followed by XCLAIM enforcing minIdleMs.",
     "runtimeCommands": [
       "XREADGROUP",
       "XPENDING",
@@ -103,15 +104,16 @@
     },
     "claimAndFencing": "Short READ COMMITTED SQL transaction claims bounded due PENDING rows or expired LEASED rows (lease_until_ms <= now), assigning fresh lease_until_ms and monotonically incremented claim_generation. ES network I/O runs strictly outside SQL transactions. Completion, retry, and DEAD transitions conditionally require matching article_id, target_projection_revision, claim_generation, and status='LEASED'.",
     "conflict409Handling": {
-      "esVersionGreater": "Classified as SUPERSEDED; newer ES state preserved and stale task completed conditionally.",
-      "esVersionEqualAndExactMatch": "Verified via GET /{index}/_doc/{articleId}; classified as IDEMPOTENT_APPLIED (recovers ES-applied-but-SQL-mark-failed crash).",
-      "other409": "Classified as CONFLICT_UNVERIFIED; retained as visible failure and retried with bounded exponential backoff until DEAD."
+      "verificationPath": "POST /{index}/_search with ids query [articleId] and version=true (checks refreshed searchable index, never realtime GET, so unrefreshed writes never complete prematurely or advance cache epoch).",
+      "esVersionGreater": "Only after higher version is confirmed visible on the target search path: classified as SUPERSEDED; newer ES state preserved and stale task completed conditionally.",
+      "esVersionEqualAndExactMatch": "Only after exact same-version payload/tombstone is confirmed visible on the target search path: classified as IDEMPOTENT_APPLIED (recovers ES-applied-but-SQL-mark-failed or refresh-wait-timeout crashes).",
+      "unrefreshedOrOther409": "When the target search path still returns empty or a lower version (refresh lag), or content mismatches: classified as CONFLICT_UNVERIFIED; task remains retryable with backoff and cache epoch stays unchanged."
     },
     "retryExhaustion": "On reaching maxAttempts, task transitions to DEAD while preserving attempts, last_error, and full recoverable payload_json."
   },
   "cacheInvalidation": {
     "epochKey": "knode:<KNODE_ENVIRONMENT>:v1:search:epoch",
-    "mechanism": "After ES write succeeds with refresh visibility (wait_for/true), worker executes O(1) INCR on knode:<env>:v1:search:epoch (zero KEYS/SCAN). Public queries capture currentEpoch before querying ES, namespace result keys with ':e<epoch>', and re-verify epoch unchanged before writing to cache so concurrent slow queries cannot write stale results into the active cache epoch.",
+    "mechanism": "Only after ES new state is confirmed visible on the target search path (via refresh=wait_for/true or post-refresh 409 search-path verification), worker executes O(1) INCR on knode:<env>:v1:search:epoch (zero KEYS/SCAN). Public queries capture currentEpoch before querying ES, namespace result keys with ':e<epoch>', and re-verify epoch unchanged before writing to cache so concurrent slow queries cannot write stale results into the active cache epoch.",
     "compensation": "If Redis INCR fails, search_index_task retains cache_invalidation_status='PENDING' with bounded backoff due time and error detail; subsequent worker cycles retry INCR and conditionally mark DONE matching es_applied_revision."
   },
   "defaults": {
@@ -122,10 +124,11 @@
     "knode.search.consumer.indexer.worker-enabled": false
   },
   "verificationBoundary": {
-    "verifiedInSearch02": [
+    "verifiedInSearch02AndR1": [
+      "Real Spring Boot KnodeSearchApplication startup with consumer.enabled=true, stream.enabled=true, indexer.enabled=true using in-memory H2 + loopback Redis/ES stubs (proving container-managed LettuceContentStreamClient, ContentStreamConsumer, and SearchIndexTaskWorker bean wiring)",
       "H2 MySQL-mode execution of verbatim db/search-consumer-schema.sql with READ COMMITTED transactions",
-      "Real LettuceContentStreamClient against isolated loopback RESP Stream stub (XREADGROUP/XPENDING/XCLAIM/XACK)",
-      "Real ElasticsearchClient against stateful loopback ES 9 stub enforcing external version 409 conflicts",
+      "Real LettuceContentStreamClient against isolated loopback RESP Stream stub (XREADGROUP/XPENDING cursor scan across pages/XCLAIM/XACK)",
+      "Real ElasticsearchClient against stateful loopback ES 9 stub distinguishing written vs refreshed searchable state and enforcing external version 409 conflicts",
       "Real ArticleSearchCache and SearchCacheInvalidator against separate isolated loopback Redis stub",
       "Deterministic CountDownLatch concurrency proofs for stale worker fencing, late in-flight ES upsert/tombstone 409 rejection, and concurrent stale query anti-writeback",
       "All 14 SEARCH-01 regression tests with consumer disabled and no consumer database configured"
@@ -133,7 +136,7 @@
     "pendingIntegration": [
       "Native MySQL 8 / InnoDB DDL execution and locking query-plan verification",
       "Native Redis 7 ACL least-privilege + TLS verification for both Stream and Cache accounts",
-      "Native Elasticsearch 9 cluster external versioning and refresh=wait_for verification",
+      "Native Elasticsearch 9 cluster external versioning, refresh=wait_for, and search-path 409 recovery verification",
       "Live cross-service integration with knode-content Relay, knode-user, and Gateway",
       "Snapshot full rebuild, incremental cursor catch-up, and index alias switch (SEARCH-03)",
       "Admin search endpoints and SEARCH-OPS facade"
