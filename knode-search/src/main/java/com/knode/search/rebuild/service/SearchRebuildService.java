@@ -510,8 +510,26 @@ public class SearchRebuildService {
                     StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         }
 
-        // Case 1: ES alias ALREADY points solely to candidatePhysicalIndex -> ensure attach fence disarmed, then activate!
+        // Case 1: ES alias ALREADY points solely to candidatePhysicalIndex -> verify lease, atomically adopt/ensure
+        // attempt-scoped cutover_bypass (safely taking over any legacy R2 "<alias>:g<N>" token), disarm attach fence,
+        // then activate!
         if (currentTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+            try {
+                verifyLeaseActiveInTx(job, RebuildPhase.SWITCHING_ALIAS);
+            } catch (StaleRebuildLeaseException fenced) {
+                return leaseFencedOutcome(job, fenced);
+            }
+            if (cacheInvalidator.isCacheEnabled()) {
+                try {
+                    cacheInvalidator.enterCutoverBypass(
+                            bypassOwner, job.candidateGeneration(), effectiveSwitchAttempt(job));
+                } catch (Exception bypassEx) {
+                    String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
+                    LOGGER.warn("event=search_rebuild_cutover_bypass_failed jobId={} error={}", job.jobId(), err);
+                    return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                            StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+                }
+            }
             StepOutcome fenceHold = ensureAttachFenceDisarmedOrHold(job, attachFence);
             if (fenceHold != null) {
                 return fenceHold;
