@@ -6,9 +6,12 @@ public record VisibilityDecision(
         String visibility,
         String decision
 ) {
+    public boolean isReadablePublic() {
+        return "PUBLIC".equals(visibility) && "READABLE".equals(decision);
+    }
+
     public boolean isPublicReadableMatchingRevision(String expectedSourceRevision) {
-        return "PUBLIC".equals(visibility)
-                && "READABLE".equals(decision)
+        return isReadablePublic()
                 && sourceRevision != null
                 && expectedSourceRevision != null
                 && sourceRevision.equals(expectedSourceRevision);

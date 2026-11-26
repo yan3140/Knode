@@ -31,7 +31,7 @@ public class ElasticsearchArticleIndexWriter implements ArticleIndexWriter {
     );
 
     private final ElasticsearchClient elasticsearchClient;
-    private final String indexName;
+    private final String defaultIndexName;
     private final Refresh refreshPolicy;
     private final ObjectMapper objectMapper;
 
@@ -44,7 +44,7 @@ public class ElasticsearchArticleIndexWriter implements ArticleIndexWriter {
             throw new IllegalStateException("knode.search.elasticsearch.index must be configured");
         }
         this.elasticsearchClient = elasticsearchClient;
-        this.indexName = esProperties.getIndex().trim();
+        this.defaultIndexName = esProperties.getIndex().trim();
         this.refreshPolicy = resolveRefresh(consumerProperties.getIndexer().getRefreshPolicy());
         this.objectMapper = objectMapper;
     }
@@ -60,11 +60,14 @@ public class ElasticsearchArticleIndexWriter implements ArticleIndexWriter {
             return IndexWriteResult.failed("INVALID_STORED_PAYLOAD:" + ex.getClass().getSimpleName());
         }
 
+        String targetIndex = StringUtils.hasText(task.targetIndex())
+                ? task.targetIndex().trim()
+                : defaultIndexName;
         String docId = Long.toString(task.articleId());
         long version = task.targetProjectionRevision();
         try {
             elasticsearchClient.index(req -> req
-                    .index(indexName)
+                    .index(targetIndex)
                     .id(docId)
                     .version(version)
                     .versionType(VersionType.External)
@@ -73,13 +76,13 @@ public class ElasticsearchArticleIndexWriter implements ArticleIndexWriter {
             return IndexWriteResult.applied();
         } catch (ElasticsearchException esEx) {
             if (esEx.status() == 409) {
-                return verifyConflictOnSearchPath(docId, version, task.operation(), expectedDoc);
+                return verifyConflictOnSearchPath(targetIndex, docId, version, task.operation(), expectedDoc);
             }
             return IndexWriteResult.failed("ES_HTTP_" + esEx.status());
         } catch (ResponseException respEx) {
             int status = respEx.getResponse() == null ? 0 : respEx.getResponse().getStatusCode();
             if (status == 409) {
-                return verifyConflictOnSearchPath(docId, version, task.operation(), expectedDoc);
+                return verifyConflictOnSearchPath(targetIndex, docId, version, task.operation(), expectedDoc);
             }
             return IndexWriteResult.failed("ES_HTTP_" + status);
         } catch (Exception ex) {
@@ -88,18 +91,19 @@ public class ElasticsearchArticleIndexWriter implements ArticleIndexWriter {
     }
 
     /**
-     * Verifies a 409 conflict strictly on the refreshed target search path (POST /{index}/_search
+     * Verifies a 409 conflict strictly on the refreshed target search path (POST /{targetIndex}/_search
      * with ids query and version=true) instead of realtime GET, so unrefreshed writes remain retryable
      * and never advance the search cache epoch prematurely.
      */
     private IndexWriteResult verifyConflictOnSearchPath(
+            String targetIndex,
             String docId,
             long expectedVersion,
             SearchIndexOperation operation,
             SearchIndexDocument expectedDoc) {
         try {
             SearchResponse<JsonNode> response = elasticsearchClient.search(req -> req
-                    .index(indexName)
+                    .index(targetIndex)
                     .size(1)
                     .version(true)
                     .query(q -> q.ids(ids -> ids.values(docId))), JsonNode.class);

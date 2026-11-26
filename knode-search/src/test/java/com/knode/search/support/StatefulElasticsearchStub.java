@@ -15,6 +15,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -34,6 +35,8 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
     private final ExecutorService executor;
     private final Map<String, StoredDoc> writtenDocuments = new ConcurrentHashMap<>();
     private final Map<String, StoredDoc> refreshedDocuments = new ConcurrentHashMap<>();
+    private final Set<String> createdIndices = ConcurrentHashMap.newKeySet();
+    private final Map<String, Set<String>> aliases = new LinkedHashMap<>();
     private final List<RecordedRequest> requests = new CopyOnWriteArrayList<>();
     private final AtomicReference<BiFunction<RecordedRequest, Supplier<StubResponse>, StubResponse>> interceptor =
             new AtomicReference<>();
@@ -53,6 +56,38 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
 
     public void setAutoRefresh(boolean enabled) {
         this.autoRefresh = enabled;
+    }
+
+    public void createIndex(String index) {
+        createdIndices.add(index);
+    }
+
+    public boolean indexExists(String index) {
+        return createdIndices.contains(index);
+    }
+
+    public void setAlias(String alias, String... targetIndices) {
+        synchronized (aliases) {
+            Set<String> set = new LinkedHashSet<>();
+            for (String idx : targetIndices) {
+                if (idx != null && !idx.isBlank()) {
+                    createdIndices.add(idx);
+                    set.add(idx);
+                }
+            }
+            if (set.isEmpty()) {
+                aliases.remove(alias);
+            } else {
+                aliases.put(alias, set);
+            }
+        }
+    }
+
+    public Set<String> aliasTargets(String alias) {
+        synchronized (aliases) {
+            Set<String> targets = aliases.get(alias);
+            return targets == null ? Set.of() : Set.copyOf(targets);
+        }
     }
 
     public void refresh(String index) {
@@ -77,6 +112,10 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
         synchronized (writtenDocuments) {
             writtenDocuments.clear();
             refreshedDocuments.clear();
+        }
+        createdIndices.clear();
+        synchronized (aliases) {
+            aliases.clear();
         }
         requests.clear();
         interceptor.set(null);
@@ -120,9 +159,14 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
             }
         }
 
-        byte[] bytes = response.body().getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/vnd.elasticsearch+json; compatible-with=9");
         exchange.getResponseHeaders().set("X-Elastic-Product", "Elasticsearch");
+        if ("HEAD".equalsIgnoreCase(req.method())) {
+            exchange.sendResponseHeaders(response.status(), -1);
+            exchange.close();
+            return;
+        }
+        byte[] bytes = response.body().getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(response.status(), bytes.length);
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
@@ -132,10 +176,45 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
     private StubResponse dispatch(RecordedRequest req) {
         String[] parts = req.path().split("/");
         Map<String, String> query = parseQuery(req.query());
+
+        // POST /_aliases
+        if (parts.length == 2 && "_aliases".equals(parts[1]) && "POST".equalsIgnoreCase(req.method())) {
+            return handleUpdateAliases(req.body());
+        }
+        // GET /_alias/<alias>
+        if (parts.length == 3 && "_alias".equals(parts[1]) && "GET".equalsIgnoreCase(req.method())) {
+            return handleGetAlias(URLDecoder.decode(parts[2], StandardCharsets.UTF_8));
+        }
+        // HEAD /<index> or PUT /<index>
+        if (parts.length == 2 && !parts[1].startsWith("_")) {
+            String index = URLDecoder.decode(parts[1], StandardCharsets.UTF_8);
+            if ("HEAD".equalsIgnoreCase(req.method())) {
+                return createdIndices.contains(index)
+                        ? StubResponse.ok("")
+                        : StubResponse.status(404, "");
+            }
+            if ("PUT".equalsIgnoreCase(req.method())) {
+                if (!createdIndices.add(index)) {
+                    return StubResponse.status(400,
+                            "{\"error\":{\"type\":\"resource_already_exists_exception\",\"reason\":\"index ["
+                                    + index + "] already exists\"},\"status\":400}");
+                }
+                return StubResponse.ok("{\"acknowledged\":true,\"shards_acknowledged\":true,\"index\":\"" + index + "\"}");
+            }
+        }
+        // POST /<index>/_refresh
+        if (parts.length == 3 && "_refresh".equals(parts[2])
+                && ("POST".equalsIgnoreCase(req.method()) || "GET".equalsIgnoreCase(req.method()))) {
+            String index = URLDecoder.decode(parts[1], StandardCharsets.UTF_8);
+            for (String target : resolveTargets(index)) {
+                refresh(target);
+            }
+            return StubResponse.ok("{\"_shards\":{\"total\":1,\"successful\":1,\"failed\":0}}");
+        }
         // /<index>/_doc/<id>
         if (parts.length == 4 && "_doc".equals(parts[2])) {
-            String index = parts[1];
-            String id = parts[3];
+            String index = URLDecoder.decode(parts[1], StandardCharsets.UTF_8);
+            String id = URLDecoder.decode(parts[3], StandardCharsets.UTF_8);
             if ("PUT".equalsIgnoreCase(req.method())) {
                 return handleIndex(index, id, query, req.body());
             }
@@ -145,12 +224,82 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
         }
         // /<index>/_search
         if (parts.length == 3 && "_search".equals(parts[2]) && "POST".equalsIgnoreCase(req.method())) {
-            return handleSearch(parts[1], query, req.body());
+            return handleSearch(URLDecoder.decode(parts[1], StandardCharsets.UTF_8), query, req.body());
         }
         return StubResponse.status(404, "{\"error\":\"not_found\"}");
     }
 
+    private StubResponse handleGetAlias(String alias) {
+        Set<String> targets;
+        synchronized (aliases) {
+            Set<String> raw = aliases.get(alias);
+            targets = raw == null ? Set.of() : Set.copyOf(raw);
+        }
+        if (targets.isEmpty()) {
+            return StubResponse.status(404, "{\"error\":\"alias [" + alias + "] missing\",\"status\":404}");
+        }
+        ObjectNode root = MAPPER.createObjectNode();
+        for (String index : targets) {
+            ObjectNode idxNode = root.putObject(index);
+            ObjectNode aliasesNode = idxNode.putObject("aliases");
+            aliasesNode.putObject(alias);
+        }
+        try {
+            return StubResponse.ok(MAPPER.writeValueAsString(root));
+        } catch (Exception ex) {
+            return StubResponse.status(500, "{\"error\":\"alias_serialize_failure\"}");
+        }
+    }
+
+    private StubResponse handleUpdateAliases(String body) {
+        try {
+            JsonNode root = MAPPER.readTree(body);
+            JsonNode actions = root.path("actions");
+            if (!actions.isArray()) {
+                return StubResponse.status(400, "{\"error\":\"missing_actions\"}");
+            }
+            synchronized (aliases) {
+                for (JsonNode action : actions) {
+                    if (action.has("remove")) {
+                        JsonNode rem = action.get("remove");
+                        String alias = rem.path("alias").asText("");
+                        String index = rem.path("index").asText("");
+                        Set<String> current = aliases.get(alias);
+                        if (current != null) {
+                            current.remove(index);
+                            if (current.isEmpty()) {
+                                aliases.remove(alias);
+                            }
+                        }
+                    } else if (action.has("add")) {
+                        JsonNode add = action.get("add");
+                        String alias = add.path("alias").asText("");
+                        String index = add.path("index").asText("");
+                        if (!alias.isEmpty() && !index.isEmpty()) {
+                            createdIndices.add(index);
+                            aliases.computeIfAbsent(alias, k -> new LinkedHashSet<>()).add(index);
+                        }
+                    }
+                }
+            }
+            return StubResponse.ok("{\"acknowledged\":true}");
+        } catch (Exception ex) {
+            return StubResponse.status(500, "{\"error\":\"aliases_update_failure\"}");
+        }
+    }
+
+    private Set<String> resolveTargets(String indexOrAlias) {
+        synchronized (aliases) {
+            Set<String> targets = aliases.get(indexOrAlias);
+            if (targets != null && !targets.isEmpty()) {
+                return Set.copyOf(targets);
+            }
+        }
+        return Set.of(indexOrAlias);
+    }
+
     private StubResponse handleIndex(String index, String id, Map<String, String> query, String body) {
+        createdIndices.add(index);
         String key = index + "/" + id;
         String versionParam = query.get("version");
         String versionType = query.get("version_type");
@@ -200,12 +349,18 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
         return StubResponse.ok(okJson);
     }
 
-    private StubResponse handleSearch(String index, Map<String, String> queryParams, String body) {
+    private StubResponse handleSearch(String indexOrAlias, Map<String, String> queryParams, String body) {
         try {
+            Set<String> targetIndices = resolveTargets(indexOrAlias);
             JsonNode reqNode = MAPPER.readTree(body);
             boolean includeVersion = reqNode.path("version").asBoolean(false)
                     || "true".equalsIgnoreCase(queryParams.get("version"));
-            JsonNode idsNode = reqNode.path("query").path("ids").path("values");
+            int requestedSize = reqNode.has("size") && reqNode.get("size").isInt()
+                    ? reqNode.get("size").asInt()
+                    : 100;
+            JsonNode queryNode = reqNode.path("query");
+            JsonNode idsNode = queryNode.path("ids").path("values");
+            JsonNode termSearchableNode = queryNode.path("term").path("searchable");
 
             ObjectNode response = MAPPER.createObjectNode();
             response.put("took", 1);
@@ -228,24 +383,51 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
                     }
                 }
                 for (StoredDoc doc : refreshedDocuments.values()) {
-                    if (!doc.index().equals(index) || !wantedIds.contains(doc.id())) {
+                    if (!targetIndices.contains(doc.index()) || !wantedIds.contains(doc.id())) {
                         continue;
                     }
                     count++;
-                    ObjectNode hit = hitsArr.addObject();
-                    hit.put("_index", doc.index());
-                    hit.put("_id", doc.id());
-                    if (includeVersion) {
-                        hit.put("_version", doc.version());
+                    if (hitsArr.size() < requestedSize) {
+                        ObjectNode hit = hitsArr.addObject();
+                        hit.put("_index", doc.index());
+                        hit.put("_id", doc.id());
+                        if (includeVersion) {
+                            hit.put("_version", doc.version());
+                        }
+                        hit.put("_score", 1.0);
+                        hit.set("_source", MAPPER.readTree(doc.sourceJson()));
                     }
-                    hit.put("_score", 1.0);
-                    hit.set("_source", MAPPER.readTree(doc.sourceJson()));
+                }
+            } else if (!termSearchableNode.isMissingNode()) {
+                boolean expectedSearchable = termSearchableNode.isBoolean()
+                        ? termSearchableNode.asBoolean()
+                        : termSearchableNode.path("value").asBoolean(true);
+                for (StoredDoc doc : refreshedDocuments.values()) {
+                    if (!targetIndices.contains(doc.index())) {
+                        continue;
+                    }
+                    JsonNode src = MAPPER.readTree(doc.sourceJson());
+                    boolean docSearchable = src.has("searchable") && src.get("searchable").asBoolean(false);
+                    if (docSearchable != expectedSearchable) {
+                        continue;
+                    }
+                    count++;
+                    if (hitsArr.size() < requestedSize) {
+                        ObjectNode hit = hitsArr.addObject();
+                        hit.put("_index", doc.index());
+                        hit.put("_id", doc.id());
+                        if (includeVersion) {
+                            hit.put("_version", doc.version());
+                        }
+                        hit.put("_score", 1.0);
+                        hit.set("_source", src);
+                    }
                 }
             } else {
-                String keyword = reqNode.path("query").path("bool").path("must").get(0)
+                String keyword = queryNode.path("bool").path("must").get(0)
                         .path("multi_match").path("query").asText("").toLowerCase(Locale.ROOT);
                 for (StoredDoc doc : refreshedDocuments.values()) {
-                    if (!doc.index().equals(index)) {
+                    if (!targetIndices.contains(doc.index())) {
                         continue;
                     }
                     JsonNode src = MAPPER.readTree(doc.sourceJson());
@@ -261,14 +443,16 @@ public final class StatefulElasticsearchStub implements AutoCloseable {
                         continue;
                     }
                     count++;
-                    ObjectNode hit = hitsArr.addObject();
-                    hit.put("_index", doc.index());
-                    hit.put("_id", doc.id());
-                    if (includeVersion) {
-                        hit.put("_version", doc.version());
+                    if (hitsArr.size() < requestedSize) {
+                        ObjectNode hit = hitsArr.addObject();
+                        hit.put("_index", doc.index());
+                        hit.put("_id", doc.id());
+                        if (includeVersion) {
+                            hit.put("_version", doc.version());
+                        }
+                        hit.put("_score", 10.0);
+                        hit.set("_source", src);
                     }
-                    hit.put("_score", 10.0);
-                    hit.set("_source", src);
                 }
             }
 

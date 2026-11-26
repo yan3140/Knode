@@ -1,8 +1,10 @@
 package com.knode.search.consumer.config;
 
+import com.knode.search.rebuild.config.SearchRebuildProperties;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -19,13 +21,22 @@ import javax.sql.DataSource;
 import java.util.Locale;
 
 @Configuration
-@EnableConfigurationProperties(SearchConsumerProperties.class)
+@EnableConfigurationProperties({SearchConsumerProperties.class, SearchRebuildProperties.class})
 public class SearchConsumerRuntimeConfig {
 
     private final SearchConsumerProperties properties;
+    private final SearchRebuildProperties rebuildProperties;
+
+    @Autowired
+    public SearchConsumerRuntimeConfig(
+            SearchConsumerProperties properties,
+            SearchRebuildProperties rebuildProperties) {
+        this.properties = properties;
+        this.rebuildProperties = rebuildProperties == null ? new SearchRebuildProperties() : rebuildProperties;
+    }
 
     public SearchConsumerRuntimeConfig(SearchConsumerProperties properties) {
-        this.properties = properties;
+        this(properties, new SearchRebuildProperties());
     }
 
     @PostConstruct
@@ -33,9 +44,11 @@ public class SearchConsumerRuntimeConfig {
         SearchConsumerProperties.StreamProps stream = properties.getStream();
         SearchConsumerProperties.IndexerProps indexer = properties.getIndexer();
         if (!properties.isEnabled()) {
-            if (stream.isEnabled() || stream.isWorkerEnabled() || indexer.isEnabled() || indexer.isWorkerEnabled()) {
+            if (stream.isEnabled() || stream.isWorkerEnabled()
+                    || indexer.isEnabled() || indexer.isWorkerEnabled()
+                    || rebuildProperties.isEnabled() || rebuildProperties.isWorkerEnabled()) {
                 throw new IllegalStateException(
-                        "knode.search.consumer.stream and indexer cannot be enabled while knode.search.consumer.enabled is false");
+                        "knode.search.consumer.stream, indexer and rebuild cannot be enabled while knode.search.consumer.enabled is false");
             }
             return;
         }
@@ -44,6 +57,12 @@ public class SearchConsumerRuntimeConfig {
         }
         if (indexer.isWorkerEnabled() && !indexer.isEnabled()) {
             throw new IllegalStateException("knode.search.consumer.indexer.worker-enabled requires indexer.enabled=true");
+        }
+        if (rebuildProperties.isWorkerEnabled() && !rebuildProperties.isEnabled()) {
+            throw new IllegalStateException("knode.search.rebuild.worker-enabled requires rebuild.enabled=true");
+        }
+        if (rebuildProperties.isEnabled() && !indexer.isEnabled()) {
+            throw new IllegalStateException("knode.search.rebuild.enabled requires knode.search.consumer.indexer.enabled=true");
         }
         SearchConsumerProperties.DataSourceProps ds = properties.getDatasource();
         if (!StringUtils.hasText(ds.getUrl())) {
@@ -81,6 +100,23 @@ public class SearchConsumerRuntimeConfig {
                     : indexer.getRefreshPolicy().trim().toLowerCase(Locale.ROOT);
             if (!"wait_for".equals(refresh) && !"true".equals(refresh)) {
                 throw new IllegalStateException("knode.search.consumer.indexer.refresh-policy must be wait_for or true");
+            }
+        }
+        if (rebuildProperties.isEnabled()) {
+            if (rebuildProperties.getSnapshotPageSize() < 1 || rebuildProperties.getSnapshotPageSize() > 100) {
+                throw new IllegalStateException("knode.search.rebuild.snapshot-page-size must be in 1..100");
+            }
+            if (rebuildProperties.getChangeBatchLimit() < 1 || rebuildProperties.getChangeBatchLimit() > 100) {
+                throw new IllegalStateException("knode.search.rebuild.change-batch-limit must be in 1..100");
+            }
+            if (rebuildProperties.getJobLeaseSeconds() < 5 || rebuildProperties.getJobLeaseSeconds() > 600) {
+                throw new IllegalStateException("knode.search.rebuild.job-lease-seconds must be in 5..600");
+            }
+            if (rebuildProperties.getVerificationSampleSize() < 1 || rebuildProperties.getVerificationSampleSize() > 100) {
+                throw new IllegalStateException("knode.search.rebuild.verification-sample-size must be in 1..100");
+            }
+            if (rebuildProperties.getMaxSwitchAttempts() < 1 || rebuildProperties.getMaxSwitchAttempts() > 10) {
+                throw new IllegalStateException("knode.search.rebuild.max-switch-attempts must be in 1..10");
             }
         }
     }

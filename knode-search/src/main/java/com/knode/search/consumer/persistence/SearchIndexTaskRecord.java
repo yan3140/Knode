@@ -1,7 +1,9 @@
 package com.knode.search.consumer.persistence;
 
 public record SearchIndexTaskRecord(
+        long indexGeneration,
         long articleId,
+        String targetIndex,
         long targetProjectionRevision,
         SearchIndexOperation operation,
         String payloadJson,

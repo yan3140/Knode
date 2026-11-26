@@ -11,6 +11,7 @@ public class SearchClientsProperties {
     private long connectTimeoutMs = 500L;
     private long userTokenTimeoutMs = 800L;
     private long contentVisibilityTimeoutMs = 1000L;
+    private long contentSnapshotTimeoutMs = 15000L;
     private long tokenRefreshSkewSeconds = 10L;
 
     public String getUserOrigin() {
@@ -67,6 +68,14 @@ public class SearchClientsProperties {
 
     public void setContentVisibilityTimeoutMs(long contentVisibilityTimeoutMs) {
         this.contentVisibilityTimeoutMs = contentVisibilityTimeoutMs;
+    }
+
+    public long getContentSnapshotTimeoutMs() {
+        return contentSnapshotTimeoutMs;
+    }
+
+    public void setContentSnapshotTimeoutMs(long contentSnapshotTimeoutMs) {
+        this.contentSnapshotTimeoutMs = contentSnapshotTimeoutMs;
     }
 
     public long getTokenRefreshSkewSeconds() {

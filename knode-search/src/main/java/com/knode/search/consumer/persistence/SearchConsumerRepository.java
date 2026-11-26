@@ -21,6 +21,7 @@ import java.util.Optional;
 @Repository
 @ConditionalOnProperty(prefix = "knode.search.consumer", name = "enabled", havingValue = "true")
 public class SearchConsumerRepository {
+    public static final long DEFAULT_GENERATION = 1L;
     private static final TypeReference<List<String>> STRING_LIST_TYPE = new TypeReference<>() {
     };
 
@@ -33,6 +34,197 @@ public class SearchConsumerRepository {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
     }
+
+    // === Active Index Generation & Cutover Gate ===
+
+    public IndexGenerationState ensureAndLockGeneration(
+            String aliasName, String defaultPhysicalIndex, long nowMs) {
+        jdbcTemplate.update(
+                """
+                INSERT IGNORE INTO search_index_generation (
+                    alias_name, active_generation, active_physical_index,
+                    require_cold_visibility_guard, cutover_state,
+                    active_cache_invalidation_status, active_cache_invalidation_attempts,
+                    updated_at_ms
+                ) VALUES (?, 1, ?, 0, 'NORMAL', 'DONE', 0, ?)
+                """,
+                aliasName,
+                defaultPhysicalIndex,
+                nowMs
+        );
+        return jdbcTemplate.queryForObject(
+                """
+                SELECT alias_name, active_generation, active_physical_index,
+                       require_cold_visibility_guard, cutover_state, cutover_job_id,
+                       previous_generation, previous_physical_index,
+                       target_generation, target_physical_index, cutover_started_at_ms,
+                       active_cache_invalidation_status, active_cache_invalidation_attempts,
+                       active_cache_invalidation_due_at_ms, active_cache_last_error, updated_at_ms
+                FROM search_index_generation
+                WHERE alias_name = ?
+                FOR UPDATE
+                """,
+                generationRowMapper(),
+                aliasName
+        );
+    }
+
+    public Optional<IndexGenerationState> findGenerationState(String aliasName) {
+        List<IndexGenerationState> rows = jdbcTemplate.query(
+                """
+                SELECT alias_name, active_generation, active_physical_index,
+                       require_cold_visibility_guard, cutover_state, cutover_job_id,
+                       previous_generation, previous_physical_index,
+                       target_generation, target_physical_index, cutover_started_at_ms,
+                       active_cache_invalidation_status, active_cache_invalidation_attempts,
+                       active_cache_invalidation_due_at_ms, active_cache_last_error, updated_at_ms
+                FROM search_index_generation
+                WHERE alias_name = ?
+                """,
+                generationRowMapper(),
+                aliasName
+        );
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    public void markGenerationCacheInvalidationDone(String aliasName, long expectedGeneration, long nowMs) {
+        jdbcTemplate.update(
+                """
+                UPDATE search_index_generation
+                SET active_cache_invalidation_status = 'DONE',
+                    active_cache_invalidation_due_at_ms = NULL,
+                    active_cache_last_error = NULL,
+                    updated_at_ms = ?
+                WHERE alias_name = ?
+                  AND active_generation = ?
+                  AND active_cache_invalidation_status = 'PENDING'
+                """,
+                nowMs,
+                aliasName,
+                expectedGeneration
+        );
+    }
+
+    public void markGenerationCacheInvalidationRetry(
+            String aliasName,
+            long expectedGeneration,
+            int currentAttempts,
+            String errorMessage,
+            long baseDelayMs,
+            long maxDelayMs,
+            long nowMs) {
+        int nextAttempts = currentAttempts + 1;
+        long delayMs = computeBackoffMs(nextAttempts, baseDelayMs, maxDelayMs);
+        jdbcTemplate.update(
+                """
+                UPDATE search_index_generation
+                SET active_cache_invalidation_attempts = ?,
+                    active_cache_invalidation_due_at_ms = ?,
+                    active_cache_last_error = ?,
+                    updated_at_ms = ?
+                WHERE alias_name = ?
+                  AND active_generation = ?
+                  AND active_cache_invalidation_status = 'PENDING'
+                """,
+                nextAttempts,
+                nowMs + delayMs,
+                boundedError(errorMessage),
+                nowMs,
+                aliasName,
+                expectedGeneration
+        );
+    }
+
+    public List<GenerationCacheCompensationCandidate> findDueGenerationCacheInvalidations(long nowMs) {
+        return jdbcTemplate.query(
+                """
+                SELECT alias_name, active_generation, active_cache_invalidation_attempts
+                FROM search_index_generation
+                WHERE active_cache_invalidation_status = 'PENDING'
+                  AND active_cache_invalidation_due_at_ms IS NOT NULL
+                  AND active_cache_invalidation_due_at_ms <= ?
+                ORDER BY active_cache_invalidation_due_at_ms ASC
+                """,
+                (rs, rowNum) -> new GenerationCacheCompensationCandidate(
+                        rs.getString("alias_name"),
+                        rs.getLong("active_generation"),
+                        rs.getInt("active_cache_invalidation_attempts")
+                ),
+                nowMs
+        );
+    }
+
+    // === Cross-Generation Article Version Barrier ===
+
+    public Optional<ArticleVersionBarrier> findVersionBarrier(long articleId) {
+        List<ArticleVersionBarrier> rows = jdbcTemplate.query(
+                """
+                SELECT article_id, max_content_revision, last_visibility, updated_at_ms
+                FROM search_article_version_barrier
+                WHERE article_id = ?
+                """,
+                (rs, rowNum) -> new ArticleVersionBarrier(
+                        rs.getLong("article_id"),
+                        rs.getLong("max_content_revision"),
+                        ArticleVisibility.valueOf(rs.getString("last_visibility")),
+                        rs.getLong("updated_at_ms")
+                ),
+                articleId
+        );
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    public ArticleVersionBarrier ensureAndLockVersionBarrier(long articleId, long nowMs) {
+        jdbcTemplate.update(
+                """
+                INSERT IGNORE INTO search_article_version_barrier (
+                    article_id, max_content_revision, last_visibility, updated_at_ms
+                ) VALUES (?, 0, 'NONE', ?)
+                """,
+                articleId,
+                nowMs
+        );
+        return jdbcTemplate.queryForObject(
+                """
+                SELECT article_id, max_content_revision, last_visibility, updated_at_ms
+                FROM search_article_version_barrier
+                WHERE article_id = ?
+                FOR UPDATE
+                """,
+                (rs, rowNum) -> new ArticleVersionBarrier(
+                        rs.getLong("article_id"),
+                        rs.getLong("max_content_revision"),
+                        ArticleVisibility.valueOf(rs.getString("last_visibility")),
+                        rs.getLong("updated_at_ms")
+                ),
+                articleId
+        );
+    }
+
+    public void advanceVersionBarrierIfHigher(
+            long articleId, long contentRevision, ArticleVisibility visibility, long nowMs) {
+        ArticleVersionBarrier current = ensureAndLockVersionBarrier(articleId, nowMs);
+        if (contentRevision > current.maxContentRevision()
+                || (contentRevision == current.maxContentRevision()
+                && current.lastVisibility() != ArticleVisibility.DELETED
+                && (visibility == ArticleVisibility.DELETED || visibility == ArticleVisibility.WITHDRAWN))) {
+            jdbcTemplate.update(
+                    """
+                    UPDATE search_article_version_barrier
+                    SET max_content_revision = ?,
+                        last_visibility = ?,
+                        updated_at_ms = ?
+                    WHERE article_id = ?
+                    """,
+                    contentRevision,
+                    visibility.name(),
+                    nowMs,
+                    articleId
+            );
+        }
+    }
+
+    // === Active Stream Inbox & Failure Log ===
 
     public boolean insertInboxIfAbsent(ParsedContentEvent event, String streamRecordId, String status, long nowMs) {
         int rows = jdbcTemplate.update(
@@ -95,14 +287,21 @@ public class SearchConsumerRepository {
         return rows == 1;
     }
 
+    // === Generation-Scoped Article Projection ===
+
     public ArticleProjectionRecord ensureAndLockProjection(long articleId, long nowMs) {
+        return ensureAndLockProjection(DEFAULT_GENERATION, articleId, nowMs);
+    }
+
+    public ArticleProjectionRecord ensureAndLockProjection(long indexGeneration, long articleId, long nowMs) {
         jdbcTemplate.update(
                 """
                 INSERT IGNORE INTO search_article_projection (
-                    article_id, has_content, content_revision, visibility,
+                    index_generation, article_id, has_content, content_revision, visibility,
                     counter_revision, view_count, projection_revision, updated_at_ms
-                ) VALUES (?, 0, 0, 'NONE', 0, 0, 0, ?)
+                ) VALUES (?, ?, 0, 0, 'NONE', 0, 0, 0, ?)
                 """,
+                indexGeneration,
                 articleId,
                 nowMs
         );
@@ -113,15 +312,20 @@ public class SearchConsumerRepository {
                        title, summary, content, category_id, category_name,
                        tag_names_json, thumbnail, is_top, create_time_ms, updated_at_ms
                 FROM search_article_projection
-                WHERE article_id = ?
+                WHERE index_generation = ? AND article_id = ?
                 FOR UPDATE
                 """,
                 projectionRowMapper(),
+                indexGeneration,
                 articleId
         );
     }
 
     public Optional<ArticleProjectionRecord> findProjection(long articleId) {
+        return findProjection(DEFAULT_GENERATION, articleId);
+    }
+
+    public Optional<ArticleProjectionRecord> findProjection(long indexGeneration, long articleId) {
         List<ArticleProjectionRecord> rows = jdbcTemplate.query(
                 """
                 SELECT article_id, has_content, content_revision, visibility,
@@ -129,15 +333,20 @@ public class SearchConsumerRepository {
                        title, summary, content, category_id, category_name,
                        tag_names_json, thumbnail, is_top, create_time_ms, updated_at_ms
                 FROM search_article_projection
-                WHERE article_id = ?
+                WHERE index_generation = ? AND article_id = ?
                 """,
                 projectionRowMapper(),
+                indexGeneration,
                 articleId
         );
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
     public void updateProjection(ArticleProjectionRecord record) {
+        updateProjection(DEFAULT_GENERATION, record);
+    }
+
+    public void updateProjection(long indexGeneration, ArticleProjectionRecord record) {
         String tagNamesJson = serializeTagNames(record.tagNames());
         jdbcTemplate.update(
                 """
@@ -158,7 +367,7 @@ public class SearchConsumerRepository {
                     is_top = ?,
                     create_time_ms = ?,
                     updated_at_ms = ?
-                WHERE article_id = ?
+                WHERE index_generation = ? AND article_id = ?
                 """,
                 new Object[]{
                         record.hasContent() ? 1 : 0,
@@ -177,6 +386,7 @@ public class SearchConsumerRepository {
                         record.isTop(),
                         record.createTimeMs(),
                         record.updatedAtMs(),
+                        indexGeneration,
                         record.articleId()
                 },
                 new int[]{
@@ -196,10 +406,13 @@ public class SearchConsumerRepository {
                         Types.VARCHAR,
                         Types.BIGINT,
                         Types.BIGINT,
+                        Types.BIGINT,
                         Types.BIGINT
                 }
         );
     }
+
+    // === Generation-Scoped Index Tasks ===
 
     public void upsertPendingIndexTask(
             long articleId,
@@ -208,23 +421,40 @@ public class SearchConsumerRepository {
             String payloadJson,
             int maxAttempts,
             long nowMs) {
+        upsertPendingIndexTask(
+                DEFAULT_GENERATION, "", articleId, targetProjectionRevision, operation, payloadJson, maxAttempts, nowMs);
+    }
+
+    public void upsertPendingIndexTask(
+            long indexGeneration,
+            String targetIndex,
+            long articleId,
+            long targetProjectionRevision,
+            SearchIndexOperation operation,
+            String payloadJson,
+            int maxAttempts,
+            long nowMs) {
+        String safeTarget = targetIndex == null ? "" : targetIndex.trim();
         List<Long> existing = jdbcTemplate.query(
-                "SELECT article_id FROM search_index_task WHERE article_id = ? FOR UPDATE",
+                "SELECT article_id FROM search_index_task WHERE index_generation = ? AND article_id = ? FOR UPDATE",
                 (rs, rowNum) -> rs.getLong("article_id"),
+                indexGeneration,
                 articleId
         );
         if (existing.isEmpty()) {
             jdbcTemplate.update(
                     """
                     INSERT INTO search_index_task (
-                        article_id, target_projection_revision, operation, payload_json,
-                        status, attempts, max_attempts, due_at_ms, lease_until_ms,
-                        claim_generation, last_error, es_applied_revision,
+                        index_generation, article_id, target_index, target_projection_revision,
+                        operation, payload_json, status, attempts, max_attempts, due_at_ms,
+                        lease_until_ms, claim_generation, last_error, es_applied_revision,
                         cache_invalidation_status, cache_invalidation_attempts,
                         cache_invalidation_due_at_ms, cache_last_error, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, 'PENDING', 0, ?, ?, NULL, 0, NULL, 0, 'NONE', 0, NULL, NULL, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, NULL, 0, NULL, 0, 'NONE', 0, NULL, NULL, ?)
                     """,
+                    indexGeneration,
                     articleId,
+                    safeTarget,
                     targetProjectionRevision,
                     operation.name(),
                     payloadJson,
@@ -236,7 +466,8 @@ public class SearchConsumerRepository {
             jdbcTemplate.update(
                     """
                     UPDATE search_index_task
-                    SET target_projection_revision = ?,
+                    SET target_index = ?,
+                        target_projection_revision = ?,
                         operation = ?,
                         payload_json = ?,
                         status = 'PENDING',
@@ -246,47 +477,71 @@ public class SearchConsumerRepository {
                         lease_until_ms = NULL,
                         last_error = NULL,
                         updated_at_ms = ?
-                    WHERE article_id = ?
+                    WHERE index_generation = ? AND article_id = ?
                     """,
+                    safeTarget,
                     targetProjectionRevision,
                     operation.name(),
                     payloadJson,
                     maxAttempts,
                     nowMs,
                     nowMs,
+                    indexGeneration,
                     articleId
             );
         }
     }
 
     public Optional<SearchIndexTaskRecord> findIndexTask(long articleId) {
+        return findIndexTask(DEFAULT_GENERATION, articleId);
+    }
+
+    public Optional<SearchIndexTaskRecord> findIndexTask(long indexGeneration, long articleId) {
         List<SearchIndexTaskRecord> rows = jdbcTemplate.query(
                 """
-                SELECT article_id, target_projection_revision, operation, payload_json,
-                       status, attempts, max_attempts, due_at_ms, lease_until_ms,
-                       claim_generation, last_error, es_applied_revision,
+                SELECT index_generation, article_id, target_index, target_projection_revision,
+                       operation, payload_json, status, attempts, max_attempts, due_at_ms,
+                       lease_until_ms, claim_generation, last_error, es_applied_revision,
                        cache_invalidation_status, cache_invalidation_attempts,
                        cache_invalidation_due_at_ms, cache_last_error, updated_at_ms
                 FROM search_index_task
-                WHERE article_id = ?
+                WHERE index_generation = ? AND article_id = ?
                 """,
                 indexTaskRowMapper(),
+                indexGeneration,
                 articleId
         );
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
     public List<SearchIndexTaskRecord> claimDueTasksInCurrentTx(int batchSize, long leaseDurationMs, long nowMs) {
+        return claimDueTasksForGenerationInCurrentTx(DEFAULT_GENERATION, "", batchSize, leaseDurationMs, nowMs);
+    }
+
+    public List<SearchIndexTaskRecord> claimDueOnlineTasksInCurrentTx(
+            String aliasName, String defaultPhysicalIndex, int batchSize, long leaseDurationMs, long nowMs) {
+        IndexGenerationState gen = ensureAndLockGeneration(aliasName, defaultPhysicalIndex, nowMs);
+        if (!gen.isNormal()) {
+            return List.of();
+        }
+        return claimDueTasksForGenerationInCurrentTx(
+                gen.activeGeneration(), gen.activePhysicalIndex(), batchSize, leaseDurationMs, nowMs);
+    }
+
+    public List<SearchIndexTaskRecord> claimDueTasksForGenerationInCurrentTx(
+            long indexGeneration, String defaultTargetIndex, int batchSize, long leaseDurationMs, long nowMs) {
         List<Long> candidateIds = jdbcTemplate.query(
                 """
                 SELECT article_id
                 FROM search_index_task
-                WHERE (status = 'PENDING' AND due_at_ms <= ?)
-                   OR (status = 'LEASED' AND lease_until_ms <= ?)
+                WHERE index_generation = ?
+                  AND ((status = 'PENDING' AND due_at_ms <= ?)
+                    OR (status = 'LEASED' AND lease_until_ms <= ?))
                 ORDER BY due_at_ms ASC, article_id ASC
                 LIMIT ?
                 """,
                 (rs, rowNum) -> rs.getLong("article_id"),
+                indexGeneration,
                 nowMs,
                 nowMs,
                 Math.max(1, batchSize)
@@ -295,16 +550,17 @@ public class SearchConsumerRepository {
         for (Long articleId : candidateIds) {
             List<SearchIndexTaskRecord> locked = jdbcTemplate.query(
                     """
-                    SELECT article_id, target_projection_revision, operation, payload_json,
-                           status, attempts, max_attempts, due_at_ms, lease_until_ms,
-                           claim_generation, last_error, es_applied_revision,
+                    SELECT index_generation, article_id, target_index, target_projection_revision,
+                           operation, payload_json, status, attempts, max_attempts, due_at_ms,
+                           lease_until_ms, claim_generation, last_error, es_applied_revision,
                            cache_invalidation_status, cache_invalidation_attempts,
                            cache_invalidation_due_at_ms, cache_last_error, updated_at_ms
                     FROM search_index_task
-                    WHERE article_id = ?
+                    WHERE index_generation = ? AND article_id = ?
                     FOR UPDATE
                     """,
                     indexTaskRowMapper(),
+                    indexGeneration,
                     articleId
             );
             if (locked.isEmpty()) {
@@ -330,35 +586,44 @@ public class SearchConsumerRepository {
                             lease_until_ms = NULL,
                             last_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
                             updated_at_ms = ?
-                        WHERE article_id = ?
+                        WHERE index_generation = ? AND article_id = ?
                         """,
                         nextAttempts,
                         nowMs,
+                        indexGeneration,
                         articleId
                 );
                 continue;
             }
 
+            String boundTargetIndex = (current.targetIndex() != null && !current.targetIndex().isBlank())
+                    ? current.targetIndex()
+                    : (defaultTargetIndex == null ? "" : defaultTargetIndex.trim());
             long nextGeneration = current.claimGeneration() + 1L;
             long leaseUntilMs = nowMs + Math.max(1_000L, leaseDurationMs);
             jdbcTemplate.update(
                     """
                     UPDATE search_index_task
-                    SET status = 'LEASED',
+                    SET target_index = ?,
+                        status = 'LEASED',
                         attempts = ?,
                         lease_until_ms = ?,
                         claim_generation = ?,
                         updated_at_ms = ?
-                    WHERE article_id = ?
+                    WHERE index_generation = ? AND article_id = ?
                     """,
+                    boundTargetIndex,
                     nextAttempts,
                     leaseUntilMs,
                     nextGeneration,
                     nowMs,
+                    indexGeneration,
                     articleId
             );
             claimed.add(new SearchIndexTaskRecord(
+                    current.indexGeneration(),
                     current.articleId(),
+                    boundTargetIndex,
                     current.targetProjectionRevision(),
                     current.operation(),
                     current.payloadJson(),
@@ -381,6 +646,7 @@ public class SearchConsumerRepository {
     }
 
     public boolean markEsAppliedConditionally(
+            long indexGeneration,
             long articleId,
             long targetProjectionRevision,
             long claimGeneration,
@@ -405,7 +671,8 @@ public class SearchConsumerRepository {
                     cache_invalidation_due_at_ms = ?,
                     cache_last_error = NULL,
                     updated_at_ms = ?
-                WHERE article_id = ?
+                WHERE index_generation = ?
+                  AND article_id = ?
                   AND target_projection_revision = ?
                   AND claim_generation = ?
                   AND status = 'LEASED'
@@ -415,6 +682,7 @@ public class SearchConsumerRepository {
                 cacheStatus,
                 cacheDueAt,
                 nowMs,
+                indexGeneration,
                 articleId,
                 targetProjectionRevision,
                 claimGeneration
@@ -423,6 +691,7 @@ public class SearchConsumerRepository {
     }
 
     public boolean markSupersededConditionally(
+            long indexGeneration,
             long articleId,
             long targetProjectionRevision,
             long claimGeneration,
@@ -434,12 +703,14 @@ public class SearchConsumerRepository {
                     lease_until_ms = NULL,
                     last_error = NULL,
                     updated_at_ms = ?
-                WHERE article_id = ?
+                WHERE index_generation = ?
+                  AND article_id = ?
                   AND target_projection_revision = ?
                   AND claim_generation = ?
                   AND status = 'LEASED'
                 """,
                 nowMs,
+                indexGeneration,
                 articleId,
                 targetProjectionRevision,
                 claimGeneration
@@ -448,6 +719,7 @@ public class SearchConsumerRepository {
     }
 
     public boolean markRetryOrDeadConditionallyInCurrentTx(
+            long indexGeneration,
             long articleId,
             long targetProjectionRevision,
             long claimGeneration,
@@ -457,16 +729,17 @@ public class SearchConsumerRepository {
             long nowMs) {
         List<SearchIndexTaskRecord> locked = jdbcTemplate.query(
                 """
-                SELECT article_id, target_projection_revision, operation, payload_json,
-                       status, attempts, max_attempts, due_at_ms, lease_until_ms,
-                       claim_generation, last_error, es_applied_revision,
+                SELECT index_generation, article_id, target_index, target_projection_revision,
+                       operation, payload_json, status, attempts, max_attempts, due_at_ms,
+                       lease_until_ms, claim_generation, last_error, es_applied_revision,
                        cache_invalidation_status, cache_invalidation_attempts,
                        cache_invalidation_due_at_ms, cache_last_error, updated_at_ms
                 FROM search_index_task
-                WHERE article_id = ?
+                WHERE index_generation = ? AND article_id = ?
                 FOR UPDATE
                 """,
                 indexTaskRowMapper(),
+                indexGeneration,
                 articleId
         );
         if (locked.isEmpty()) {
@@ -489,7 +762,8 @@ public class SearchConsumerRepository {
                         lease_until_ms = NULL,
                         last_error = ?,
                         updated_at_ms = ?
-                    WHERE article_id = ?
+                    WHERE index_generation = ?
+                      AND article_id = ?
                       AND target_projection_revision = ?
                       AND claim_generation = ?
                       AND status = 'LEASED'
@@ -497,6 +771,7 @@ public class SearchConsumerRepository {
                     nextAttempts,
                     safeError,
                     nowMs,
+                    indexGeneration,
                     articleId,
                     targetProjectionRevision,
                     claimGeneration
@@ -513,7 +788,8 @@ public class SearchConsumerRepository {
                     lease_until_ms = NULL,
                     last_error = ?,
                     updated_at_ms = ?
-                WHERE article_id = ?
+                WHERE index_generation = ?
+                  AND article_id = ?
                   AND target_projection_revision = ?
                   AND claim_generation = ?
                   AND status = 'LEASED'
@@ -522,6 +798,7 @@ public class SearchConsumerRepository {
                 nowMs + delayMs,
                 safeError,
                 nowMs,
+                indexGeneration,
                 articleId,
                 targetProjectionRevision,
                 claimGeneration
@@ -530,6 +807,7 @@ public class SearchConsumerRepository {
     }
 
     public boolean markCacheInvalidationDoneConditionally(
+            long indexGeneration,
             long articleId,
             long expectedEsAppliedRevision,
             long nowMs) {
@@ -540,11 +818,13 @@ public class SearchConsumerRepository {
                     cache_invalidation_due_at_ms = NULL,
                     cache_last_error = NULL,
                     updated_at_ms = ?
-                WHERE article_id = ?
+                WHERE index_generation = ?
+                  AND article_id = ?
                   AND es_applied_revision = ?
                   AND cache_invalidation_status = 'PENDING'
                 """,
                 nowMs,
+                indexGeneration,
                 articleId,
                 expectedEsAppliedRevision
         );
@@ -552,6 +832,7 @@ public class SearchConsumerRepository {
     }
 
     public boolean markCacheInvalidationRetryConditionally(
+            long indexGeneration,
             long articleId,
             long expectedEsAppliedRevision,
             int currentAttempts,
@@ -568,7 +849,8 @@ public class SearchConsumerRepository {
                     cache_invalidation_due_at_ms = ?,
                     cache_last_error = ?,
                     updated_at_ms = ?
-                WHERE article_id = ?
+                WHERE index_generation = ?
+                  AND article_id = ?
                   AND es_applied_revision = ?
                   AND cache_invalidation_status = 'PENDING'
                 """,
@@ -576,6 +858,7 @@ public class SearchConsumerRepository {
                 nowMs + delayMs,
                 boundedError(errorMessage),
                 nowMs,
+                indexGeneration,
                 articleId,
                 expectedEsAppliedRevision
         );
@@ -585,21 +868,69 @@ public class SearchConsumerRepository {
     public List<CacheCompensationCandidate> findDueCacheInvalidations(int batchSize, long nowMs) {
         return jdbcTemplate.query(
                 """
-                SELECT article_id, es_applied_revision, cache_invalidation_attempts
+                SELECT index_generation, article_id, es_applied_revision, cache_invalidation_attempts
                 FROM search_index_task
                 WHERE cache_invalidation_status = 'PENDING'
                   AND cache_invalidation_due_at_ms IS NOT NULL
                   AND cache_invalidation_due_at_ms <= ?
-                ORDER BY cache_invalidation_due_at_ms ASC, article_id ASC
+                ORDER BY cache_invalidation_due_at_ms ASC, index_generation ASC, article_id ASC
                 LIMIT ?
                 """,
                 (rs, rowNum) -> new CacheCompensationCandidate(
+                        rs.getLong("index_generation"),
                         rs.getLong("article_id"),
                         rs.getLong("es_applied_revision"),
                         rs.getInt("cache_invalidation_attempts")
                 ),
                 nowMs,
                 Math.max(1, batchSize)
+        );
+    }
+
+    public long countIncompleteTasks(long indexGeneration) {
+        Long count = jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*)
+                FROM search_index_task
+                WHERE index_generation = ? AND status <> 'DONE'
+                """,
+                Long.class,
+                indexGeneration
+        );
+        return count == null ? 0L : count;
+    }
+
+    public long countDeadTasks(long indexGeneration) {
+        Long count = jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*)
+                FROM search_index_task
+                WHERE index_generation = ? AND status = 'DEAD'
+                """,
+                Long.class,
+                indexGeneration
+        );
+        return count == null ? 0L : count;
+    }
+
+    private RowMapper<IndexGenerationState> generationRowMapper() {
+        return (rs, rowNum) -> new IndexGenerationState(
+                rs.getString("alias_name"),
+                rs.getLong("active_generation"),
+                rs.getString("active_physical_index"),
+                rs.getInt("require_cold_visibility_guard") != 0,
+                IndexGenerationState.CutoverState.valueOf(rs.getString("cutover_state")),
+                rs.getString("cutover_job_id"),
+                nullableLong(rs, "previous_generation"),
+                rs.getString("previous_physical_index"),
+                nullableLong(rs, "target_generation"),
+                rs.getString("target_physical_index"),
+                nullableLong(rs, "cutover_started_at_ms"),
+                CacheInvalidationStatus.valueOf(rs.getString("active_cache_invalidation_status")),
+                rs.getInt("active_cache_invalidation_attempts"),
+                nullableLong(rs, "active_cache_invalidation_due_at_ms"),
+                rs.getString("active_cache_last_error"),
+                rs.getLong("updated_at_ms")
         );
     }
 
@@ -627,7 +958,9 @@ public class SearchConsumerRepository {
 
     private RowMapper<SearchIndexTaskRecord> indexTaskRowMapper() {
         return (rs, rowNum) -> new SearchIndexTaskRecord(
+                rs.getLong("index_generation"),
                 rs.getLong("article_id"),
+                rs.getString("target_index"),
                 rs.getLong("target_projection_revision"),
                 SearchIndexOperation.valueOf(rs.getString("operation")),
                 rs.getString("payload_json"),
@@ -691,6 +1024,11 @@ public class SearchConsumerRepository {
         return sanitized.length() > 500 ? sanitized.substring(0, 500) : sanitized;
     }
 
-    public record CacheCompensationCandidate(long articleId, long esAppliedRevision, int attempts) {
+    public record CacheCompensationCandidate(
+            long indexGeneration, long articleId, long esAppliedRevision, int attempts) {
+    }
+
+    public record GenerationCacheCompensationCandidate(
+            String aliasName, long activeGeneration, int attempts) {
     }
 }

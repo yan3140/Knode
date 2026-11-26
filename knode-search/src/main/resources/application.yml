@@ -69,6 +69,7 @@ knode:
       connect-timeout-ms: ${KNODE_SEARCH_CLIENT_CONNECT_TIMEOUT_MS:500}
       user-token-timeout-ms: ${KNODE_SEARCH_USER_TOKEN_TIMEOUT_MS:800}
       content-visibility-timeout-ms: ${KNODE_SEARCH_CONTENT_VISIBILITY_TIMEOUT_MS:1000}
+      content-snapshot-timeout-ms: ${KNODE_SEARCH_CONTENT_SNAPSHOT_TIMEOUT_MS:15000}
       token-refresh-skew-seconds: 10
     consumer:
       enabled: ${KNODE_SEARCH_CONSUMER_ENABLED:false}
@@ -111,3 +112,15 @@ knode:
         cache-compensation-batch-size: ${KNODE_SEARCH_CACHE_COMP_BATCH_SIZE:20}
         cache-compensation-base-delay-ms: ${KNODE_SEARCH_CACHE_COMP_BASE_DELAY_MS:1000}
         cache-compensation-max-delay-ms: ${KNODE_SEARCH_CACHE_COMP_MAX_DELAY_MS:30000}
+    rebuild:
+      enabled: ${KNODE_SEARCH_REBUILD_ENABLED:false}
+      worker-enabled: ${KNODE_SEARCH_REBUILD_WORKER_ENABLED:false}
+      instance-id: ${KNODE_SEARCH_REBUILD_INSTANCE_ID:}
+      snapshot-page-size: ${KNODE_SEARCH_REBUILD_SNAPSHOT_PAGE_SIZE:100}
+      change-batch-limit: ${KNODE_SEARCH_REBUILD_CHANGE_BATCH_LIMIT:100}
+      request-timeout-ms: ${KNODE_SEARCH_REBUILD_REQUEST_TIMEOUT_MS:20000}
+      job-lease-seconds: ${KNODE_SEARCH_REBUILD_JOB_LEASE_SECONDS:60}
+      verification-sample-size: ${KNODE_SEARCH_REBUILD_VERIFY_SAMPLE_SIZE:20}
+      poll-delay-ms: ${KNODE_SEARCH_REBUILD_POLL_DELAY_MS:2000}
+      max-switch-attempts: ${KNODE_SEARCH_REBUILD_MAX_SWITCH_ATTEMPTS:3}
+      max-candidate-index-drain-steps: ${KNODE_SEARCH_REBUILD_MAX_DRAIN_STEPS:100}

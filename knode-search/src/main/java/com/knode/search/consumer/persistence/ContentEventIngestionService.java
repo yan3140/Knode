@@ -1,43 +1,124 @@
 package com.knode.search.consumer.persistence;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.knode.search.client.CanonicalIdParser;
+import com.knode.search.client.ContentVisibilityClient;
+import com.knode.search.client.VisibilityDecision;
+import com.knode.search.config.SearchElasticsearchProperties;
 import com.knode.search.consumer.config.SearchConsumerProperties;
 import com.knode.search.consumer.event.ArticleVisibility;
 import com.knode.search.consumer.event.ContentEventParser;
 import com.knode.search.consumer.event.ParsedContentEvent;
 import com.knode.search.consumer.event.ProtocolFailure;
+import com.knode.search.model.QueryBudget;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.util.StringUtils;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Service
 @ConditionalOnProperty(prefix = "knode.search.consumer", name = "enabled", havingValue = "true")
 public class ContentEventIngestionService {
+    private static final long VISIBILITY_GUARD_BUDGET_MS = 3000L;
+
     private final ContentEventParser eventParser;
     private final SearchConsumerRepository repository;
     private final TransactionTemplate transactionTemplate;
     private final SearchConsumerProperties properties;
+    private final String aliasName;
+    private final String defaultPhysicalIndex;
+    private final ContentVisibilityClient visibilityClient;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
+    @Autowired
     public ContentEventIngestionService(
             ContentEventParser eventParser,
             SearchConsumerRepository repository,
             @Qualifier("searchConsumerTransactionTemplate") TransactionTemplate transactionTemplate,
             SearchConsumerProperties properties,
+            SearchElasticsearchProperties esProperties,
+            ObjectProvider<ContentVisibilityClient> visibilityClientProvider,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        this(
+                eventParser,
+                repository,
+                transactionTemplate,
+                properties,
+                esProperties != null && StringUtils.hasText(esProperties.getIndex())
+                        ? esProperties.getIndex().trim()
+                        : "knode_local_articles_search",
+                visibilityClientProvider == null ? null : visibilityClientProvider.getIfAvailable(),
+                objectMapper,
+                clock
+        );
+    }
+
+    public ContentEventIngestionService(
+            ContentEventParser eventParser,
+            SearchConsumerRepository repository,
+            TransactionTemplate transactionTemplate,
+            SearchConsumerProperties properties,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        this(eventParser, repository, transactionTemplate, properties, "default", "", null, objectMapper, clock);
+    }
+
+    public ContentEventIngestionService(
+            ContentEventParser eventParser,
+            SearchConsumerRepository repository,
+            TransactionTemplate transactionTemplate,
+            SearchConsumerProperties properties,
+            String aliasName,
+            ContentVisibilityClient visibilityClient,
             ObjectMapper objectMapper,
             Clock clock) {
         this.eventParser = eventParser;
         this.repository = repository;
         this.transactionTemplate = transactionTemplate;
         this.properties = properties;
+        this.aliasName = StringUtils.hasText(aliasName) ? aliasName.trim() : "knode_local_articles_search";
+        this.defaultPhysicalIndex = this.aliasName;
+        this.visibilityClient = visibilityClient;
         this.objectMapper = objectMapper;
         this.clock = clock;
+    }
+
+
+    private ContentEventIngestionService(
+            ContentEventParser eventParser,
+            SearchConsumerRepository repository,
+            TransactionTemplate transactionTemplate,
+            SearchConsumerProperties properties,
+            String aliasName,
+            String defaultPhysicalIndex,
+            ContentVisibilityClient visibilityClient,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        this.eventParser = eventParser;
+        this.repository = repository;
+        this.transactionTemplate = transactionTemplate;
+        this.properties = properties;
+        this.aliasName = aliasName;
+        this.defaultPhysicalIndex = defaultPhysicalIndex;
+        this.visibilityClient = visibilityClient;
+        this.objectMapper = objectMapper;
+        this.clock = clock;
+    }
+
+    public boolean isCutoverPaused() {
+        Optional<IndexGenerationState> state = repository.findGenerationState(aliasName);
+        return state.isPresent() && !state.get().isNormal();
     }
 
     public IngestionOutcome ingestStreamMessage(String streamRecordId, Map<String, String> streamFields) {
@@ -57,8 +138,19 @@ public class ContentEventIngestionService {
     }
 
     public IngestionOutcome ingestParsedEvent(String streamRecordId, ParsedContentEvent event) {
+        VisibilityDecision preflightDecision = null;
+        if (event instanceof ParsedContentEvent.PublicArticleEvent publicEvent) {
+            preflightDecision = checkColdArticleVisibilityOutsideTxIfNeeded(publicEvent);
+        }
+        final VisibilityDecision resolvedDecision = preflightDecision;
+
         return transactionTemplate.execute(status -> {
             long nowMs = clock.millis();
+            IndexGenerationState generation = repository.ensureAndLockGeneration(aliasName, defaultPhysicalIndex, nowMs);
+            if (!generation.isNormal()) {
+                throw new CutoverPausedException(aliasName, generation.cutoverState());
+            }
+
             String initialInboxStatus = (event instanceof ParsedContentEvent.IgnoredNonSearchEvent)
                     ? "IGNORED"
                     : "PROCESSING";
@@ -70,23 +162,109 @@ public class ContentEventIngestionService {
                 return IngestionOutcome.IGNORED_NON_SEARCH;
             }
             if (event instanceof ParsedContentEvent.PublicArticleEvent publicEvent) {
-                return applyPublicArticle(publicEvent, nowMs);
+                return applyPublicArticle(generation, publicEvent, resolvedDecision, nowMs);
             }
             if (event instanceof ParsedContentEvent.HiddenArticleEvent hiddenEvent) {
-                return applyHiddenArticle(hiddenEvent, nowMs);
+                return applyHiddenArticle(generation, hiddenEvent, nowMs);
             }
             if (event instanceof ParsedContentEvent.CounterChangedEvent counterEvent) {
-                return applyCounterChanged(counterEvent, nowMs);
+                return applyCounterChanged(generation, counterEvent, nowMs);
             }
             throw new IllegalStateException("Unhandled event subtype: " + event.getClass().getName());
         });
     }
 
-    private IngestionOutcome applyPublicArticle(ParsedContentEvent.PublicArticleEvent event, long nowMs) {
-        ArticleProjectionRecord current = repository.ensureAndLockProjection(event.articleId(), nowMs);
-        if (event.sourceRevision() <= current.contentRevision()) {
+    private VisibilityDecision checkColdArticleVisibilityOutsideTxIfNeeded(
+            ParsedContentEvent.PublicArticleEvent publicEvent) {
+        Optional<IndexGenerationState> maybeGen = repository.findGenerationState(aliasName);
+        if (maybeGen.isEmpty() || !maybeGen.get().requireColdVisibilityGuard()) {
+            return null;
+        }
+        IndexGenerationState gen = maybeGen.get();
+        if (!gen.isNormal()) {
+            throw new CutoverPausedException(aliasName, gen.cutoverState());
+        }
+        if (repository.findInboxStatus(publicEvent.eventId()).isPresent()) {
+            return null;
+        }
+        Optional<ArticleProjectionRecord> existingProj =
+                repository.findProjection(gen.activeGeneration(), publicEvent.articleId());
+        if (existingProj.isPresent() && existingProj.get().hasContent()) {
+            return null;
+        }
+        Optional<ArticleVersionBarrier> barrier = repository.findVersionBarrier(publicEvent.articleId());
+        if (barrier.isPresent() && barrier.get().maxContentRevision() >= publicEvent.sourceRevision()) {
+            return null;
+        }
+        if (visibilityClient == null) {
+            throw new IllegalStateException(
+                    "ContentVisibilityClient is required when post-rebuild cold-article visibility guard is active");
+        }
+        String idStr = Long.toString(publicEvent.articleId());
+        Map<String, VisibilityDecision> decisions = visibilityClient.checkPublicSearch(
+                List.of(idStr),
+                QueryBudget.start(Duration.ofMillis(VISIBILITY_GUARD_BUDGET_MS)),
+                "search-cold-guard-" + publicEvent.eventId()
+        );
+        VisibilityDecision decision = decisions == null ? null : decisions.get(idStr);
+        if (decision == null) {
+            throw new IllegalStateException("Content visibility guard returned missing decision for article " + idStr);
+        }
+        return decision;
+    }
+
+    private IngestionOutcome applyPublicArticle(
+            IndexGenerationState generation,
+            ParsedContentEvent.PublicArticleEvent event,
+            VisibilityDecision preflightDecision,
+            long nowMs) {
+        long gen = generation.activeGeneration();
+        ArticleVersionBarrier barrier = repository.ensureAndLockVersionBarrier(event.articleId(), nowMs);
+        ArticleProjectionRecord current = repository.ensureAndLockProjection(gen, event.articleId(), nowMs);
+
+        long effectiveFloor = Math.max(current.contentRevision(), barrier.maxContentRevision());
+        if (event.sourceRevision() <= effectiveFloor) {
             repository.updateInboxStatus(event.eventId(), "STALE_IGNORED", nowMs);
             return IngestionOutcome.STALE_IGNORED;
+        }
+
+        if (generation.requireColdVisibilityGuard() && !current.hasContent()) {
+            if (preflightDecision == null) {
+                throw new IllegalStateException(
+                        "Cold-article visibility guard became active concurrently; retry ingestion");
+            }
+            if (!preflightDecision.isReadablePublic()) {
+                Long authoritativeRev = parsePositiveLongOrNull(preflightDecision.sourceRevision());
+                long barrierRev = authoritativeRev != null
+                        ? Math.max(authoritativeRev, event.sourceRevision())
+                        : event.sourceRevision();
+                ArticleVisibility barrierVisibility = "WITHDRAWN".equalsIgnoreCase(preflightDecision.visibility())
+                        ? ArticleVisibility.WITHDRAWN
+                        : ArticleVisibility.DELETED;
+                repository.advanceVersionBarrierIfHigher(event.articleId(), barrierRev, barrierVisibility, nowMs);
+                ArticleProjectionRecord hiddenBarrierProj = new ArticleProjectionRecord(
+                        event.articleId(),
+                        true,
+                        barrierRev,
+                        barrierVisibility,
+                        current.counterRevision(),
+                        current.viewCount(),
+                        current.projectionRevision(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        List.of(),
+                        null,
+                        null,
+                        current.createTimeMs(),
+                        nowMs
+                );
+                repository.updateProjection(gen, hiddenBarrierProj);
+                repository.updateInboxStatus(event.eventId(), "STALE_IGNORED", nowMs);
+                return IngestionOutcome.STALE_IGNORED;
+            }
         }
 
         long mergedCounterRevision;
@@ -122,7 +300,8 @@ public class ContentEventIngestionService {
                 event.createTimeMs(),
                 nowMs
         );
-        repository.updateProjection(updated);
+        repository.updateProjection(gen, updated);
+        repository.advanceVersionBarrierIfHigher(event.articleId(), event.sourceRevision(), ArticleVisibility.PUBLIC, nowMs);
 
         SearchIndexDocument doc = SearchIndexDocument.upsert(
                 updated.articleId(),
@@ -138,6 +317,8 @@ public class ContentEventIngestionService {
                 updated.createTimeMs()
         );
         repository.upsertPendingIndexTask(
+                gen,
+                generation.activePhysicalIndex(),
                 updated.articleId(),
                 nextProjectionRevision,
                 SearchIndexOperation.UPSERT,
@@ -149,9 +330,16 @@ public class ContentEventIngestionService {
         return IngestionOutcome.APPLIED;
     }
 
-    private IngestionOutcome applyHiddenArticle(ParsedContentEvent.HiddenArticleEvent event, long nowMs) {
-        ArticleProjectionRecord current = repository.ensureAndLockProjection(event.articleId(), nowMs);
-        if (event.sourceRevision() <= current.contentRevision()) {
+    private IngestionOutcome applyHiddenArticle(
+            IndexGenerationState generation,
+            ParsedContentEvent.HiddenArticleEvent event,
+            long nowMs) {
+        long gen = generation.activeGeneration();
+        ArticleVersionBarrier barrier = repository.ensureAndLockVersionBarrier(event.articleId(), nowMs);
+        ArticleProjectionRecord current = repository.ensureAndLockProjection(gen, event.articleId(), nowMs);
+
+        long effectiveFloor = Math.max(current.contentRevision(), barrier.maxContentRevision());
+        if (event.sourceRevision() <= effectiveFloor) {
             repository.updateInboxStatus(event.eventId(), "STALE_IGNORED", nowMs);
             return IngestionOutcome.STALE_IGNORED;
         }
@@ -176,13 +364,16 @@ public class ContentEventIngestionService {
                 current.createTimeMs(),
                 nowMs
         );
-        repository.updateProjection(updated);
+        repository.updateProjection(gen, updated);
+        repository.advanceVersionBarrierIfHigher(event.articleId(), event.sourceRevision(), event.visibility(), nowMs);
 
         SearchIndexDocument tombstone = SearchIndexDocument.tombstone(
                 updated.articleId(),
                 updated.contentRevision()
         );
         repository.upsertPendingIndexTask(
+                gen,
+                generation.activePhysicalIndex(),
                 updated.articleId(),
                 nextProjectionRevision,
                 SearchIndexOperation.TOMBSTONE,
@@ -194,8 +385,12 @@ public class ContentEventIngestionService {
         return IngestionOutcome.APPLIED;
     }
 
-    private IngestionOutcome applyCounterChanged(ParsedContentEvent.CounterChangedEvent event, long nowMs) {
-        ArticleProjectionRecord current = repository.ensureAndLockProjection(event.articleId(), nowMs);
+    private IngestionOutcome applyCounterChanged(
+            IndexGenerationState generation,
+            ParsedContentEvent.CounterChangedEvent event,
+            long nowMs) {
+        long gen = generation.activeGeneration();
+        ArticleProjectionRecord current = repository.ensureAndLockProjection(gen, event.articleId(), nowMs);
         if (event.counterRevision() <= current.counterRevision()) {
             repository.updateInboxStatus(event.eventId(), "STALE_IGNORED", nowMs);
             return IngestionOutcome.STALE_IGNORED;
@@ -225,7 +420,7 @@ public class ContentEventIngestionService {
                 current.createTimeMs(),
                 nowMs
         );
-        repository.updateProjection(updated);
+        repository.updateProjection(gen, updated);
 
         if (searchableNow) {
             SearchIndexDocument doc = SearchIndexDocument.upsert(
@@ -242,6 +437,8 @@ public class ContentEventIngestionService {
                     updated.createTimeMs()
             );
             repository.upsertPendingIndexTask(
+                    gen,
+                    generation.activePhysicalIndex(),
                     updated.articleId(),
                     nextProjectionRevision,
                     SearchIndexOperation.UPSERT,
@@ -260,6 +457,11 @@ public class ContentEventIngestionService {
         } catch (Exception ex) {
             throw new IllegalStateException("Failed to serialize SearchIndexDocument", ex);
         }
+    }
+
+    private static Long parsePositiveLongOrNull(String raw) {
+        String normalized = CanonicalIdParser.normalizePositiveDecimalString(raw);
+        return normalized == null ? null : Long.parseLong(normalized);
     }
 
     public enum IngestionOutcome {
