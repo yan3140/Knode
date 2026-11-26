@@ -2,8 +2,11 @@ package com.knode.search.rebuild;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.knode.search.consumer.event.ArticleVisibility;
+import com.knode.search.cache.SearchCacheInvalidator;
 import com.knode.search.consumer.persistence.ArticleProjectionRecord;
 import com.knode.search.consumer.persistence.ArticleVersionBarrier;
+import com.knode.search.consumer.persistence.CacheInvalidationStatus;
+import com.knode.search.consumer.persistence.IndexGenerationState;
 import com.knode.search.consumer.persistence.SearchConsumerRepository;
 import com.knode.search.consumer.persistence.SearchIndexTaskRecord;
 import com.knode.search.rebuild.persistence.RebuildJobRecord;
@@ -271,6 +274,140 @@ class SearchRebuildSchemaUpgradeTest {
                     "rb-existing-03", "inst-new", 30_000L, 1700000010000L)).orElseThrow();
             assertThat(leased.leaseOwner()).isEqualTo("inst-new");
             assertThat(leased.leaseGeneration()).isEqualTo(1L);
+        }
+    }
+
+    @Test
+    void upgradesSearch03R2SchemaToSearch03R3PreservingPendingGenerationCacheInvalidation() {
+        String dbName = "search_upgrade_r3_" + UUID.randomUUID().toString().replace("-", "");
+        HikariConfig hc = new HikariConfig();
+        hc.setJdbcUrl("jdbc:h2:mem:" + dbName + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1");
+        hc.setDriverClassName("org.h2.Driver");
+        hc.setUsername("sa");
+        hc.setPassword("");
+
+        try (HikariDataSource ds = new HikariDataSource(hc)) {
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+
+            // 1) Bootstrap SEARCH-03-R1/R2 schema (before active_cutover_bypass_owner existed).
+            jdbc.execute("""
+                    CREATE TABLE search_index_generation (
+                        alias_name VARCHAR(128) NOT NULL,
+                        active_generation BIGINT NOT NULL DEFAULT 1,
+                        active_physical_index VARCHAR(128) NOT NULL,
+                        require_cold_visibility_guard TINYINT(1) NOT NULL DEFAULT 0,
+                        cutover_state VARCHAR(32) NOT NULL DEFAULT 'NORMAL',
+                        cutover_job_id VARCHAR(64) NULL,
+                        previous_generation BIGINT NULL,
+                        previous_physical_index VARCHAR(128) NULL,
+                        target_generation BIGINT NULL,
+                        target_physical_index VARCHAR(128) NULL,
+                        cutover_started_at_ms BIGINT NULL,
+                        active_cache_invalidation_status VARCHAR(16) NOT NULL DEFAULT 'DONE',
+                        active_cache_invalidation_attempts INT NOT NULL DEFAULT 0,
+                        active_cache_invalidation_due_at_ms BIGINT NULL,
+                        active_cache_last_error VARCHAR(512) NULL,
+                        updated_at_ms BIGINT NOT NULL,
+                        PRIMARY KEY (alias_name)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """);
+            jdbc.execute("""
+                    CREATE TABLE search_rebuild_job (
+                        job_id VARCHAR(64) NOT NULL,
+                        alias_name VARCHAR(128) NOT NULL,
+                        active_lock_key VARCHAR(128) NULL,
+                        client_request_id VARCHAR(64) NOT NULL,
+                        snapshot_id VARCHAR(64) NULL,
+                        snapshot_expires_at_ms BIGINT NULL,
+                        snapshot_page_cursor VARCHAR(1024) NULL,
+                        snapshot_done TINYINT(1) NOT NULL DEFAULT 0,
+                        snapshot_pages_imported INT NOT NULL DEFAULT 0,
+                        snapshot_items_imported BIGINT NOT NULL DEFAULT 0,
+                        incremental_cursor VARCHAR(1024) NULL,
+                        incremental_cursor_expires_at_ms BIGINT NULL,
+                        last_commit_sequence BIGINT NOT NULL DEFAULT 0,
+                        incremental_commits_applied BIGINT NOT NULL DEFAULT 0,
+                        incremental_events_applied BIGINT NOT NULL DEFAULT 0,
+                        source_generation BIGINT NOT NULL,
+                        source_physical_index VARCHAR(128) NOT NULL,
+                        candidate_generation BIGINT NOT NULL,
+                        candidate_physical_index VARCHAR(128) NOT NULL,
+                        phase VARCHAR(32) NOT NULL,
+                        lease_owner VARCHAR(128) NULL,
+                        lease_until_ms BIGINT NULL,
+                        lease_generation BIGINT NOT NULL DEFAULT 0,
+                        alias_switch_uncertain TINYINT(1) NOT NULL DEFAULT 0,
+                        switch_attempts INT NOT NULL DEFAULT 0,
+                        last_error VARCHAR(512) NULL,
+                        superseded_by_job_id VARCHAR(64) NULL,
+                        created_at_ms BIGINT NOT NULL,
+                        updated_at_ms BIGINT NOT NULL,
+                        PRIMARY KEY (job_id),
+                        CONSTRAINT uk_search_rebuild_active_alias UNIQUE (active_lock_key)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """);
+
+            // Seed a legacy R2 generation row that is mid-PENDING cache compensation.
+            jdbc.update("""
+                    INSERT INTO search_index_generation (
+                        alias_name, active_generation, active_physical_index,
+                        require_cold_visibility_guard, cutover_state,
+                        active_cache_invalidation_status, active_cache_invalidation_attempts,
+                        active_cache_invalidation_due_at_ms, active_cache_last_error, updated_at_ms
+                    ) VALUES (
+                        'knode_articles_search', 2, 'knode_articles_search_g2',
+                        1, 'NORMAL', 'PENDING', 1, 1700000000000, 'ERR_LEGACY_INCR', 1700000000000
+                    )
+                    """);
+
+            // 2) Execute additive SEARCH-03-R1/R2 -> SEARCH-03-R3 upgrade SQL.
+            ResourceDatabasePopulator r3Populator = new ResourceDatabasePopulator(
+                    new ClassPathResource("db/search-rebuild-03-r3-upgrade.sql"));
+            r3Populator.execute(ds);
+
+            ObjectMapper mapper = new ObjectMapper();
+            SearchConsumerRepository consumerRepo = new SearchConsumerRepository(jdbc, mapper);
+            SearchRebuildRepository rebuildRepo = new SearchRebuildRepository(jdbc, consumerRepo, mapper);
+            TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
+
+            // 3) Legacy PENDING generation row is preserved with null activeCutoverBypassOwner (falls back to R2 owner).
+            IndexGenerationState upgraded = consumerRepo.findGenerationState("knode_articles_search").orElseThrow();
+            assertThat(upgraded.activeGeneration()).isEqualTo(2L);
+            assertThat(upgraded.activeCacheInvalidationStatus()).isEqualTo(CacheInvalidationStatus.PENDING);
+            assertThat(upgraded.activeCutoverBypassOwner()).isNull();
+
+            var due = consumerRepo.findDueGenerationCacheInvalidations(1700000005000L);
+            assertThat(due).hasSize(1);
+            assertThat(due.get(0).bypassOwner()).isNull();
+
+            Boolean markedDone = tx.execute(status -> consumerRepo.markGenerationCacheInvalidationDone(
+                    "knode_articles_search", 2L, 1700000006000L));
+            assertThat(markedDone).isTrue();
+
+            // 4) New R3 cutover activation persists attempt-scoped owner token and conditional DONE clears it.
+            RebuildJobRecord job = tx.execute(status -> rebuildRepo.startJobInCurrentTx(
+                    "rb-r3-upgrade", "knode_articles_search", "knode_articles_search_g2",
+                    "req-r3-up", "inst-r3", 60_000L, 1700000010000L));
+            assertThat(job).isNotNull();
+            assertThat(job.candidateGeneration()).isEqualTo(3L);
+
+            String attempt2Owner = SearchCacheInvalidator.cutoverBypassOwnerToken("knode_articles_search", 3L, 2L);
+            tx.executeWithoutResult(status -> rebuildRepo.activateCandidateGenerationInCurrentTx(
+                    job, true, attempt2Owner, 1700000020000L));
+
+            IndexGenerationState afterActivate = consumerRepo.findGenerationState("knode_articles_search").orElseThrow();
+            assertThat(afterActivate.activeGeneration()).isEqualTo(3L);
+            assertThat(afterActivate.activeCutoverBypassOwner()).isEqualTo(attempt2Owner);
+
+            var dueR3 = consumerRepo.findDueGenerationCacheInvalidations(1700000025000L);
+            assertThat(dueR3).hasSize(1);
+            assertThat(dueR3.get(0).bypassOwner()).isEqualTo(attempt2Owner);
+
+            Boolean r3Done = tx.execute(status -> consumerRepo.markGenerationCacheInvalidationDone(
+                    "knode_articles_search", 3L, 1700000030000L));
+            assertThat(r3Done).isTrue();
+            assertThat(consumerRepo.findGenerationState("knode_articles_search").orElseThrow().activeCutoverBypassOwner())
+                    .isNull();
         }
     }
 }

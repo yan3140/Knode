@@ -476,7 +476,7 @@ class SearchRebuildR2RegressionsTest {
         assertThat(pendingG2.phase()).isEqualTo(RebuildPhase.CACHE_INVALIDATING);
         assertThat(esStub.aliasTargets(ALIAS)).containsExactly(G2);
         assertThat(cacheRedis.getRaw(cacheInvalidator.cutoverBypassKey()))
-                .isEqualTo(SearchCacheInvalidator.cutoverBypassOwnerToken(ALIAS, 2L));
+                .isEqualTo(SearchCacheInvalidator.cutoverBypassOwnerToken(ALIAS, 2L, 1L));
         assertThat(consumerRepository.findGenerationState(ALIAS).orElseThrow().activeCacheInvalidationStatus())
                 .isEqualTo(CacheInvalidationStatus.PENDING);
 
@@ -561,7 +561,7 @@ class SearchRebuildR2RegressionsTest {
             RebuildJobRecord pendingG3 = advanceUntilPhase(rebuildService, jobG3.jobId(), RebuildPhase.CACHE_INVALIDATING);
             assertThat(pendingG3.phase()).isEqualTo(RebuildPhase.CACHE_INVALIDATING);
             assertThat(esStub.aliasTargets(ALIAS)).containsExactly(G3);
-            String g3OwnerToken = SearchCacheInvalidator.cutoverBypassOwnerToken(ALIAS, 3L);
+            String g3OwnerToken = SearchCacheInvalidator.cutoverBypassOwnerToken(ALIAS, 3L, 1L);
             assertThat(cacheRedis.getRaw(cacheInvalidator.cutoverBypassKey())).isEqualTo(g3OwnerToken);
             assertThat(consumerRepository.findGenerationState(ALIAS).orElseThrow().activeCacheInvalidationStatus())
                     .isEqualTo(CacheInvalidationStatus.PENDING);

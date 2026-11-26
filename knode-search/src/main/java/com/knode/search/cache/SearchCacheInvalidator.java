@@ -13,6 +13,7 @@ import java.util.List;
 @Component
 public class SearchCacheInvalidator {
     private static final DefaultRedisScript<Long> COMPARE_AND_DELETE_SCRIPT = createCompareAndDeleteScript();
+    private static final DefaultRedisScript<Long> MONOTONIC_SET_BYPASS_SCRIPT = createMonotonicSetBypassScript();
 
     private final StringRedisTemplate redisTemplate;
     private final String epochKey;
@@ -37,9 +38,27 @@ public class SearchCacheInvalidator {
     }
 
     /**
-     * Canonical cutover bypass owner token bound to a specific alias and monotonic target generation.
-     * Shared across rebuild cutover, pre-switch rollback, and background cache invalidation compensation
-     * so stale workers from an earlier generation can never delete a subsequent generation's bypass.
+     * Canonical attempt-scoped cutover bypass owner token bound to alias, monotonic target generation,
+     * and monotonic switch attempt counter within that candidate's rebuild job.
+     * Prevents both cross-generation stale compensations and delayed pre-switch rollback cleanups
+     * from deleting a subsequent attempt's active bypass marker.
+     */
+    public static String cutoverBypassOwnerToken(String aliasName, long targetGeneration, long switchAttempt) {
+        if (aliasName == null || aliasName.isBlank()) {
+            throw new IllegalArgumentException("aliasName must be non-blank");
+        }
+        if (targetGeneration <= 0L) {
+            throw new IllegalArgumentException("targetGeneration must be positive");
+        }
+        if (switchAttempt <= 0L) {
+            throw new IllegalArgumentException("switchAttempt must be positive");
+        }
+        return aliasName.trim() + ":g" + targetGeneration + ":a" + switchAttempt;
+    }
+
+    /**
+     * Legacy SEARCH-03-R2 generation-only owner token retained solely as a fallback for
+     * upgrading existing PENDING generation rows that have a null active_cutover_bypass_owner.
      */
     public static String cutoverBypassOwnerToken(String aliasName, long targetGeneration) {
         if (aliasName == null || aliasName.isBlank()) {
@@ -75,6 +94,31 @@ public class SearchCacheInvalidator {
             throw new IllegalArgumentException("ownerToken must be non-blank");
         }
         redisTemplate.opsForValue().set(cutoverBypassKey, ownerToken.trim());
+    }
+
+    /**
+     * Atomically activates cutover_bypass for (targetGeneration, switchAttempt) only if no newer
+     * cutover attempt already owns the key, preventing stale instances from overwriting a newer owner.
+     */
+    public void enterCutoverBypass(String ownerToken, long targetGeneration, long switchAttempt) {
+        if (redisTemplate == null) {
+            return;
+        }
+        if (ownerToken == null || ownerToken.isBlank()) {
+            throw new IllegalArgumentException("ownerToken must be non-blank");
+        }
+        if (targetGeneration <= 0L || switchAttempt <= 0L) {
+            throw new IllegalArgumentException("targetGeneration and switchAttempt must be positive");
+        }
+        Long written = redisTemplate.execute(
+                MONOTONIC_SET_BYPASS_SCRIPT,
+                List.of(cutoverBypassKey),
+                ownerToken.trim(),
+                Long.toString(targetGeneration),
+                Long.toString(switchAttempt));
+        if (written == null || written <= 0L) {
+            throw new IllegalStateException("Stale cutover_bypass owner write rejected: " + ownerToken.trim());
+        }
     }
 
     /**
@@ -123,6 +167,21 @@ public class SearchCacheInvalidator {
         DefaultRedisScript<Long> script = new DefaultRedisScript<>();
         script.setScriptText(
                 "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end");
+        script.setResultType(Long.class);
+        return script;
+    }
+
+    private static DefaultRedisScript<Long> createMonotonicSetBypassScript() {
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>();
+        script.setScriptText(
+                "local cur = redis.call('GET', KEYS[1]) "
+                        + "if not cur then redis.call('SET', KEYS[1], ARGV[1]) return 1 end "
+                        + "local cg, ca = string.match(cur, ':g(%d+):a(%d+)$') "
+                        + "if not cg then cg = string.match(cur, ':g(%d+)$') ca = '0' end "
+                        + "local ng = tonumber(ARGV[2]) local na = tonumber(ARGV[3]) "
+                        + "if not cg or ng > tonumber(cg) or (ng == tonumber(cg) and na >= tonumber(ca)) then "
+                        + "redis.call('SET', KEYS[1], ARGV[1]) return 1 end "
+                        + "return 0");
         script.setResultType(Long.class);
         return script;
     }

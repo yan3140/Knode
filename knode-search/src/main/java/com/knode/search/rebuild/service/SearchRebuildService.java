@@ -571,7 +571,8 @@ public class SearchRebuildService {
 
         if (cacheInvalidator.isCacheEnabled()) {
             try {
-                cacheInvalidator.enterCutoverBypass(bypassOwner);
+                cacheInvalidator.enterCutoverBypass(
+                        bypassOwner, job.candidateGeneration(), effectiveSwitchAttempt(job));
             } catch (Exception bypassEx) {
                 String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
                 LOGGER.warn("event=search_rebuild_cutover_bypass_failed jobId={} error={}", job.jobId(), err);
@@ -651,6 +652,7 @@ public class SearchRebuildService {
             } catch (StaleRebuildLeaseException fenced) {
                 return leaseFencedOutcome(job, fenced);
             }
+            beforeClearCutoverBypassAfterPreSwitchRevert(job, bypassOwner);
             clearCutoverBypassBestEffort(job.jobId(), bypassOwner);
             return new StepOutcome(
                     exhausted ? StepStatus.FAILED : StepStatus.PRE_SWITCH_FAILED_REVERTED,
@@ -673,7 +675,8 @@ public class SearchRebuildService {
         }
         if (cacheInvalidator.isCacheEnabled()) {
             try {
-                cacheInvalidator.enterCutoverBypass(cutoverBypassOwner(job));
+                cacheInvalidator.enterCutoverBypass(
+                        cutoverBypassOwner(job), job.candidateGeneration(), effectiveSwitchAttempt(job));
             } catch (Exception bypassEx) {
                 String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
                 return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
@@ -720,7 +723,8 @@ public class SearchRebuildService {
         }
         if (cacheInvalidator.isCacheEnabled()) {
             try {
-                cacheInvalidator.enterCutoverBypass(cutoverBypassOwner(job));
+                cacheInvalidator.enterCutoverBypass(
+                        cutoverBypassOwner(job), job.candidateGeneration(), effectiveSwitchAttempt(job));
             } catch (Exception bypassEx) {
                 String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
                 return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
@@ -817,7 +821,8 @@ public class SearchRebuildService {
                 long nowMs = clock.millis();
                 rebuildRepository.lockAndVerifyLeaseInCurrentTx(
                         job, instanceId, RebuildPhase.SWITCHING_ALIAS, false, false, nowMs);
-                rebuildRepository.activateCandidateGenerationInCurrentTx(job, cacheEnabled, nowMs);
+                rebuildRepository.activateCandidateGenerationInCurrentTx(
+                        job, cacheEnabled, cutoverBypassOwner(job), nowMs);
             });
         } catch (StaleRebuildLeaseException fenced) {
             return leaseFencedOutcome(job, fenced);
@@ -854,8 +859,12 @@ public class SearchRebuildService {
             return leaseFencedOutcome(job, fenced);
         }
 
-        String bypassOwner = cutoverBypassOwner(job);
         Optional<IndexGenerationState> currentGen = consumerRepository.findGenerationState(job.aliasName());
+        String bypassOwner = currentGen
+                .filter(g -> g.activeGeneration() == job.candidateGeneration())
+                .map(IndexGenerationState::activeCutoverBypassOwner)
+                .filter(StringUtils::hasText)
+                .orElseGet(() -> cutoverBypassOwner(job));
         boolean alreadyCompensated = currentGen.isPresent()
                 && currentGen.get().activeGeneration() == job.candidateGeneration()
                 && currentGen.get().activeCacheInvalidationStatus() == CacheInvalidationStatus.DONE;
@@ -904,6 +913,10 @@ public class SearchRebuildService {
 
     protected void afterAtomicAliasSwitchBeforeLocalCommit(RebuildJobRecord job) {
         // Extension hook for failure-injection tests simulating crash after ES _aliases before SQL activation.
+    }
+
+    protected void beforeClearCutoverBypassAfterPreSwitchRevert(RebuildJobRecord job, String bypassOwner) {
+        // Extension hook for concurrency tests pausing a pre-switch rollback right before Redis bypass cleanup.
     }
 
     protected void applySnapshotItemInTx(RebuildJobRecord job, SnapshotArticleItem item, long nowMs) {
@@ -1309,8 +1322,13 @@ public class SearchRebuildService {
         return new StepOutcome(StepStatus.LEASE_LOST_FENCED, reload(job.jobId()), fenced.reason());
     }
 
+    private static long effectiveSwitchAttempt(RebuildJobRecord job) {
+        return Math.max(1L, job.switchAttempts());
+    }
+
     private static String cutoverBypassOwner(RebuildJobRecord job) {
-        return SearchCacheInvalidator.cutoverBypassOwnerToken(job.aliasName(), job.candidateGeneration());
+        return SearchCacheInvalidator.cutoverBypassOwnerToken(
+                job.aliasName(), job.candidateGeneration(), effectiveSwitchAttempt(job));
     }
 
     private void clearCutoverBypassBestEffort(String jobId, String expectedOwnerToken) {

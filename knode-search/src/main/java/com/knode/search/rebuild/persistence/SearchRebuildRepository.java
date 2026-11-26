@@ -677,12 +677,13 @@ public class SearchRebuildRepository {
      * and records pending cache epoch invalidation when cache is enabled.
      */
     public void activateCandidateGenerationInCurrentTx(
-            RebuildJobRecord job, boolean cacheEnabled, long nowMs) {
+            RebuildJobRecord job, boolean cacheEnabled, String cutoverBypassOwner, long nowMs) {
         consumerRepository.ensureAndLockGeneration(job.aliasName(), job.sourcePhysicalIndex(), nowMs);
         String cacheStatus = cacheEnabled
                 ? CacheInvalidationStatus.PENDING.name()
                 : CacheInvalidationStatus.DONE.name();
         Long cacheDueAt = cacheEnabled ? nowMs : null;
+        String persistedOwner = cacheEnabled ? cutoverBypassOwner : null;
 
         jdbcTemplate.update(
                 """
@@ -701,6 +702,7 @@ public class SearchRebuildRepository {
                     active_cache_invalidation_attempts = 0,
                     active_cache_invalidation_due_at_ms = ?,
                     active_cache_last_error = NULL,
+                    active_cutover_bypass_owner = ?,
                     updated_at_ms = ?
                 WHERE alias_name = ?
                 """,
@@ -710,6 +712,7 @@ public class SearchRebuildRepository {
                 job.sourcePhysicalIndex(),
                 cacheStatus,
                 cacheDueAt,
+                persistedOwner,
                 nowMs,
                 job.aliasName()
         );

@@ -16,6 +16,7 @@ public record IndexGenerationState(
         int activeCacheInvalidationAttempts,
         Long activeCacheInvalidationDueAtMs,
         String activeCacheLastError,
+        String activeCutoverBypassOwner,
         long updatedAtMs
 ) {
     public enum CutoverState {

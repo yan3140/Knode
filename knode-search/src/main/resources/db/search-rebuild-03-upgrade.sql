@@ -1,4 +1,4 @@
--- Knode Search (05) Additive Upgrade DDL: SEARCH-02 -> SEARCH-03 (including SEARCH-03-R1 columns)
+-- Knode Search (05) Additive Upgrade DDL: SEARCH-02 -> SEARCH-03 (including SEARCH-03-R1/R3 columns)
 -- Target engine: dedicated independent MySQL 8 / InnoDB database, charset utf8mb4, UTC session/JDBC timezone.
 -- Manual deployment DDL only: run once on an existing SEARCH-02 schema while consumers/indexers are stopped.
 -- Preserves all existing SEARCH-02 inbox, failure, projection, and index task rows as index_generation = 1.
@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS search_index_generation (
     active_cache_invalidation_attempts INT NOT NULL DEFAULT 0,
     active_cache_invalidation_due_at_ms BIGINT NULL,
     active_cache_last_error VARCHAR(512) NULL,
+    active_cutover_bypass_owner VARCHAR(192) NULL,
     updated_at_ms BIGINT NOT NULL,
     PRIMARY KEY (alias_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

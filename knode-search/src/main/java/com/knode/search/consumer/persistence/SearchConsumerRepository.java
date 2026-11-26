@@ -59,7 +59,8 @@ public class SearchConsumerRepository {
                        previous_generation, previous_physical_index,
                        target_generation, target_physical_index, cutover_started_at_ms,
                        active_cache_invalidation_status, active_cache_invalidation_attempts,
-                       active_cache_invalidation_due_at_ms, active_cache_last_error, updated_at_ms
+                       active_cache_invalidation_due_at_ms, active_cache_last_error,
+                       active_cutover_bypass_owner, updated_at_ms
                 FROM search_index_generation
                 WHERE alias_name = ?
                 FOR UPDATE
@@ -77,7 +78,8 @@ public class SearchConsumerRepository {
                        previous_generation, previous_physical_index,
                        target_generation, target_physical_index, cutover_started_at_ms,
                        active_cache_invalidation_status, active_cache_invalidation_attempts,
-                       active_cache_invalidation_due_at_ms, active_cache_last_error, updated_at_ms
+                       active_cache_invalidation_due_at_ms, active_cache_last_error,
+                       active_cutover_bypass_owner, updated_at_ms
                 FROM search_index_generation
                 WHERE alias_name = ?
                 """,
@@ -94,6 +96,7 @@ public class SearchConsumerRepository {
                 SET active_cache_invalidation_status = 'DONE',
                     active_cache_invalidation_due_at_ms = NULL,
                     active_cache_last_error = NULL,
+                    active_cutover_bypass_owner = NULL,
                     updated_at_ms = ?
                 WHERE alias_name = ?
                   AND active_generation = ?
@@ -140,7 +143,7 @@ public class SearchConsumerRepository {
     public List<GenerationCacheCompensationCandidate> findDueGenerationCacheInvalidations(long nowMs) {
         return jdbcTemplate.query(
                 """
-                SELECT alias_name, active_generation, active_cache_invalidation_attempts
+                SELECT alias_name, active_generation, active_cache_invalidation_attempts, active_cutover_bypass_owner
                 FROM search_index_generation
                 WHERE active_cache_invalidation_status = 'PENDING'
                   AND active_cache_invalidation_due_at_ms IS NOT NULL
@@ -150,7 +153,8 @@ public class SearchConsumerRepository {
                 (rs, rowNum) -> new GenerationCacheCompensationCandidate(
                         rs.getString("alias_name"),
                         rs.getLong("active_generation"),
-                        rs.getInt("active_cache_invalidation_attempts")
+                        rs.getInt("active_cache_invalidation_attempts"),
+                        rs.getString("active_cutover_bypass_owner")
                 ),
                 nowMs
         );
@@ -932,6 +936,7 @@ public class SearchConsumerRepository {
                 rs.getInt("active_cache_invalidation_attempts"),
                 nullableLong(rs, "active_cache_invalidation_due_at_ms"),
                 rs.getString("active_cache_last_error"),
+                rs.getString("active_cutover_bypass_owner"),
                 rs.getLong("updated_at_ms")
         );
     }
@@ -1031,6 +1036,6 @@ public class SearchConsumerRepository {
     }
 
     public record GenerationCacheCompensationCandidate(
-            String aliasName, long activeGeneration, int attempts) {
+            String aliasName, long activeGeneration, int attempts, String bypassOwner) {
     }
 }

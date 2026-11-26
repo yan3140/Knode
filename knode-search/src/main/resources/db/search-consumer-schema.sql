@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS search_index_generation (
     active_cache_invalidation_attempts INT NOT NULL DEFAULT 0,
     active_cache_invalidation_due_at_ms BIGINT NULL,
     active_cache_last_error VARCHAR(512) NULL,
+    active_cutover_bypass_owner VARCHAR(192) NULL,
     updated_at_ms BIGINT NOT NULL,
     PRIMARY KEY (alias_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

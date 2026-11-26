@@ -382,7 +382,54 @@ public final class LoopbackRedisStub implements AutoCloseable {
             writeInteger(out, deleted.get() ? 1L : 0L);
             return;
         }
+        if (numKeys == 1 && args.size() >= 7
+                && script.contains("redis.call('SET', KEYS[1], ARGV[1])")
+                && script.contains("string.match(cur, ':g(%d+):a(%d+)$')")) {
+            String key = args.get(3);
+            String newOwner = args.get(4);
+            long newGen = Long.parseLong(args.get(5));
+            long newAttempt = Long.parseLong(args.get(6));
+            AtomicBoolean written = new AtomicBoolean(false);
+            store.compute(key, (k, existing) -> {
+                long now = System.currentTimeMillis();
+                if (existing == null || existing.expiresAtMs() <= now) {
+                    written.set(true);
+                    return new Entry(newOwner, Long.MAX_VALUE);
+                }
+                long[] parsed = parseBypassOwnerRank(existing.value());
+                if (parsed == null || newGen > parsed[0] || (newGen == parsed[0] && newAttempt >= parsed[1])) {
+                    written.set(true);
+                    return new Entry(newOwner, Long.MAX_VALUE);
+                }
+                return existing;
+            });
+            writeInteger(out, written.get() ? 1L : 0L);
+            return;
+        }
         writeError(out, "ERR unsupported eval script in loopback stub");
+    }
+
+    private static long[] parseBypassOwnerRank(String value) {
+        if (value == null) {
+            return null;
+        }
+        int gIdx = value.lastIndexOf(":g");
+        if (gIdx < 0) {
+            return null;
+        }
+        String tail = value.substring(gIdx + 2);
+        int aIdx = tail.indexOf(":a");
+        try {
+            if (aIdx >= 0) {
+                long gen = Long.parseLong(tail.substring(0, aIdx));
+                long attempt = Long.parseLong(tail.substring(aIdx + 2));
+                return new long[]{gen, attempt};
+            }
+            long gen = Long.parseLong(tail);
+            return new long[]{gen, 0L};
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private void handleXReadGroup(List<String> args, OutputStream out) throws IOException {

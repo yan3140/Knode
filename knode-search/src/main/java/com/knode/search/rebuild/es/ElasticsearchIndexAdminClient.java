@@ -56,12 +56,14 @@ public class ElasticsearchIndexAdminClient implements SearchIndexAdminClient {
         try {
             boolean exists = elasticsearchClient.indices().exists(r -> r.index(index)).value();
             if (exists) {
-                if (getAliasTargets(fenceAlias).isEmpty()) {
-                    AliasSwitchResult arm = executeAliasActions(List.of(addAction(index, fenceAlias)));
-                    if (!arm.isAcknowledged()) {
-                        throw new IllegalStateException(
-                                "ES ensurePhysicalIndex failed to arm attach fence: " + arm.detail());
-                    }
+                // Never re-arm attachFenceAlias on an existing physical index via POST /_aliases.
+                // The one-shot birth-certificate fence alias is created atomically only inside PUT /<index>
+                // and consumed once during cutover; re-arming it would allow stale INIT instances to revive
+                // an already-consumed fence and let late empty-alias repairs re-attach an old generation.
+                if (!getAliasTargets(fenceAlias).contains(index)) {
+                    throw new IllegalStateException(
+                            "ES candidate index [" + index + "] already exists without active attach fence ["
+                                    + fenceAlias + "]; refusing to re-arm consumed fence");
                 }
                 return;
             }
@@ -85,6 +87,11 @@ public class ElasticsearchIndexAdminClient implements SearchIndexAdminClient {
         } catch (ElasticsearchException esEx) {
             String msg = esEx.getMessage() == null ? "" : esEx.getMessage();
             if (esEx.status() == 400 && msg.contains("resource_already_exists_exception")) {
+                if (!getAliasTargets(fenceAlias).contains(index)) {
+                    throw new IllegalStateException(
+                            "ES candidate index [" + index + "] already exists without active attach fence ["
+                                    + fenceAlias + "]; refusing to re-arm consumed fence", esEx);
+                }
                 return;
             }
             throw new IllegalStateException("ES ensurePhysicalIndex failed HTTP " + esEx.status(), esEx);

@@ -287,8 +287,10 @@ public class SearchIndexTaskWorker {
             if (!genCandidates.isEmpty()) {
                 afterCacheEpochAdvancedBeforeBypassClear(genCandidates);
                 for (SearchConsumerRepository.GenerationCacheCompensationCandidate gen : genCandidates) {
-                    String ownerToken = SearchCacheInvalidator.cutoverBypassOwnerToken(
-                            gen.aliasName(), gen.activeGeneration());
+                    String ownerToken = StringUtils.hasText(gen.bypassOwner())
+                            ? gen.bypassOwner().trim()
+                            : SearchCacheInvalidator.cutoverBypassOwnerToken(
+                                    gen.aliasName(), gen.activeGeneration());
                     cacheInvalidator.clearCutoverBypassIfOwned(ownerToken);
                 }
             }
