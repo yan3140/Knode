@@ -1,0 +1,271 @@
+{
+  "contractId": "SEARCH-PUBLIC",
+  "version": "0.1-draft",
+  "status": "draft",
+  "owner": "05-search (knode-search)",
+  "taskRef": "SEARCH-01",
+  "description": "Public article search HTTP contract, visibility fail-closed rules, and bounded cache semantics for knode-search.",
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/blog/search",
+      "role": "primary-public",
+      "auth": "anonymous",
+      "gatewayRouteId": "search"
+    },
+    {
+      "method": "GET",
+      "path": "/search",
+      "role": "direct-legacy-alias",
+      "auth": "anonymous",
+      "notes": "Retained for direct service-level backward compatibility; gateway exposes /api/blog/search."
+    }
+  ],
+  "request": {
+    "headers": {
+      "X-Request-Id": {
+        "required": false,
+        "pattern": "^[A-Za-z0-9._-]{1,64}$",
+        "notes": "Optional correlation ID propagated to outbound User and Content calls when valid; invalid values are ignored."
+      }
+    },
+    "queryParams": {
+      "keyword": {
+        "type": "string",
+        "required": true,
+        "maxLength": 40,
+        "normalization": "trim",
+        "onInvalid": "business-code-515"
+      },
+      "pageNum": {
+        "type": "integer",
+        "required": false,
+        "default": 1,
+        "minNormalized": 1,
+        "maxAllowed": 50,
+        "notes": "null or <1 normalizes to 1; values >50 (e.g. 51) return business code 515."
+      },
+      "pageSize": {
+        "type": "integer",
+        "required": false,
+        "default": 5,
+        "minNormalized": 5,
+        "maxClamped": 20,
+        "notes": "null or <1 normalizes to default 5; values >20 (e.g. 99) are clamped to 20 without error."
+      },
+      "sort": {
+        "type": "string",
+        "required": false,
+        "default": "relevance",
+        "allowedValues": [
+          "relevance",
+          "latest",
+          "hot"
+        ],
+        "caseInsensitive": true,
+        "sortOrder": {
+          "relevance": [
+            "_score DESC",
+            "createTime DESC"
+          ],
+          "latest": [
+            "createTime DESC",
+            "_score DESC"
+          ],
+          "hot": [
+            "viewCount DESC",
+            "_score DESC"
+          ]
+        },
+        "onInvalid": "business-code-515"
+      }
+    }
+  },
+  "response": {
+    "httpStatus": 200,
+    "envelope": {
+      "code": "integer (200 | 515 | 517)",
+      "msg": "string",
+      "data": "PageResult (omitted when null)"
+    },
+    "pageResult": {
+      "rows": "SearchArticleVo[]",
+      "total": "decimal string (int64 >= 0)"
+    },
+    "searchArticleVo": {
+      "id": "decimal string (int64)",
+      "title": "string | null",
+      "summary": "string | null",
+      "categoryId": "decimal string (int64) | null",
+      "categoryName": "string | null",
+      "tagNames": "string[]",
+      "thumbnail": "string | null",
+      "viewCount": "decimal string (int64)",
+      "createTime": "string (yyyy-MM-dd HH:mm:ss, GMT+8) | null",
+      "score": "number | null",
+      "highlights": "Record<string, string[]> using <em> and </em> tags",
+      "excludedInternalFields": [
+        "sourceRevision",
+        "content",
+        "searchable"
+      ]
+    },
+    "paginationTotalSemantics": {
+      "type": "estimate",
+      "formula": "max(0, esCandidateTotal - excludedOnCurrentPage)",
+      "pageShorteningAllowed": true,
+      "notes": "total is a pagination estimate rather than a globally re-counted visibility total. When current-page candidates are removed by visibility verification, the current page may contain fewer rows than pageSize."
+    },
+    "normalEmptyResult": {
+      "httpStatus": 200,
+      "body": {
+        "code": 200,
+        "msg": "操作成功",
+        "data": {
+          "rows": [],
+          "total": "0"
+        }
+      },
+      "notes": "When candidate rows are empty, knode-content visibility:batch is skipped."
+    },
+    "businessErrors": [
+      {
+        "code": 515,
+        "httpStatus": 200,
+        "msg": "参数不合法",
+        "triggers": [
+          "blank or over-40-char keyword",
+          "pageNum > 50",
+          "invalid sort value",
+          "non-numeric pageNum or pageSize"
+        ]
+      },
+      {
+        "code": 517,
+        "httpStatus": 200,
+        "msg": "搜索服务暂不可用",
+        "triggers": [
+          "Elasticsearch error or timeout without valid cache",
+          "User service-tokens error, timeout, auth failure, or invalid DTO",
+          "Content visibility:batch error, timeout, auth failure, missing item, or invalid DTO",
+          "Per-query total timeout budget exhausted"
+        ],
+        "notes": "First draft preserves HTTP 200 with business code 517 for legacy compatibility and never leaks internal 401/403 status to browsers."
+      }
+    ]
+  },
+  "visibilityVerification": {
+    "requiredFor": [
+      "Elasticsearch candidates",
+      "Redis cache hits"
+    ],
+    "upstreamEndpoint": "POST /internal/v1/content/articles/visibility:batch",
+    "purpose": "PUBLIC_SEARCH",
+    "candidateRequirements": [
+      "canonical positive int64 articleId",
+      "canonical positive int64 sourceRevision"
+    ],
+    "keepRule": "visibility == 'PUBLIC' && decision == 'READABLE' && item.sourceRevision == candidate.sourceRevision",
+    "excludeActions": [
+      "Remove entire row including title, summary, and highlights",
+      "Decrement estimated total by excluded count (floored at 0)",
+      "Do not write or renew page in Redis cache",
+      "Best-effort evict stale Redis key when exclusions occur on a cache hit"
+    ],
+    "failClosed": true
+  },
+  "cache": {
+    "keyNamespace": {
+      "resultKey": "knode:<environment>:v1:search:result:<sha256-32hex>",
+      "admissionKey": "knode:<environment>:v1:search:admit:<sha256-32hex>",
+      "fingerprintInputs": [
+        "elasticsearchIndex",
+        "normalizedKeyword",
+        "pageNum",
+        "pageSize",
+        "sort",
+        "highlightContent"
+      ]
+    },
+    "admission": {
+      "pageNumEquals": 1,
+      "maxPageSize": 20,
+      "minKeywordLength": 2,
+      "skipRandomKeywords": "length >= 24 && no whitespace && alnumRatio > 0.8 && uniqueCharRatio > 0.7",
+      "threshold": 2,
+      "admissionTtlSeconds": 60
+    },
+    "ttl": {
+      "nonEmptySeconds": 60,
+      "emptySeconds": 30,
+      "jitterSeconds": "0..30"
+    },
+    "faultIsolation": {
+      "readFailure": "fallback to Elasticsearch",
+      "corruptPayload": "fallback to Elasticsearch",
+      "admissionFailure": "swallow and preserve successful Elasticsearch + visibility result",
+      "writeFailure": "swallow and preserve successful Elasticsearch + visibility result",
+      "evictFailure": "swallow and preserve verified query result"
+    }
+  },
+  "elasticsearch": {
+    "accessMode": "read-only",
+    "indexCreationOnStartupOrQuery": false,
+    "indexConfigProperty": "knode.search.elasticsearch.index",
+    "queryFields": [
+      "title^5",
+      "summary^3",
+      "content",
+      "categoryName^2",
+      "tagNames^2"
+    ],
+    "mustNot": [
+      {
+        "term": {
+          "searchable": false
+        }
+      }
+    ],
+    "sourceIncludes": [
+      "id",
+      "sourceRevision",
+      "title",
+      "summary",
+      "categoryId",
+      "categoryName",
+      "tagNames",
+      "thumbnail",
+      "viewCount",
+      "createTime"
+    ],
+    "defaultHighlightFields": [
+      "title",
+      "summary",
+      "categoryName",
+      "tagNames"
+    ],
+    "optionalHighlightFields": [
+      "content"
+    ]
+  },
+  "outboundDependencies": {
+    "totalQueryTimeoutBudgetMs": 3000,
+    "userServiceToken": {
+      "endpoint": "POST /internal/v1/auth/service-tokens",
+      "auth": "Basic base64(serviceId:bootstrapSecret)",
+      "audience": "knode-content",
+      "permissions": [
+        "content:visibility:read"
+      ],
+      "contractRefs": [
+        "contracts/shared/auth/service-token-v0.1.json",
+        "contracts/user/service-token-g5-v0.1.schema.json"
+      ]
+    },
+    "contentVisibility": {
+      "endpoint": "POST /internal/v1/content/articles/visibility:batch",
+      "auth": "Bearer <service-access-token>",
+      "contractRef": "contracts/content/article-snapshot-06a-v0.1.json"
+    }
+  }
+}

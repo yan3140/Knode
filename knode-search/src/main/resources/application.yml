@@ -1,0 +1,68 @@
+server:
+  port: ${SEARCH_PORT:18093}
+
+spring:
+  application:
+    name: knode-search
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+  jackson:
+    time-zone: GMT+8
+    date-format: yyyy-MM-dd HH:mm:ss
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+knode:
+  environment: ${KNODE_ENVIRONMENT:local}
+  search:
+    elasticsearch:
+      url: ${KNODE_SEARCH_ES_URL:http://127.0.0.1:9200}
+      index: ${KNODE_SEARCH_ES_INDEX:knode_local_articles_search}
+      connect-timeout-ms: ${KNODE_SEARCH_ES_CONNECT_TIMEOUT_MS:500}
+      connection-request-timeout-ms: ${KNODE_SEARCH_ES_CONN_REQ_TIMEOUT_MS:500}
+      response-timeout-ms: ${KNODE_SEARCH_ES_RESPONSE_TIMEOUT_MS:1500}
+    query:
+      max-keyword-length: 40
+      default-page-size: 5
+      max-page-size: 20
+      max-page-num: 50
+      total-hit-threshold: 10000
+      highlight-content: false
+      total-timeout-ms: ${KNODE_SEARCH_TOTAL_TIMEOUT_MS:3000}
+    cache:
+      enabled: ${KNODE_SEARCH_CACHE_ENABLED:false}
+      max-page-size: 20
+      admission-threshold: 2
+      admission-ttl-seconds: 60
+      result-ttl-seconds: 60
+      empty-ttl-seconds: 30
+      jitter-seconds: 30
+      redis:
+        host: ${KNODE_SEARCH_CACHE_REDIS_HOST:127.0.0.1}
+        port: ${KNODE_SEARCH_CACHE_REDIS_PORT:6379}
+        database: ${KNODE_SEARCH_CACHE_REDIS_DATABASE:0}
+        username: ${KNODE_SEARCH_CACHE_REDIS_USERNAME:}
+        password: ${KNODE_SEARCH_CACHE_REDIS_PASSWORD:}
+        tls: ${KNODE_SEARCH_CACHE_REDIS_TLS:false}
+        connect-timeout-ms: ${KNODE_SEARCH_CACHE_REDIS_CONNECT_TIMEOUT_MS:300}
+        command-timeout-ms: ${KNODE_SEARCH_CACHE_REDIS_COMMAND_TIMEOUT_MS:300}
+    clients:
+      user-origin: ${KNODE_USER_ORIGIN:}
+      content-origin: ${KNODE_CONTENT_ORIGIN:}
+      service-id: ${KNODE_SEARCH_SERVICE_ID:knode-search}
+      bootstrap-secret: ${KNODE_SEARCH_BOOTSTRAP_SECRET:}
+      connect-timeout-ms: ${KNODE_SEARCH_CLIENT_CONNECT_TIMEOUT_MS:500}
+      user-token-timeout-ms: ${KNODE_SEARCH_USER_TOKEN_TIMEOUT_MS:800}
+      content-visibility-timeout-ms: ${KNODE_SEARCH_CONTENT_VISIBILITY_TIMEOUT_MS:1000}
+      token-refresh-skew-seconds: 10
