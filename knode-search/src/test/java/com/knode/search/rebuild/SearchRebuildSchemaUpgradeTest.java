@@ -22,11 +22,15 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class SearchRebuildSchemaUpgradeTest {
+public class SearchRebuildSchemaUpgradeTest {
 
     @Test
     void upgradesSearch02SchemaToSearch03PreservingGeneration1DataAndBackfillingVersionBarriers() {
@@ -512,7 +516,7 @@ class SearchRebuildSchemaUpgradeTest {
                     """);
 
             // Apply SEARCH-04/R1 -> SEARCH-04-R2 upgrade SQL.
-            new ResourceDatabasePopulator(new ClassPathResource("db/search-ops-04-r2-upgrade.sql")).execute(ds);
+            executeMySqlR2UpgradeScriptOnH2(jdbc);
 
             ObjectMapper mapper = new ObjectMapper();
             SearchConsumerRepository consumerRepo = new SearchConsumerRepository(jdbc, mapper);
@@ -536,5 +540,64 @@ class SearchRebuildSchemaUpgradeTest {
             assertThat(opsRepo.findReplayAudit("ReviewCaseKey").orElseThrow().requestFingerprint()).isEqualTo("fp-upper");
             assertThat(opsRepo.findReplayAudit("reviewcasekey").orElseThrow().requestFingerprint()).isEqualTo("fp-lower");
         }
+    }
+
+    @Test
+    void r2UpgradeSqlSwitchesPrimaryKeyAtomicallyInSingleAlterTableStatement() throws Exception {
+        List<String> statements = loadSqlStatements("db/search-ops-04-r2-upgrade.sql");
+        assertThat(statements).hasSize(4);
+        assertThat(statements.get(0)).containsIgnoringCase("ADD COLUMN replay_request_key VARBINARY(64) NULL");
+        assertThat(statements.get(1)).containsIgnoringCase("SET replay_request_key = replay_request_id");
+        assertThat(statements.get(2)).containsIgnoringCase("MODIFY COLUMN replay_request_key VARBINARY(64) NOT NULL");
+
+        // Must combine DROP PRIMARY KEY and ADD PRIMARY KEY (replay_request_key) in ONE ALTER TABLE
+        // so MySQL 8 sql_require_primary_key = ON succeeds without Error 3750.
+        String pkSwapStmt = statements.get(3).replaceAll("\\s+", " ").trim();
+        assertThat(pkSwapStmt).containsIgnoringCase("ALTER TABLE search_ops_replay_audit");
+        assertThat(pkSwapStmt).containsIgnoringCase("DROP PRIMARY KEY, ADD PRIMARY KEY (replay_request_key)");
+        assertThat(statements.stream()
+                .filter(s -> s.toUpperCase().contains("DROP PRIMARY KEY") && !s.toUpperCase().contains("ADD PRIMARY KEY"))
+                .count()).isZero();
+    }
+
+    /**
+     * Executes db/search-ops-04-r2-upgrade.sql on H2 (MODE=MySQL).
+     * H2 2.3.x does not parse MySQL's comma-chained "DROP PRIMARY KEY, ADD PRIMARY KEY (...)"
+     * inside a single ALTER TABLE statement, so this test-only helper asserts that the production
+     * SQL uses the single-statement MySQL 8 form (compatible with sql_require_primary_key=ON)
+     * and splits only that final clause for H2 execution.
+     */
+    public static void executeMySqlR2UpgradeScriptOnH2(JdbcTemplate jdbc) {
+        try {
+            List<String> statements = loadSqlStatements("db/search-ops-04-r2-upgrade.sql");
+            Pattern atomicPkSwap = Pattern.compile(
+                    "(?is)^ALTER\\s+TABLE\\s+search_ops_replay_audit\\s+DROP\\s+PRIMARY\\s+KEY\\s*,\\s*ADD\\s+PRIMARY\\s+KEY\\s*\\(\\s*replay_request_key\\s*\\)$");
+            boolean sawAtomicSwap = false;
+            for (String stmt : statements) {
+                if (atomicPkSwap.matcher(stmt.trim()).matches()) {
+                    sawAtomicSwap = true;
+                    jdbc.execute("ALTER TABLE search_ops_replay_audit DROP PRIMARY KEY");
+                    jdbc.execute("ALTER TABLE search_ops_replay_audit ADD PRIMARY KEY (replay_request_key)");
+                } else {
+                    jdbc.execute(stmt);
+                }
+            }
+            assertThat(sawAtomicSwap).as("Expected single-ALTER DROP+ADD PRIMARY KEY in R2 upgrade SQL").isTrue();
+        } catch (Exception ex) {
+            throw new IllegalStateException("Failed to apply R2 upgrade SQL on H2", ex);
+        }
+    }
+
+    private static List<String> loadSqlStatements(String classpathLocation) throws Exception {
+        String raw = new ClassPathResource(classpathLocation).getContentAsString(StandardCharsets.UTF_8);
+        String withoutComments = raw.replaceAll("(?m)^\\s*--.*$", "");
+        List<String> statements = new ArrayList<>();
+        for (String part : withoutComments.split(";")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                statements.add(trimmed);
+            }
+        }
+        return statements;
     }
 }

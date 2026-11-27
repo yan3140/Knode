@@ -1,5 +1,6 @@
 -- Knode Search (05) Upgrade DDL: SEARCH-04 / SEARCH-04-R1 -> SEARCH-04-R2
 -- Target engine: dedicated independent MySQL 8 / InnoDB database, charset utf8mb4, UTC session/JDBC timezone.
+-- Compatible with MySQL 8 sql_require_primary_key = ON (atomic single-ALTER PRIMARY KEY swap).
 -- Manual deployment DDL only: run once on an existing SEARCH-04 or SEARCH-04-R1 schema while ops replay endpoints are quiesced.
 --
 -- Applicability and execution order:
@@ -8,7 +9,7 @@
 --   3) Upgrading from SEARCH-04 or SEARCH-04-R1 (search_ops_replay_audit already exists with VARCHAR PK): execute this script once.
 --
 -- Preserves all existing replay_request_id values, request fingerprints, responses, caller/operator audit fields and timestamps,
--- while backfilling exact UTF-8 bytes into replay_request_key (VARBINARY(64)) and switching PRIMARY KEY to replay_request_key
+-- while backfilling exact UTF-8 bytes into replay_request_key (VARBINARY(64)) and atomically switching PRIMARY KEY to replay_request_key
 -- so case-variant replayRequestId values (e.g. ReviewCaseKey vs reviewcasekey) compare and constrain byte-for-byte regardless of DB collation.
 
 ALTER TABLE search_ops_replay_audit
@@ -22,7 +23,5 @@ ALTER TABLE search_ops_replay_audit
     MODIFY COLUMN replay_request_key VARBINARY(64) NOT NULL;
 
 ALTER TABLE search_ops_replay_audit
-    DROP PRIMARY KEY;
-
-ALTER TABLE search_ops_replay_audit
+    DROP PRIMARY KEY,
     ADD PRIMARY KEY (replay_request_key);

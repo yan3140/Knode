@@ -7,6 +7,7 @@ import com.knode.search.consumer.persistence.SearchConsumerRepository;
 import com.knode.search.consumer.persistence.SearchIndexTaskRecord;
 import com.knode.search.consumer.persistence.SearchIndexTaskStatus;
 import com.knode.search.metrics.SearchMetrics;
+import com.knode.search.rebuild.SearchRebuildSchemaUpgradeTest;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -185,7 +186,7 @@ class SearchOpsReplayKeyCaseSensitivityTest {
                 insertDeadTask(env.jdbc, 8102L, 1L, "ES_LEGACY_2", BASE_NOW_MS - 4000);
 
                 // Apply SEARCH-04 / SEARCH-04-R1 -> SEARCH-04-R2 upgrade SQL
-                new ResourceDatabasePopulator(new ClassPathResource("db/search-ops-04-r2-upgrade.sql")).execute(env.ds);
+                SearchRebuildSchemaUpgradeTest.executeMySqlR2UpgradeScriptOnH2(env.jdbc);
 
                 // Verify legacy rows, fingerprints, operator/caller metadata, responses, timestamps & exact key bytes preserved
                 SearchOpsRepository opsRepo = new SearchOpsRepository(env.jdbc, env.consumerRepo);
@@ -275,7 +276,7 @@ class SearchOpsReplayKeyCaseSensitivityTest {
     @Test
     void concurrentSameKeyAndCaseVariantRetriesOnUpgradedCaseInsensitiveTablePreserveIdempotencyConflictAndRollback() throws Exception {
         try (TestEnv env = createLegacySearch04CaseInsensitiveEnv(false)) {
-            new ResourceDatabasePopulator(new ClassPathResource("db/search-ops-04-r2-upgrade.sql")).execute(env.ds);
+            SearchRebuildSchemaUpgradeTest.executeMySqlR2UpgradeScriptOnH2(env.jdbc);
 
             // Sub-case A & B: Two concurrent txs on ReviewCaseKey (limit=1), then two concurrent txs on reviewcasekey (limit=1)
             insertDeadTask(env.jdbc, 8201L, 1L, "ERR_1", BASE_NOW_MS - 9000);
