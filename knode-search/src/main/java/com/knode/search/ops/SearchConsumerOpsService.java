@@ -426,7 +426,7 @@ public class SearchConsumerOpsService {
                     Optional<SearchOpsRepository.ReplayAuditRecord> existing =
                             opsRepository.findReplayAudit(validReplayId);
                     if (existing.isPresent()) {
-                        return resolveIdempotentReplay(existing.get(), fingerprint);
+                        return resolveIdempotentReplay(existing.get(), validReplayId, fingerprint);
                     }
 
                     long nowMs = clock.millis();
@@ -465,7 +465,7 @@ public class SearchConsumerOpsService {
                 Optional<SearchOpsRepository.ReplayAuditRecord> committed =
                         transactionTemplate.execute(s -> opsRepository.findReplayAudit(validReplayId));
                 if (committed != null && committed.isPresent()) {
-                    return resolveIdempotentReplay(committed.get(), fingerprint);
+                    return resolveIdempotentReplay(committed.get(), validReplayId, fingerprint);
                 }
                 // Winner rolled back before our fresh read; retry bounded loop to claim cleanly.
             }
@@ -474,7 +474,13 @@ public class SearchConsumerOpsService {
     }
 
     private Map<String, Object> resolveIdempotentReplay(
-            SearchOpsRepository.ReplayAuditRecord existing, String expectedFingerprint) {
+            SearchOpsRepository.ReplayAuditRecord existing,
+            String expectedReplayRequestId,
+            String expectedFingerprint) {
+        if (!expectedReplayRequestId.equals(existing.replayRequestId())) {
+            throw new InternalOpsException(503, "DEPENDENCY_UNAVAILABLE",
+                    "Stored replay audit key does not match exact replayRequestId", true);
+        }
         if (!expectedFingerprint.equals(existing.requestFingerprint())) {
             throw new InternalOpsException(409, "IDEMPOTENCY_CONFLICT",
                     "replayRequestId was already used with different request parameters", false);

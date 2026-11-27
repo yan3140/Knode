@@ -183,7 +183,8 @@ CREATE INDEX idx_search_rebuild_evt_commit
     ON search_rebuild_event_log (candidate_generation, commit_sequence);
 
 CREATE TABLE IF NOT EXISTS search_ops_replay_audit (
-    replay_request_id VARCHAR(64) NOT NULL,
+    replay_request_key VARBINARY(64) NOT NULL,
+    replay_request_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
     operation_type VARCHAR(32) NOT NULL,
     target_event_id VARCHAR(128) NULL,
     request_fingerprint CHAR(64) NOT NULL,
@@ -193,7 +194,7 @@ CREATE TABLE IF NOT EXISTS search_ops_replay_audit (
     requeued_count BIGINT NOT NULL DEFAULT 0,
     response_json TEXT NOT NULL,
     created_at_ms BIGINT NOT NULL,
-    PRIMARY KEY (replay_request_id)
+    PRIMARY KEY (replay_request_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE INDEX idx_search_ops_replay_time

@@ -470,4 +470,71 @@ class SearchRebuildSchemaUpgradeTest {
             assertThat(opsRepo.findReplayAuditForUpdate("req-upgrade-04")).isPresent();
         }
     }
+
+    @Test
+    void upgradesSearch04R1SchemaToSearch04R2EnablingCaseExactReplayKeys() {
+        String dbName = "search_upgrade_04_r2_" + UUID.randomUUID().toString().replace("-", "");
+        HikariConfig hc = new HikariConfig();
+        hc.setJdbcUrl("jdbc:h2:mem:" + dbName + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1");
+        hc.setDriverClassName("org.h2.Driver");
+        hc.setUsername("sa");
+        hc.setPassword("");
+
+        try (HikariDataSource ds = new HikariDataSource(hc)) {
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+            jdbc.execute("SET COLLATION ENGLISH STRENGTH PRIMARY");
+
+            // Bootstrap legacy SEARCH-04 / SEARCH-04-R1 audit table (VARCHAR PK inheriting default CI collation).
+            jdbc.execute("""
+                    CREATE TABLE search_ops_replay_audit (
+                        replay_request_id VARCHAR(64) NOT NULL,
+                        operation_type VARCHAR(32) NOT NULL,
+                        target_event_id VARCHAR(128) NULL,
+                        request_fingerprint CHAR(64) NOT NULL,
+                        caller_service VARCHAR(128) NOT NULL,
+                        operator_id VARCHAR(128) NULL,
+                        response_status VARCHAR(32) NOT NULL,
+                        requeued_count BIGINT NOT NULL DEFAULT 0,
+                        response_json TEXT NOT NULL,
+                        created_at_ms BIGINT NOT NULL,
+                        PRIMARY KEY (replay_request_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """);
+            jdbc.execute("CREATE INDEX idx_search_ops_replay_time ON search_ops_replay_audit (created_at_ms)");
+            jdbc.update("""
+                    INSERT INTO search_ops_replay_audit (
+                        replay_request_id, operation_type, target_event_id, request_fingerprint,
+                        caller_service, operator_id, response_status, requeued_count, response_json, created_at_ms
+                    ) VALUES (
+                        'ReviewCaseKey', 'BATCH_RETRY', NULL, 'fp-upper',
+                        'knode-content', 'ops-admin', 'ACCEPTED', 1, '{"status":"ACCEPTED","replayRequestId":"ReviewCaseKey"}', 1700000010000
+                    )
+                    """);
+
+            // Apply SEARCH-04/R1 -> SEARCH-04-R2 upgrade SQL.
+            new ResourceDatabasePopulator(new ClassPathResource("db/search-ops-04-r2-upgrade.sql")).execute(ds);
+
+            ObjectMapper mapper = new ObjectMapper();
+            SearchConsumerRepository consumerRepo = new SearchConsumerRepository(jdbc, mapper);
+            SearchOpsRepository opsRepo = new SearchOpsRepository(jdbc, consumerRepo);
+            TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
+
+            SearchOpsRepository.ReplayAuditRecord preserved = opsRepo.findReplayAudit("ReviewCaseKey").orElseThrow();
+            assertThat(preserved.replayRequestId()).isEqualTo("ReviewCaseKey");
+            assertThat(preserved.requestFingerprint()).isEqualTo("fp-upper");
+            assertThat(preserved.callerService()).isEqualTo("knode-content");
+            assertThat(preserved.operatorId()).isEqualTo("ops-admin");
+            assertThat(preserved.createdAtMs()).isEqualTo(1700000010000L);
+            assertThat(opsRepo.findReplayAudit("reviewcasekey")).isEmpty();
+
+            Boolean insertedLower = tx.execute(status -> opsRepo.insertReplayAudit(new SearchOpsRepository.ReplayAuditRecord(
+                    "reviewcasekey", "BATCH_RETRY", null, "fp-lower",
+                    "knode-content", "ops-admin", "ACCEPTED", 1L,
+                    "{\"status\":\"ACCEPTED\",\"replayRequestId\":\"reviewcasekey\"}", 1700000020000L
+            )));
+            assertThat(insertedLower).isTrue();
+            assertThat(opsRepo.findReplayAudit("ReviewCaseKey").orElseThrow().requestFingerprint()).isEqualTo("fp-upper");
+            assertThat(opsRepo.findReplayAudit("reviewcasekey").orElseThrow().requestFingerprint()).isEqualTo("fp-lower");
+        }
+    }
 }

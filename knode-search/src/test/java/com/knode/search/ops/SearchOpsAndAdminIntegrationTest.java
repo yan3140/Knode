@@ -721,6 +721,53 @@ class SearchOpsAndAdminIntegrationTest {
         }
     }
 
+    @Test
+    void internalOpsHttpDistinguishesCaseVariantReplayRequestIdsAndReplaysExactResponses() throws Exception {
+        long now = System.currentTimeMillis();
+        insertTask(811L, "DEAD", 5, now - 5000, null, "NONE", "ERR_CASE_1", now - 5000);
+        insertTask(812L, "DEAD", 5, now - 4000, null, "NONE", "ERR_CASE_2", now - 4000);
+
+        String retryToken = serviceJwtSigner.signServiceToken(
+                "knode-content", "knode-search", List.of("ops:read", "ops:retry"), 120);
+        Map<String, String> headers = Map.of(
+                "Authorization", "Bearer " + retryToken,
+                "Content-Type", "application/json"
+        );
+
+        HttpResponse<String> upper = send("POST", "/internal/v1/ops/consumers/retry",
+                "{\"replayRequestId\":\"ReviewCaseKey\",\"operator\":\"ops-http\",\"limit\":1}", headers);
+        HttpResponse<String> lower = send("POST", "/internal/v1/ops/consumers/retry",
+                "{\"replayRequestId\":\"reviewcasekey\",\"operator\":\"ops-http\",\"limit\":1}", headers);
+
+        assertThat(upper.statusCode()).isEqualTo(200);
+        assertThat(lower.statusCode()).isEqualTo(200);
+        JsonNode upperJson = MAPPER.readTree(upper.body());
+        JsonNode lowerJson = MAPPER.readTree(lower.body());
+        assertThat(upperJson.path("replayRequestId").asText()).isEqualTo("ReviewCaseKey");
+        assertThat(upperJson.path("requeued").asText()).isEqualTo("1");
+        assertThat(lowerJson.path("replayRequestId").asText()).isEqualTo("reviewcasekey");
+        assertThat(lowerJson.path("requeued").asText()).isEqualTo("1");
+
+        SearchIndexTaskRecord t811 = consumerRepository.findIndexTask(1L, 811L).orElseThrow();
+        SearchIndexTaskRecord t812 = consumerRepository.findIndexTask(1L, 812L).orElseThrow();
+        assertThat(t811.status()).isEqualTo(SearchIndexTaskStatus.PENDING);
+        assertThat(t811.claimGeneration()).isEqualTo(2L);
+        assertThat(t812.status()).isEqualTo(SearchIndexTaskStatus.PENDING);
+        assertThat(t812.claimGeneration()).isEqualTo(2L);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM search_ops_replay_audit", Long.class)).isEqualTo(2L);
+
+        // Replay both IDs via HTTP -> exact committed response for each, zero extra mutations
+        HttpResponse<String> upperReplay = send("POST", "/internal/v1/ops/consumers/retry",
+                "{\"replayRequestId\":\"ReviewCaseKey\",\"operator\":\"ops-http\",\"limit\":1}", headers);
+        HttpResponse<String> lowerReplay = send("POST", "/internal/v1/ops/consumers/retry",
+                "{\"replayRequestId\":\"reviewcasekey\",\"operator\":\"ops-http\",\"limit\":1}", headers);
+        assertThat(upperReplay.body()).isEqualTo(upper.body());
+        assertThat(lowerReplay.body()).isEqualTo(lower.body());
+        assertThat(consumerRepository.findIndexTask(1L, 811L).orElseThrow().claimGeneration()).isEqualTo(2L);
+        assertThat(consumerRepository.findIndexTask(1L, 812L).orElseThrow().claimGeneration()).isEqualTo(2L);
+    }
+
     private boolean esDocSearchable(String articleId) throws Exception {
         StatefulElasticsearchStub.StoredDoc doc = esStub.getWrittenDocument(ES_ALIAS + "_g1", articleId);
         assertThat(doc).as("ES doc %s", articleId).isNotNull();

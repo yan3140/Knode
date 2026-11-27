@@ -12,6 +12,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -357,17 +358,21 @@ public class SearchOpsRepository {
         );
     }
 
+    private static byte[] toReplayRequestKey(String replayRequestId) {
+        return replayRequestId.getBytes(StandardCharsets.UTF_8);
+    }
+
     public Optional<ReplayAuditRecord> findReplayAuditForUpdate(String replayRequestId) {
         List<ReplayAuditRecord> rows = jdbcTemplate.query(
                 """
                 SELECT replay_request_id, operation_type, target_event_id, request_fingerprint,
                        caller_service, operator_id, response_status, requeued_count, response_json, created_at_ms
                 FROM search_ops_replay_audit
-                WHERE replay_request_id = ?
+                WHERE replay_request_key = ?
                 FOR UPDATE
                 """,
                 SearchOpsRepository::mapReplayAuditRow,
-                replayRequestId
+                (Object) toReplayRequestKey(replayRequestId)
         );
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
@@ -378,10 +383,10 @@ public class SearchOpsRepository {
                 SELECT replay_request_id, operation_type, target_event_id, request_fingerprint,
                        caller_service, operator_id, response_status, requeued_count, response_json, created_at_ms
                 FROM search_ops_replay_audit
-                WHERE replay_request_id = ?
+                WHERE replay_request_key = ?
                 """,
                 SearchOpsRepository::mapReplayAuditRow,
-                replayRequestId
+                (Object) toReplayRequestKey(replayRequestId)
         );
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
@@ -406,10 +411,11 @@ public class SearchOpsRepository {
             jdbcTemplate.update(
                     """
                     INSERT INTO search_ops_replay_audit (
-                        replay_request_id, operation_type, target_event_id, request_fingerprint,
+                        replay_request_key, replay_request_id, operation_type, target_event_id, request_fingerprint,
                         caller_service, operator_id, response_status, requeued_count, response_json, created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
+                    toReplayRequestKey(record.replayRequestId()),
                     record.replayRequestId(),
                     record.operationType(),
                     record.targetEventId(),
@@ -435,12 +441,12 @@ public class SearchOpsRepository {
                 SET response_status = ?,
                     requeued_count = ?,
                     response_json = ?
-                WHERE replay_request_id = ?
+                WHERE replay_request_key = ?
                 """,
                 responseStatus,
                 requeuedCount,
                 responseJson,
-                replayRequestId
+                toReplayRequestKey(replayRequestId)
         );
         if (updated != 1) {
             throw new IllegalStateException(
