@@ -679,6 +679,7 @@ public class SearchRebuildRepository {
     public void activateCandidateGenerationInCurrentTx(
             RebuildJobRecord job, boolean cacheEnabled, String cutoverBypassOwner, long nowMs) {
         consumerRepository.ensureAndLockGeneration(job.aliasName(), job.sourcePhysicalIndex(), nowMs);
+        consumerRepository.promoteGenerationVersionBarriersInCurrentTx(job.candidateGeneration(), nowMs);
         String cacheStatus = cacheEnabled
                 ? CacheInvalidationStatus.PENDING.name()
                 : CacheInvalidationStatus.DONE.name();

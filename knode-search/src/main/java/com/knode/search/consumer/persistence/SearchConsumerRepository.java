@@ -15,8 +15,11 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Repository
 @ConditionalOnProperty(prefix = "knode.search.consumer", name = "enabled", havingValue = "true")
@@ -207,13 +210,24 @@ public class SearchConsumerRepository {
         );
     }
 
+    public static int visibilityRank(ArticleVisibility visibility) {
+        if (visibility == null) {
+            return 0;
+        }
+        return switch (visibility) {
+            case DELETED -> 3;
+            case WITHDRAWN -> 2;
+            case PUBLIC -> 1;
+            case NONE -> 0;
+        };
+    }
+
     public void advanceVersionBarrierIfHigher(
             long articleId, long contentRevision, ArticleVisibility visibility, long nowMs) {
         ArticleVersionBarrier current = ensureAndLockVersionBarrier(articleId, nowMs);
         if (contentRevision > current.maxContentRevision()
                 || (contentRevision == current.maxContentRevision()
-                && current.lastVisibility() != ArticleVisibility.DELETED
-                && (visibility == ArticleVisibility.DELETED || visibility == ArticleVisibility.WITHDRAWN))) {
+                && visibilityRank(visibility) > visibilityRank(current.lastVisibility()))) {
             jdbcTemplate.update(
                     """
                     UPDATE search_article_version_barrier
@@ -228,6 +242,250 @@ public class SearchConsumerRepository {
                     articleId
             );
         }
+    }
+
+    /**
+     * Atomically promotes all content/visibility versions from a newly activated candidate generation
+     * into the cross-generation version barrier inside the cutover activation transaction.
+     * Existing higher or stronger barriers (such as prior-generation DELETED/WITHDRAWN barriers)
+     * are strictly preserved.
+     */
+    public void promoteGenerationVersionBarriersInCurrentTx(long indexGeneration, long nowMs) {
+        jdbcTemplate.update(
+                """
+                UPDATE search_article_version_barrier
+                SET last_visibility = (
+                        SELECT p.visibility
+                        FROM search_article_projection p
+                        WHERE p.index_generation = ?
+                          AND p.article_id = search_article_version_barrier.article_id
+                    ),
+                    max_content_revision = (
+                        SELECT p.content_revision
+                        FROM search_article_projection p
+                        WHERE p.index_generation = ?
+                          AND p.article_id = search_article_version_barrier.article_id
+                    ),
+                    updated_at_ms = ?
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM search_article_projection p
+                    WHERE p.index_generation = ?
+                      AND p.article_id = search_article_version_barrier.article_id
+                      AND p.has_content = 1
+                      AND p.content_revision > 0
+                      AND (
+                          p.content_revision > search_article_version_barrier.max_content_revision
+                          OR (
+                              p.content_revision = search_article_version_barrier.max_content_revision
+                              AND (
+                                  CASE p.visibility WHEN 'DELETED' THEN 3 WHEN 'WITHDRAWN' THEN 2 WHEN 'PUBLIC' THEN 1 ELSE 0 END
+                                  > CASE search_article_version_barrier.last_visibility WHEN 'DELETED' THEN 3 WHEN 'WITHDRAWN' THEN 2 WHEN 'PUBLIC' THEN 1 ELSE 0 END
+                              )
+                          )
+                      )
+                )
+                """,
+                indexGeneration,
+                indexGeneration,
+                nowMs,
+                indexGeneration
+        );
+        jdbcTemplate.update(
+                """
+                INSERT IGNORE INTO search_article_version_barrier (
+                    article_id, max_content_revision, last_visibility, updated_at_ms
+                )
+                SELECT p.article_id, p.content_revision, p.visibility, ?
+                FROM search_article_projection p
+                WHERE p.index_generation = ?
+                  AND p.has_content = 1
+                  AND p.content_revision > 0
+                """,
+                nowMs,
+                indexGeneration
+        );
+    }
+
+    /**
+     * Resolves the effective cross-generation barrier for an active-generation read/write path.
+     * If a legacy pre-R6 unactivated candidate generation polluted search_article_version_barrier
+     * beyond all activated generations, restores the effective barrier strictly to the highest
+     * activated-generation projection (or (0, NONE) if none exists), while preserving all valid
+     * activated and standalone delete barriers.
+     */
+    public ArticleVersionBarrier resolveEffectiveVersionBarrier(
+            long activeGeneration,
+            long articleId,
+            ArticleVersionBarrier rawBarrier,
+            boolean repairInCurrentTx,
+            long nowMs) {
+        if (rawBarrier == null || rawBarrier.maxContentRevision() <= 0L) {
+            return rawBarrier;
+        }
+        Set<Long> activatedGens = findActivatedGenerations(activeGeneration);
+        List<Long> unactivatedGens = findUnactivatedCandidateGenerations(activatedGens);
+        if (unactivatedGens.isEmpty()) {
+            return rawBarrier;
+        }
+
+        ProjectionVersionSnapshot bestActivated = findHighestProjectionVersion(activatedGens, articleId);
+        if (bestActivated != null
+                && compareBarrierVersion(
+                        bestActivated.contentRevision(), bestActivated.visibility(),
+                        rawBarrier.maxContentRevision(), rawBarrier.lastVisibility()) >= 0) {
+            return rawBarrier;
+        }
+
+        List<ProjectionVersionSnapshot> unactivatedProjections = findProjectionVersions(unactivatedGens, articleId);
+        boolean explainedByUnactivatedCandidate = false;
+        for (ProjectionVersionSnapshot candidate : unactivatedProjections) {
+            if (candidate.contentRevision() == rawBarrier.maxContentRevision()
+                    && candidate.visibility() == rawBarrier.lastVisibility()) {
+                explainedByUnactivatedCandidate = true;
+                break;
+            }
+            if (candidate.contentRevision() > rawBarrier.maxContentRevision()
+                    && (rawBarrier.lastVisibility() == ArticleVisibility.PUBLIC
+                    || existsAppliedRebuildEventForRevision(
+                            candidate.indexGeneration(), articleId, rawBarrier.maxContentRevision()))) {
+                explainedByUnactivatedCandidate = true;
+                break;
+            }
+        }
+        if (!explainedByUnactivatedCandidate) {
+            return rawBarrier;
+        }
+
+        long healedRev = bestActivated == null ? 0L : bestActivated.contentRevision();
+        ArticleVisibility healedVis = bestActivated == null ? ArticleVisibility.NONE : bestActivated.visibility();
+        if (repairInCurrentTx) {
+            jdbcTemplate.update(
+                    """
+                    UPDATE search_article_version_barrier
+                    SET max_content_revision = ?,
+                        last_visibility = ?,
+                        updated_at_ms = ?
+                    WHERE article_id = ?
+                    """,
+                    healedRev,
+                    healedVis.name(),
+                    nowMs,
+                    articleId
+            );
+        }
+        return new ArticleVersionBarrier(articleId, healedRev, healedVis, nowMs);
+    }
+
+    private Set<Long> findActivatedGenerations(long activeGeneration) {
+        Set<Long> gens = new LinkedHashSet<>();
+        gens.add(DEFAULT_GENERATION);
+        if (activeGeneration > 0L) {
+            gens.add(activeGeneration);
+        }
+        gens.addAll(jdbcTemplate.query(
+                """
+                SELECT active_generation AS gen FROM search_index_generation
+                UNION
+                SELECT previous_generation AS gen FROM search_index_generation WHERE previous_generation IS NOT NULL
+                UNION
+                SELECT source_generation AS gen FROM search_rebuild_job
+                UNION
+                SELECT candidate_generation AS gen FROM search_rebuild_job WHERE phase IN ('CACHE_INVALIDATING', 'COMPLETED')
+                """,
+                (rs, rowNum) -> rs.getLong("gen")
+        ));
+        return gens;
+    }
+
+    private List<Long> findUnactivatedCandidateGenerations(Set<Long> activatedGens) {
+        List<Long> raw = jdbcTemplate.query(
+                """
+                SELECT DISTINCT candidate_generation
+                FROM search_rebuild_job
+                WHERE phase NOT IN ('CACHE_INVALIDATING', 'COMPLETED')
+                """,
+                (rs, rowNum) -> rs.getLong("candidate_generation")
+        );
+        List<Long> unactivated = new ArrayList<>();
+        for (Long gen : raw) {
+            if (gen != null && !activatedGens.contains(gen)) {
+                unactivated.add(gen);
+            }
+        }
+        return unactivated;
+    }
+
+    private ProjectionVersionSnapshot findHighestProjectionVersion(Set<Long> generations, long articleId) {
+        List<ProjectionVersionSnapshot> rows = findProjectionVersions(new ArrayList<>(generations), articleId);
+        ProjectionVersionSnapshot best = null;
+        for (ProjectionVersionSnapshot row : rows) {
+            if (best == null
+                    || compareBarrierVersion(
+                            row.contentRevision(), row.visibility(),
+                            best.contentRevision(), best.visibility()) > 0) {
+                best = row;
+            }
+        }
+        return best;
+    }
+
+    private List<ProjectionVersionSnapshot> findProjectionVersions(List<Long> generations, long articleId) {
+        if (generations == null || generations.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = generations.stream().map(g -> "?").collect(Collectors.joining(", "));
+        Object[] args = new Object[generations.size() + 1];
+        for (int i = 0; i < generations.size(); i++) {
+            args[i] = generations.get(i);
+        }
+        args[generations.size()] = articleId;
+        String sql = "SELECT index_generation, content_revision, visibility "
+                + "FROM search_article_projection "
+                + "WHERE index_generation IN (" + placeholders + ") "
+                + "AND article_id = ? AND has_content = 1 AND content_revision > 0";
+        return jdbcTemplate.query(
+                sql,
+                (rs, rowNum) -> new ProjectionVersionSnapshot(
+                        rs.getLong("index_generation"),
+                        rs.getLong("content_revision"),
+                        ArticleVisibility.valueOf(rs.getString("visibility"))
+                ),
+                args
+        );
+    }
+
+    private boolean existsAppliedRebuildEventForRevision(
+            long candidateGeneration, long articleId, long sourceRevision) {
+        List<Integer> rows = jdbcTemplate.query(
+                """
+                SELECT 1
+                FROM search_rebuild_event_log
+                WHERE candidate_generation = ?
+                  AND aggregate_id = ?
+                  AND source_revision = ?
+                  AND status = 'APPLIED'
+                LIMIT 1
+                """,
+                (rs, rowNum) -> rs.getInt(1),
+                candidateGeneration,
+                Long.toString(articleId),
+                sourceRevision
+        );
+        return !rows.isEmpty();
+    }
+
+    private static int compareBarrierVersion(
+            long leftRev, ArticleVisibility leftVis, long rightRev, ArticleVisibility rightVis) {
+        int revCmp = Long.compare(leftRev, rightRev);
+        if (revCmp != 0) {
+            return revCmp;
+        }
+        return Integer.compare(visibilityRank(leftVis), visibilityRank(rightVis));
+    }
+
+    private record ProjectionVersionSnapshot(
+            long indexGeneration, long contentRevision, ArticleVisibility visibility) {
     }
 
     // === Active Stream Inbox & Failure Log ===

@@ -1001,8 +1001,8 @@ public class SearchRebuildService {
                 nowMs
         );
         consumerRepository.updateProjection(gen, updated);
-        consumerRepository.advanceVersionBarrierIfHigher(
-                item.articleId(), item.sourceRevision(), ArticleVisibility.PUBLIC, nowMs);
+        // Candidate generation versions stay isolated in search_article_projection(candidate_generation, article_id)
+        // and are promoted to search_article_version_barrier atomically on cutover activation.
         upsertCandidatePublicTask(job, updated, nowMs);
     }
 
@@ -1059,8 +1059,7 @@ public class SearchRebuildService {
                     nowMs
             );
             consumerRepository.updateProjection(gen, updated);
-            consumerRepository.advanceVersionBarrierIfHigher(
-                    publicEvent.articleId(), publicEvent.sourceRevision(), ArticleVisibility.PUBLIC, nowMs);
+            // Candidate generation versions stay isolated until cutover activation.
             upsertCandidatePublicTask(job, updated, nowMs);
             rebuildRepository.updateRebuildEventStatus(gen, publicEvent.eventId(), "APPLIED", nowMs);
             return;
@@ -1092,8 +1091,7 @@ public class SearchRebuildService {
                     nowMs
             );
             consumerRepository.updateProjection(gen, updated);
-            consumerRepository.advanceVersionBarrierIfHigher(
-                    hiddenEvent.articleId(), hiddenEvent.sourceRevision(), hiddenEvent.visibility(), nowMs);
+            // Candidate generation hidden/delete versions stay isolated until cutover activation.
             SearchIndexDocument tombstone = SearchIndexDocument.tombstone(
                     updated.articleId(), updated.contentRevision());
             consumerRepository.upsertPendingIndexTask(

@@ -352,6 +352,39 @@ public class SearchRebuildSchemaUpgradeTest {
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """);
 
+            jdbc.execute("""
+                    CREATE TABLE search_article_version_barrier (
+                        article_id BIGINT NOT NULL,
+                        max_content_revision BIGINT NOT NULL DEFAULT 0,
+                        last_visibility VARCHAR(32) NOT NULL DEFAULT 'NONE',
+                        updated_at_ms BIGINT NOT NULL,
+                        PRIMARY KEY (article_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """);
+            jdbc.execute("""
+                    CREATE TABLE search_article_projection (
+                        index_generation BIGINT NOT NULL DEFAULT 1,
+                        article_id BIGINT NOT NULL,
+                        has_content TINYINT(1) NOT NULL DEFAULT 0,
+                        content_revision BIGINT NOT NULL DEFAULT 0,
+                        visibility VARCHAR(32) NOT NULL DEFAULT 'NONE',
+                        counter_revision BIGINT NOT NULL DEFAULT 0,
+                        view_count BIGINT NOT NULL DEFAULT 0,
+                        projection_revision BIGINT NOT NULL DEFAULT 0,
+                        title VARCHAR(256) NULL,
+                        summary VARCHAR(1024) NULL,
+                        content LONGTEXT NULL,
+                        category_id BIGINT NULL,
+                        category_name VARCHAR(256) NULL,
+                        tag_names_json TEXT NULL,
+                        thumbnail VARCHAR(2048) NULL,
+                        is_top VARCHAR(8) NULL,
+                        create_time_ms BIGINT NULL,
+                        updated_at_ms BIGINT NOT NULL,
+                        PRIMARY KEY (index_generation, article_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """);
+
             // Seed a legacy R2 generation row that is mid-PENDING cache compensation.
             jdbc.update("""
                     INSERT INTO search_index_generation (
@@ -558,6 +591,125 @@ public class SearchRebuildSchemaUpgradeTest {
         assertThat(statements.stream()
                 .filter(s -> s.toUpperCase().contains("DROP PRIMARY KEY") && !s.toUpperCase().contains("ADD PRIMARY KEY"))
                 .count()).isZero();
+    }
+
+    @Test
+    void upgradesSearch03LegacyPollutedVersionBarriersViaR6UpgradeSqlIdempotently() {
+        String dbName = "search_upgrade_r6_" + UUID.randomUUID().toString().replace("-", "");
+        HikariConfig hc = new HikariConfig();
+        hc.setJdbcUrl("jdbc:h2:mem:" + dbName
+                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1");
+        hc.setDriverClassName("org.h2.Driver");
+        hc.setUsername("sa");
+        hc.setPassword("");
+
+        try (HikariDataSource ds = new HikariDataSource(hc)) {
+            ResourceDatabasePopulator basePopulator = new ResourceDatabasePopulator(
+                    new ClassPathResource("db/search-consumer-schema.sql"));
+            basePopulator.execute(ds);
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+
+            long t0 = 1700000000000L;
+            // Generation state: g1 -> g3 (COMPLETED), while g2 FAILED (abandoned, g2 < active_generation=3!)
+            // and g4 is currently SNAPSHOT_IMPORTING (unactivated).
+            jdbc.update("""
+                    INSERT INTO search_index_generation (
+                        alias_name, active_generation, active_physical_index, require_cold_visibility_guard,
+                        cutover_state, previous_generation, previous_physical_index,
+                        active_cache_invalidation_status, active_cache_invalidation_attempts, updated_at_ms
+                    ) VALUES (
+                        'knode_articles_search', 3, 'knode_articles_search_g3', 1,
+                        'NORMAL', 1, 'knode_articles_search_g1', 'DONE', 0, ?
+                    )
+                    """, t0);
+            jdbc.update("""
+                    INSERT INTO search_rebuild_job (
+                        job_id, alias_name, active_lock_key, client_request_id,
+                        snapshot_done, snapshot_pages_imported, snapshot_items_imported,
+                        last_commit_sequence, incremental_commits_applied, incremental_events_applied,
+                        source_generation, source_physical_index, candidate_generation, candidate_physical_index,
+                        phase, lease_owner, lease_until_ms, lease_generation,
+                        alias_switch_uncertain, switch_attempts, created_at_ms, updated_at_ms
+                    ) VALUES
+                        ('rb-g2-failed', 'knode_articles_search', NULL, 'req-g2',
+                         1, 1, 2, 0, 0, 0, 1, 'knode_articles_search_g1', 2, 'knode_articles_search_g2',
+                         'FAILED', 'i1', ?, 1, 0, 0, ?, ?),
+                        ('rb-g3-done', 'knode_articles_search', NULL, 'req-g3',
+                         1, 1, 2, 0, 0, 0, 1, 'knode_articles_search_g1', 3, 'knode_articles_search_g3',
+                         'COMPLETED', 'i1', ?, 1, 0, 1, ?, ?),
+                        ('rb-g4-snap', 'knode_articles_search', 'knode_articles_search', 'req-g4',
+                         0, 1, 3, 0, 0, 0, 3, 'knode_articles_search_g3', 4, 'knode_articles_search_g4',
+                         'SNAPSHOT_IMPORTING', 'i1', ?, 1, 0, 0, ?, ?)
+                    """, t0, t0, t0, t0, t0, t0, t0, t0, t0);
+
+            // Activated projections (g1, g3):
+            // 101: g3 PUBLIC v1; 102: g3 PUBLIC v1; 103: g1 DELETED v5 (prior activated delete barrier);
+            // 106: g3 PUBLIC v3 (missing barrier -> must be backfilled!).
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility,
+                        counter_revision, view_count, projection_revision, title, summary, content, updated_at_ms
+                    ) VALUES
+                        (3, 101, 1, 1, 'PUBLIC', 0, 1, 1, 'A101', 'S', 'B', ?),
+                        (3, 102, 1, 1, 'PUBLIC', 0, 1, 1, 'A102', 'S', 'B', ?),
+                        (1, 103, 1, 5, 'DELETED', 0, 0, 2, NULL, NULL, NULL, ?),
+                        (3, 106, 1, 3, 'PUBLIC', 0, 5, 1, 'A106', 'S', 'B', ?)
+                    """, t0, t0, t0, t0);
+
+            // Unactivated candidate projections (abandoned g2 & in-progress g4):
+            // 101: g4 PUBLIC v2 (polluted!); 102: g2 DELETED v2 (polluted from g2 < active 3!);
+            // 104: g4 PUBLIC v1 (brand new, purely candidate-polluted -> must be deleted!).
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility,
+                        counter_revision, view_count, projection_revision, title, summary, content, updated_at_ms
+                    ) VALUES
+                        (4, 101, 1, 2, 'PUBLIC', 0, 1, 1, 'A101 V2', 'S', 'B', ?),
+                        (2, 102, 1, 2, 'DELETED', 0, 0, 1, NULL, NULL, NULL, ?),
+                        (4, 104, 1, 1, 'PUBLIC', 0, 1, 1, 'A104 New', 'S', 'B', ?)
+                    """, t0 + 100, t0 + 100, t0 + 100);
+
+            // Seed polluted + valid barriers (105 is standalone DELETED v8 with no projection in any gen).
+            jdbc.update("""
+                    INSERT INTO search_article_version_barrier (
+                        article_id, max_content_revision, last_visibility, updated_at_ms
+                    ) VALUES
+                        (101, 2, 'PUBLIC', ?),
+                        (102, 2, 'DELETED', ?),
+                        (103, 5, 'DELETED', ?),
+                        (104, 1, 'PUBLIC', ?),
+                        (105, 8, 'DELETED', ?)
+                    """, t0 + 100, t0 + 100, t0, t0 + 100, t0);
+
+            ResourceDatabasePopulator r6Populator = new ResourceDatabasePopulator(
+                    new ClassPathResource("db/search-rebuild-03-r6-upgrade.sql"));
+            r6Populator.execute(ds);
+            // Re-run idempotently to confirm zero errors and stable final state.
+            r6Populator.execute(ds);
+
+            SearchConsumerRepository consumerRepo = new SearchConsumerRepository(jdbc, new ObjectMapper());
+            // 101 & 102 repaired strictly back to activated g3's (1, PUBLIC)!
+            assertThat(consumerRepo.findVersionBarrier(101L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(1L, ArticleVisibility.PUBLIC);
+            assertThat(consumerRepo.findVersionBarrier(102L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(1L, ArticleVisibility.PUBLIC);
+            // 103 (prior activated g1 DELETED v5) strictly preserved!
+            assertThat(consumerRepo.findVersionBarrier(103L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(5L, ArticleVisibility.DELETED);
+            // 104 (purely candidate-polluted) deleted!
+            assertThat(consumerRepo.findVersionBarrier(104L)).isEmpty();
+            // 105 (standalone legacy DELETED v8) strictly preserved!
+            assertThat(consumerRepo.findVersionBarrier(105L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(8L, ArticleVisibility.DELETED);
+            // 106 (missing activated g3 projection) backfilled!
+            assertThat(consumerRepo.findVersionBarrier(106L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(3L, ArticleVisibility.PUBLIC);
+        }
     }
 
     /**

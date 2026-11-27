@@ -193,7 +193,11 @@ public class ContentEventIngestionService {
         }
         Optional<ArticleVersionBarrier> barrier = repository.findVersionBarrier(publicEvent.articleId());
         if (barrier.isPresent() && barrier.get().maxContentRevision() >= publicEvent.sourceRevision()) {
-            return null;
+            ArticleVersionBarrier effectiveBarrier = repository.resolveEffectiveVersionBarrier(
+                    gen.activeGeneration(), publicEvent.articleId(), barrier.get(), false, clock.millis());
+            if (effectiveBarrier.maxContentRevision() >= publicEvent.sourceRevision()) {
+                return null;
+            }
         }
         if (visibilityClient == null) {
             throw new IllegalStateException(
@@ -220,6 +224,10 @@ public class ContentEventIngestionService {
         long gen = generation.activeGeneration();
         ArticleVersionBarrier barrier = repository.ensureAndLockVersionBarrier(event.articleId(), nowMs);
         ArticleProjectionRecord current = repository.ensureAndLockProjection(gen, event.articleId(), nowMs);
+        if (barrier.maxContentRevision() > current.contentRevision()
+                && event.sourceRevision() <= barrier.maxContentRevision()) {
+            barrier = repository.resolveEffectiveVersionBarrier(gen, event.articleId(), barrier, true, nowMs);
+        }
 
         long effectiveFloor = Math.max(current.contentRevision(), barrier.maxContentRevision());
         if (event.sourceRevision() <= effectiveFloor) {
@@ -358,6 +366,10 @@ public class ContentEventIngestionService {
         long gen = generation.activeGeneration();
         ArticleVersionBarrier barrier = repository.ensureAndLockVersionBarrier(event.articleId(), nowMs);
         ArticleProjectionRecord current = repository.ensureAndLockProjection(gen, event.articleId(), nowMs);
+        if (barrier.maxContentRevision() > current.contentRevision()
+                && event.sourceRevision() <= barrier.maxContentRevision()) {
+            barrier = repository.resolveEffectiveVersionBarrier(gen, event.articleId(), barrier, true, nowMs);
+        }
 
         long effectiveFloor = Math.max(current.contentRevision(), barrier.maxContentRevision());
         if (event.sourceRevision() <= effectiveFloor) {

@@ -226,6 +226,13 @@ public class SearchAdminService {
         long activeGen = gen.activeGeneration();
         ArticleVersionBarrier barrier = consumerRepository.ensureAndLockVersionBarrier(articleId, nowMs);
         ArticleProjectionRecord current = consumerRepository.ensureAndLockProjection(activeGen, articleId, nowMs);
+        if (barrier.maxContentRevision() > current.contentRevision()
+                || (barrier.maxContentRevision() == current.contentRevision()
+                && barrier.maxContentRevision() > 0L
+                && SearchConsumerRepository.visibilityRank(barrier.lastVisibility())
+                > SearchConsumerRepository.visibilityRank(current.visibility()))) {
+            barrier = consumerRepository.resolveEffectiveVersionBarrier(activeGen, articleId, barrier, true, nowMs);
+        }
         long effectiveFloor = Math.max(current.contentRevision(), barrier.maxContentRevision());
 
         if (authoritative.isReadablePublic()) {
