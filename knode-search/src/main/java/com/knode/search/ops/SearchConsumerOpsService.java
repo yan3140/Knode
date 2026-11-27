@@ -40,6 +40,8 @@ public class SearchConsumerOpsService {
     private static final int MAX_PAGE_NUM = 100_000;
     private static final int MAX_PAGE_SIZE = 100;
     private static final int DEFAULT_PAGE_SIZE = 20;
+    private static final int MAX_IDEMPOTENCY_RACE_ATTEMPTS = 3;
+    private static final String AUDIT_STATUS_IN_PROGRESS = "IN_PROGRESS";
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
     };
 
@@ -241,47 +243,30 @@ public class SearchConsumerOpsService {
                 + (validOperator == null ? "" : validOperator) + "\n" + limit);
 
         try {
-            Map<String, Object> result = transactionTemplate.execute(status -> {
-                Optional<SearchOpsRepository.ReplayAuditRecord> existing =
-                        opsRepository.findReplayAuditForUpdate(validReplayId);
-                if (existing.isPresent()) {
-                    return resolveIdempotentReplay(existing.get(), fingerprint);
-                }
-                long nowMs = clock.millis();
-                SearchOpsRepository.BatchRetryOutcome outcome =
-                        opsRepository.requeueBatchInCurrentTx(aliasName, aliasName, limit, nowMs);
+            Map<String, Object> result = executeIdempotentReplay(
+                    "BATCH_RETRY",
+                    null,
+                    validReplayId,
+                    fingerprint,
+                    callerService,
+                    validOperator,
+                    nowMs -> {
+                        SearchOpsRepository.BatchRetryOutcome outcome =
+                                opsRepository.requeueBatchInCurrentTx(aliasName, aliasName, limit, nowMs);
 
-                Map<String, Object> response = new LinkedHashMap<>();
-                response.put("status", "ACCEPTED");
-                response.put("replayRequestId", validReplayId);
-                response.put("requeued", Long.toString(outcome.requeued()));
-                response.put("skippedActiveLease", Long.toString(outcome.skippedActiveLease()));
-                response.put("cacheCompensationsExpedited", Long.toString(outcome.cacheCompensationsExpedited()));
-                response.put("callerService", callerService);
-                if (validOperator != null) {
-                    response.put("operator", validOperator);
-                }
-                String json = serializeJson(response);
-                boolean inserted = opsRepository.insertReplayAudit(new SearchOpsRepository.ReplayAuditRecord(
-                        validReplayId,
-                        "BATCH_RETRY",
-                        null,
-                        fingerprint,
-                        callerService,
-                        validOperator,
-                        "ACCEPTED",
-                        outcome.requeued(),
-                        json,
-                        nowMs
-                ));
-                if (!inserted) {
-                    SearchOpsRepository.ReplayAuditRecord raced = opsRepository.findReplayAuditForUpdate(validReplayId)
-                            .orElseThrow(() -> new InternalOpsException(409, "IDEMPOTENCY_CONFLICT",
-                                    "Concurrent replayRequestId conflict", false));
-                    return resolveIdempotentReplay(raced, fingerprint);
-                }
-                return response;
-            });
+                        Map<String, Object> response = new LinkedHashMap<>();
+                        response.put("status", "ACCEPTED");
+                        response.put("replayRequestId", validReplayId);
+                        response.put("requeued", Long.toString(outcome.requeued()));
+                        response.put("skippedActiveLease", Long.toString(outcome.skippedActiveLease()));
+                        response.put("cacheCompensationsExpedited", Long.toString(outcome.cacheCompensationsExpedited()));
+                        response.put("callerService", callerService);
+                        if (validOperator != null) {
+                            response.put("operator", validOperator);
+                        }
+                        return new ReplayWorkResult("ACCEPTED", outcome.requeued(), response);
+                    }
+            );
             searchMetrics.recordOpsRetry("batch", "accepted");
             LOGGER.info("event=search_ops_batch_retry caller={} operator={} replayRequestId={} requeued={}",
                     callerService, validOperator, validReplayId, result.get("requeued"));
@@ -312,70 +297,53 @@ public class SearchConsumerOpsService {
                 + (validOperator == null ? "" : validOperator));
 
         try {
-            Map<String, Object> result = transactionTemplate.execute(status -> {
-                Optional<SearchOpsRepository.ReplayAuditRecord> existing =
-                        opsRepository.findReplayAuditForUpdate(validReplayId);
-                if (existing.isPresent()) {
-                    return resolveIdempotentReplay(existing.get(), fingerprint);
-                }
-                if (opsRepository.hasProtocolFailureForEvent(eventId)) {
-                    throw new InternalOpsException(409, "STATE_CONFLICT",
-                            "Poison/protocol-failed event cannot be replayed by search consumer", false);
-                }
-                SearchOpsRepository.InboxLookupRecord inbox = opsRepository.findInboxByEventId(eventId)
-                        .orElseThrow(() -> new InternalOpsException(404, "RESOURCE_NOT_FOUND",
-                                "Consumer event not found: " + eventId, false));
+            Map<String, Object> result = executeIdempotentReplay(
+                    "SINGLE_RETRY",
+                    eventId,
+                    validReplayId,
+                    fingerprint,
+                    callerService,
+                    validOperator,
+                    nowMs -> {
+                        if (opsRepository.hasProtocolFailureForEvent(eventId)) {
+                            throw new InternalOpsException(409, "STATE_CONFLICT",
+                                    "Poison/protocol-failed event cannot be replayed by search consumer", false);
+                        }
+                        SearchOpsRepository.InboxLookupRecord inbox = opsRepository.findInboxByEventId(eventId)
+                                .orElseThrow(() -> new InternalOpsException(404, "RESOURCE_NOT_FOUND",
+                                        "Consumer event not found: " + eventId, false));
 
-                long nowMs = clock.millis();
-                SearchOpsRepository.SingleRetryOutcome outcome;
-                String articleIdStr = null;
-                if ("IGNORED".equals(inbox.status()) || "STALE_IGNORED".equals(inbox.status())) {
-                    outcome = new SearchOpsRepository.SingleRetryOutcome("NOOP", 0L, "EVENT_" + inbox.status());
-                } else {
-                    String normalizedArticleId = CanonicalIdParser.normalizePositiveDecimalString(inbox.aggregateId());
-                    if (normalizedArticleId == null) {
-                        throw new InternalOpsException(409, "STATE_CONFLICT",
-                                "Event aggregateId is not a valid articleId", false);
+                        SearchOpsRepository.SingleRetryOutcome outcome;
+                        String articleIdStr = null;
+                        if ("IGNORED".equals(inbox.status()) || "STALE_IGNORED".equals(inbox.status())) {
+                            outcome = new SearchOpsRepository.SingleRetryOutcome("NOOP", 0L, "EVENT_" + inbox.status());
+                        } else {
+                            String normalizedArticleId = CanonicalIdParser.normalizePositiveDecimalString(inbox.aggregateId());
+                            if (normalizedArticleId == null) {
+                                throw new InternalOpsException(409, "STATE_CONFLICT",
+                                        "Event aggregateId is not a valid articleId", false);
+                            }
+                            articleIdStr = normalizedArticleId;
+                            outcome = opsRepository.requeueSingleArticleInCurrentTx(
+                                    aliasName, aliasName, Long.parseLong(normalizedArticleId), nowMs);
+                        }
+
+                        Map<String, Object> response = new LinkedHashMap<>();
+                        response.put("status", outcome.status());
+                        response.put("replayRequestId", validReplayId);
+                        response.put("eventId", eventId);
+                        if (articleIdStr != null) {
+                            response.put("articleId", articleIdStr);
+                        }
+                        response.put("requeued", Long.toString(outcome.requeued()));
+                        response.put("reason", outcome.reason());
+                        response.put("callerService", callerService);
+                        if (validOperator != null) {
+                            response.put("operator", validOperator);
+                        }
+                        return new ReplayWorkResult(outcome.status(), outcome.requeued(), response);
                     }
-                    articleIdStr = normalizedArticleId;
-                    outcome = opsRepository.requeueSingleArticleInCurrentTx(
-                            aliasName, aliasName, Long.parseLong(normalizedArticleId), nowMs);
-                }
-
-                Map<String, Object> response = new LinkedHashMap<>();
-                response.put("status", outcome.status());
-                response.put("replayRequestId", validReplayId);
-                response.put("eventId", eventId);
-                if (articleIdStr != null) {
-                    response.put("articleId", articleIdStr);
-                }
-                response.put("requeued", Long.toString(outcome.requeued()));
-                response.put("reason", outcome.reason());
-                response.put("callerService", callerService);
-                if (validOperator != null) {
-                    response.put("operator", validOperator);
-                }
-                String json = serializeJson(response);
-                boolean inserted = opsRepository.insertReplayAudit(new SearchOpsRepository.ReplayAuditRecord(
-                        validReplayId,
-                        "SINGLE_RETRY",
-                        eventId,
-                        fingerprint,
-                        callerService,
-                        validOperator,
-                        outcome.status(),
-                        outcome.requeued(),
-                        json,
-                        nowMs
-                ));
-                if (!inserted) {
-                    SearchOpsRepository.ReplayAuditRecord raced = opsRepository.findReplayAuditForUpdate(validReplayId)
-                            .orElseThrow(() -> new InternalOpsException(409, "IDEMPOTENCY_CONFLICT",
-                                    "Concurrent replayRequestId conflict", false));
-                    return resolveIdempotentReplay(raced, fingerprint);
-                }
-                return response;
-            });
+            );
             String outcomeTag = "NOOP".equals(result.get("status")) ? "noop" : "accepted";
             searchMetrics.recordOpsRetry("single", outcomeTag);
             LOGGER.info("event=search_ops_single_retry caller={} operator={} replayRequestId={} eventId={} status={} requeued={}",
@@ -442,11 +410,78 @@ public class SearchConsumerOpsService {
         return stream;
     }
 
+    private Map<String, Object> executeIdempotentReplay(
+            String operationType,
+            String targetEventId,
+            String validReplayId,
+            String fingerprint,
+            String callerService,
+            String validOperator,
+            ReplayWork work) {
+        for (int attempt = 0; attempt < MAX_IDEMPOTENCY_RACE_ATTEMPTS; attempt++) {
+            try {
+                return transactionTemplate.execute(status -> {
+                    // Non-locking read first avoids MySQL InnoDB REPEATABLE READ gap-lock deadlocks
+                    // when concurrent transactions check a nonexistent replay_request_id before INSERT.
+                    Optional<SearchOpsRepository.ReplayAuditRecord> existing =
+                            opsRepository.findReplayAudit(validReplayId);
+                    if (existing.isPresent()) {
+                        return resolveIdempotentReplay(existing.get(), fingerprint);
+                    }
+
+                    long nowMs = clock.millis();
+                    // Reserve the replayRequestId primary key BEFORE mutating any index task row.
+                    // Concurrent transactions with the same replayRequestId serialize on the DB PK lock;
+                    // the losing transaction immediately rolls back without touching search_index_task.
+                    boolean reserved = opsRepository.insertReplayAudit(new SearchOpsRepository.ReplayAuditRecord(
+                            validReplayId,
+                            operationType,
+                            targetEventId,
+                            fingerprint,
+                            callerService,
+                            validOperator,
+                            AUDIT_STATUS_IN_PROGRESS,
+                            0L,
+                            "{}",
+                            nowMs
+                    ));
+                    if (!reserved) {
+                        throw new ReplayAuditRaceException();
+                    }
+
+                    ReplayWorkResult workResult = work.execute(nowMs);
+                    String responseJson = serializeJson(workResult.response());
+                    opsRepository.completeReplayAuditInCurrentTx(
+                            validReplayId,
+                            workResult.responseStatus(),
+                            workResult.requeuedCount(),
+                            responseJson
+                    );
+                    return workResult.response();
+                });
+            } catch (ReplayAuditRaceException race) {
+                // Losing transaction has been cleanly rolled back; read winner's committed audit row
+                // in a fresh transaction so snapshot-isolated databases (e.g. MySQL REPEATABLE READ) observe it.
+                Optional<SearchOpsRepository.ReplayAuditRecord> committed =
+                        transactionTemplate.execute(s -> opsRepository.findReplayAudit(validReplayId));
+                if (committed != null && committed.isPresent()) {
+                    return resolveIdempotentReplay(committed.get(), fingerprint);
+                }
+                // Winner rolled back before our fresh read; retry bounded loop to claim cleanly.
+            }
+        }
+        throw new InternalOpsException(409, "IDEMPOTENCY_CONFLICT", "Concurrent replayRequestId conflict", false);
+    }
+
     private Map<String, Object> resolveIdempotentReplay(
             SearchOpsRepository.ReplayAuditRecord existing, String expectedFingerprint) {
         if (!expectedFingerprint.equals(existing.requestFingerprint())) {
             throw new InternalOpsException(409, "IDEMPOTENCY_CONFLICT",
                     "replayRequestId was already used with different request parameters", false);
+        }
+        if (AUDIT_STATUS_IN_PROGRESS.equals(existing.responseStatus())) {
+            throw new InternalOpsException(503, "DEPENDENCY_UNAVAILABLE",
+                    "Replay request is still in progress; retry shortly", true);
         }
         try {
             return objectMapper.readValue(existing.responseJson(), MAP_TYPE);
@@ -454,6 +489,18 @@ public class SearchConsumerOpsService {
             throw new InternalOpsException(503, "DEPENDENCY_UNAVAILABLE",
                     "Stored replay audit response could not be decoded", true, ex);
         }
+    }
+
+    @FunctionalInterface
+    private interface ReplayWork {
+        ReplayWorkResult execute(long nowMs);
+    }
+
+    private record ReplayWorkResult(String responseStatus, long requeuedCount, Map<String, Object> response) {
+    }
+
+    private static final class ReplayAuditRaceException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
     }
 
     private void requireConsumerPersistence() {

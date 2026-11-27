@@ -45,6 +45,11 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Future;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CountDownLatch;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -622,6 +627,97 @@ class SearchOpsAndAdminIntegrationTest {
             assertThat(proj503.title()).isEqualTo("Preserved During Outage");
         } finally {
             contentStub.clearInterceptor();
+        }
+    }
+
+    @Test
+    void internalOpsHttpConcurrentRetriesEnforceStrictIdempotencyAndSingleExecution() throws Exception {
+        long now = System.currentTimeMillis();
+        String evtB1 = UUID.randomUUID().toString();
+        String evtB2 = UUID.randomUUID().toString();
+        String evtS1 = UUID.randomUUID().toString();
+        insertInbox(evtB1, "801", "APPLIED", now - 6000);
+        insertTask(801L, "DEAD", 5, now - 6000, null, "NONE", "ERR_B1", now - 6000);
+        insertInbox(evtB2, "802", "APPLIED", now - 5000);
+        insertTask(802L, "DEAD", 5, now - 5000, null, "NONE", "ERR_B2", now - 5000);
+        insertInbox(evtS1, "803", "APPLIED", now - 4000);
+        insertTask(803L, "DEAD", 5, now - 4000, null, "NONE", "ERR_S1", now - 4000);
+
+        String opsToken = serviceJwtSigner.signServiceToken(
+                "knode-content", "knode-search", List.of("ops:read", "ops:retry"), 120);
+        Map<String, String> headers = Map.of(
+                "Authorization", "Bearer " + opsToken,
+                "Content-Type", "application/json"
+        );
+
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        try {
+            // 1. Concurrent HTTP batch retry (limit=1, same replayRequestId)
+            CountDownLatch batchStart = new CountDownLatch(1);
+            String batchBody = "{\"replayRequestId\":\"http-conc-batch-1\",\"operator\":\"ops-http\",\"limit\":1}";
+            Future<HttpResponse<String>> bf1 = pool.submit(() -> {
+                batchStart.await(5, TimeUnit.SECONDS);
+                return send("POST", "/internal/v1/ops/consumers/retry", batchBody, headers);
+            });
+            Future<HttpResponse<String>> bf2 = pool.submit(() -> {
+                batchStart.await(5, TimeUnit.SECONDS);
+                return send("POST", "/internal/v1/ops/consumers/retry", batchBody, headers);
+            });
+            batchStart.countDown();
+
+            HttpResponse<String> br1 = bf1.get(15, TimeUnit.SECONDS);
+            HttpResponse<String> br2 = bf2.get(15, TimeUnit.SECONDS);
+            assertThat(br1.statusCode()).isEqualTo(200);
+            assertThat(br2.statusCode()).isEqualTo(200);
+            assertThat(br2.body()).isEqualTo(br1.body());
+            assertThat(MAPPER.readTree(br1.body()).path("requeued").asText()).isEqualTo("1");
+
+            SearchIndexTaskRecord t801 = consumerRepository.findIndexTask(1L, 801L).orElseThrow();
+            SearchIndexTaskRecord t802 = consumerRepository.findIndexTask(1L, 802L).orElseThrow();
+            assertThat(t801.status()).isEqualTo(SearchIndexTaskStatus.PENDING);
+            assertThat(t801.claimGeneration()).isEqualTo(2L);
+            assertThat(t802.status()).isEqualTo(SearchIndexTaskStatus.DEAD);
+            assertThat(t802.claimGeneration()).isEqualTo(1L);
+            assertThat(jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM search_ops_replay_audit WHERE replay_request_id = 'http-conc-batch-1'",
+                    Long.class)).isEqualTo(1L);
+
+            // Conflicting HTTP repeat with limit=2 -> 409 and 802 remains DEAD
+            HttpResponse<String> batchConflict = send("POST", "/internal/v1/ops/consumers/retry",
+                    "{\"replayRequestId\":\"http-conc-batch-1\",\"operator\":\"ops-http\",\"limit\":2}", headers);
+            assertThat(batchConflict.statusCode()).isEqualTo(409);
+            assertThat(consumerRepository.findIndexTask(1L, 802L).orElseThrow().status())
+                    .isEqualTo(SearchIndexTaskStatus.DEAD);
+            assertThat(consumerRepository.findIndexTask(1L, 802L).orElseThrow().claimGeneration()).isEqualTo(1L);
+
+            // 2. Concurrent HTTP single retry (same eventId + replayRequestId)
+            CountDownLatch singleStart = new CountDownLatch(1);
+            String singleBody = "{\"replayRequestId\":\"http-conc-single-1\",\"operator\":\"ops-http\"}";
+            Future<HttpResponse<String>> sf1 = pool.submit(() -> {
+                singleStart.await(5, TimeUnit.SECONDS);
+                return send("POST", "/internal/v1/ops/consumers/" + evtS1 + "/retry", singleBody, headers);
+            });
+            Future<HttpResponse<String>> sf2 = pool.submit(() -> {
+                singleStart.await(5, TimeUnit.SECONDS);
+                return send("POST", "/internal/v1/ops/consumers/" + evtS1 + "/retry", singleBody, headers);
+            });
+            singleStart.countDown();
+
+            HttpResponse<String> sr1 = sf1.get(15, TimeUnit.SECONDS);
+            HttpResponse<String> sr2 = sf2.get(15, TimeUnit.SECONDS);
+            assertThat(sr1.statusCode()).isEqualTo(200);
+            assertThat(sr2.statusCode()).isEqualTo(200);
+            assertThat(sr2.body()).isEqualTo(sr1.body());
+            assertThat(MAPPER.readTree(sr1.body()).path("requeued").asText()).isEqualTo("1");
+
+            SearchIndexTaskRecord t803 = consumerRepository.findIndexTask(1L, 803L).orElseThrow();
+            assertThat(t803.status()).isEqualTo(SearchIndexTaskStatus.PENDING);
+            assertThat(t803.claimGeneration()).isEqualTo(2L);
+            assertThat(jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM search_ops_replay_audit WHERE replay_request_id = 'http-conc-single-1'",
+                    Long.class)).isEqualTo(1L);
+        } finally {
+            pool.shutdownNow();
         }
     }
 

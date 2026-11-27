@@ -7,6 +7,7 @@ import com.knode.search.consumer.persistence.SearchIndexTaskRecord;
 import com.knode.search.consumer.persistence.SearchIndexTaskStatus;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -365,21 +366,39 @@ public class SearchOpsRepository {
                 WHERE replay_request_id = ?
                 FOR UPDATE
                 """,
-                (rs, rowNum) -> new ReplayAuditRecord(
-                        rs.getString("replay_request_id"),
-                        rs.getString("operation_type"),
-                        rs.getString("target_event_id"),
-                        rs.getString("request_fingerprint"),
-                        rs.getString("caller_service"),
-                        rs.getString("operator_id"),
-                        rs.getString("response_status"),
-                        rs.getLong("requeued_count"),
-                        rs.getString("response_json"),
-                        rs.getLong("created_at_ms")
-                ),
+                SearchOpsRepository::mapReplayAuditRow,
                 replayRequestId
         );
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    public Optional<ReplayAuditRecord> findReplayAudit(String replayRequestId) {
+        List<ReplayAuditRecord> rows = jdbcTemplate.query(
+                """
+                SELECT replay_request_id, operation_type, target_event_id, request_fingerprint,
+                       caller_service, operator_id, response_status, requeued_count, response_json, created_at_ms
+                FROM search_ops_replay_audit
+                WHERE replay_request_id = ?
+                """,
+                SearchOpsRepository::mapReplayAuditRow,
+                replayRequestId
+        );
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    private static ReplayAuditRecord mapReplayAuditRow(ResultSet rs, int rowNum) throws SQLException {
+        return new ReplayAuditRecord(
+                rs.getString("replay_request_id"),
+                rs.getString("operation_type"),
+                rs.getString("target_event_id"),
+                rs.getString("request_fingerprint"),
+                rs.getString("caller_service"),
+                rs.getString("operator_id"),
+                rs.getString("response_status"),
+                rs.getLong("requeued_count"),
+                rs.getString("response_json"),
+                rs.getLong("created_at_ms")
+        );
     }
 
     public boolean insertReplayAudit(ReplayAuditRecord record) {
@@ -403,8 +422,29 @@ public class SearchOpsRepository {
                     record.createdAtMs()
             );
             return true;
-        } catch (DuplicateKeyException dup) {
+        } catch (DuplicateKeyException | DeadlockLoserDataAccessException race) {
             return false;
+        }
+    }
+
+    public void completeReplayAuditInCurrentTx(
+            String replayRequestId, String responseStatus, long requeuedCount, String responseJson) {
+        int updated = jdbcTemplate.update(
+                """
+                UPDATE search_ops_replay_audit
+                SET response_status = ?,
+                    requeued_count = ?,
+                    response_json = ?
+                WHERE replay_request_id = ?
+                """,
+                responseStatus,
+                requeuedCount,
+                responseJson,
+                replayRequestId
+        );
+        if (updated != 1) {
+            throw new IllegalStateException(
+                    "Expected 1 reserved replay audit row for " + replayRequestId + ", updated=" + updated);
         }
     }
 
@@ -638,7 +678,7 @@ public class SearchOpsRepository {
             return new SingleRetryOutcome("ACCEPTED", 1L, "DEAD_TASK_REQUEUED");
         }
         // PENDING
-        if (task.attempts() > 0 || task.lastError() != null || task.dueAtMs() > nowMs) {
+        if (task.attempts() > 0 || task.dueAtMs() > nowMs) {
             int nextAttempts = task.attempts() >= task.maxAttempts() ? 0 : task.attempts();
             jdbcTemplate.update(
                     """
