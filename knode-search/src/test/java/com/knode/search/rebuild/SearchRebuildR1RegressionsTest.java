@@ -312,15 +312,17 @@ class SearchRebuildR1RegressionsTest {
 
         RebuildJobRecord job = driveToSwitchingAlias(rebuildService, "req-r1-timeout");
 
-        // Capture the POST /_aliases payload, hold response past client responseTimeout (700ms) so client
-        // hits SocketTimeoutException BEFORE ES mutates alias (first GET /_alias still sees g1!).
+        // Capture the POST /_aliases payload, hold responses past client responseTimeout (700ms) while ES is
+        // unresponsive so client hits SocketTimeoutException BEFORE ES mutates alias (first GET /_alias still sees g1!).
         AtomicReference<String> capturedAliasesPayload = new AtomicReference<>();
-        AtomicBoolean timedOutOnce = new AtomicBoolean(false);
+        AtomicInteger timedOutPosts = new AtomicInteger(0);
         esStub.setInterceptor((req, def) -> {
-            if ("POST".equalsIgnoreCase(req.method()) && "/_aliases".equals(req.path())
-                    && timedOutOnce.compareAndSet(false, true)) {
-                capturedAliasesPayload.set(req.body());
-                // Delay 1200ms (> 700ms client response timeout) without applying yet so first GET sees g1!
+            if ("POST".equalsIgnoreCase(req.method()) && "/_aliases".equals(req.path())) {
+                int seq = timedOutPosts.incrementAndGet();
+                if (seq == 1) {
+                    capturedAliasesPayload.set(req.body());
+                }
+                // Delay 1200ms (> 700ms client response timeout) without applying yet so GET /_alias still sees g1!
                 return StatefulElasticsearchStub.StubResponse.delayedStatus(200, "{\"acknowledged\":true}", 1200L);
             }
             return def.get();
@@ -347,27 +349,29 @@ class SearchRebuildR1RegressionsTest {
         long postCountAfterTimeout = countAliasesPosts();
         assertThat(postCountAfterTimeout).isEqualTo(1L);
 
-        // 2) Next poll while delayed request STILL hasn't landed on ES:
-        //    MUST stay SWITCHING_ALIAS, MUST NOT revert to NORMAL, MUST NOT send a conflicting 2nd POST /_aliases!
-        esStub.clearInterceptor();
+        // 2) Next poll while ES switch is STILL timing out and delayed request STILL hasn't landed on ES:
+        //    Fenced re-send also times out -> MUST stay SWITCHING_ALIAS, MUST NOT revert to NORMAL, bypass stays active!
         SearchRebuildService.StepOutcome stillWaiting = rebuildService.advanceJob(job.jobId());
         assertThat(stillWaiting.status()).isEqualTo(SearchRebuildService.StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         assertThat(stillWaiting.job().phase()).isEqualTo(RebuildPhase.SWITCHING_ALIAS);
         assertThat(consumerRepository.findGenerationState(ALIAS).orElseThrow().cutoverState())
                 .isEqualTo(IndexGenerationState.CutoverState.SWITCHING_ALIAS);
-        assertThat(countAliasesPosts()).isEqualTo(1L);
+        assertThat(cacheRedis.containsKey(cacheInvalidator.cutoverBypassKey())).isTrue();
+        long postCountBeforeLateApply = countAliasesPosts();
+        assertThat(postCountBeforeLateApply).isEqualTo(2L);
 
         // 3) Now the original delayed in-flight POST /_aliases finally lands on ES -> moves alias g1 -> g2!
+        esStub.clearInterceptor();
         StatefulElasticsearchStub.StubResponse lateApply = esStub.applyUpdateAliasesBodyDirectly(capturedAliasesPayload.get());
         assertThat(lateApply.status()).isEqualTo(200);
         assertThat(esStub.aliasTargets(ALIAS)).containsExactly(G2);
 
-        // 4) Next reconcile observes ES alias == {g2} -> activates g2 forward cleanly with ZERO duplicate POST /_aliases!
+        // 4) Next reconcile observes ES alias == {g2} -> activates g2 forward cleanly with ZERO extra POST /_aliases!
         SearchRebuildService.StepOutcome reconciled = rebuildService.advanceJob(job.jobId());
         assertThat(reconciled.status()).isEqualTo(SearchRebuildService.StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
         assertThat(reconciled.job().phase()).isEqualTo(RebuildPhase.COMPLETED);
         assertThat(reconciled.job().aliasSwitchUncertain()).isFalse();
-        assertThat(countAliasesPosts()).isEqualTo(1L);
+        assertThat(countAliasesPosts()).isEqualTo(postCountBeforeLateApply);
         assertThat(consumerRepository.findGenerationState(ALIAS).orElseThrow().activeGeneration()).isEqualTo(2L);
         assertThat(consumerRepository.findGenerationState(ALIAS).orElseThrow().cutoverState())
                 .isEqualTo(IndexGenerationState.CutoverState.NORMAL);

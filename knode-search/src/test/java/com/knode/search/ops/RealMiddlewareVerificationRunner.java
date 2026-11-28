@@ -13,7 +13,18 @@ import com.knode.search.consumer.persistence.SearchIndexDocument;
 import com.knode.search.consumer.persistence.SearchIndexTaskStatus;
 import com.knode.search.consumer.stream.ContentStreamConsumer;
 import com.knode.search.model.QueryBudget;
+import com.knode.search.cache.SearchCacheInvalidator;
+import com.knode.search.consumer.config.SearchConsumerProperties;
+import com.knode.search.consumer.event.ContentEventParser;
+import com.knode.search.consumer.persistence.IndexGenerationState;
+import com.knode.search.rebuild.client.ContentSnapshotClient;
+import com.knode.search.rebuild.config.SearchRebuildProperties;
+import com.knode.search.rebuild.es.AliasSwitchResult;
 import com.knode.search.rebuild.es.SearchIndexAdminClient;
+import com.knode.search.rebuild.es.SearchVisibleDoc;
+import com.knode.search.rebuild.persistence.SearchRebuildRepository;
+import org.springframework.transaction.support.TransactionTemplate;
+import java.time.Clock;
 import com.knode.search.rebuild.persistence.RebuildJobRecord;
 import com.knode.search.rebuild.persistence.RebuildPhase;
 import com.knode.search.rebuild.service.SearchRebuildService;
@@ -88,6 +99,7 @@ public final class RealMiddlewareVerificationRunner {
         String esAlias = esPrefix + runSuffix + "_articles";
         String esPhysicalG1 = esAlias + "_g1";
         String esPhysicalG2 = esAlias + "_g2";
+        String esPhysicalG3 = esAlias + "_g3";
         String dbName = "search_live_it_" + runSuffix;
 
         TestJwtSigner userSigner = TestJwtSigner.generate("knode-it-user-k1");
@@ -950,7 +962,218 @@ public final class RealMiddlewareVerificationRunner {
             System.out.println("[LIVE-IT] CHAIN 6 (R8) PASSED: same-ms standalone DELETED v7 (900107) preserved (late v6 STALE_IGNORED, ES 404)"
                     + " + lagging v1 (900108) -> 503 retryable (0 audit, inbox STALE_IGNORED)"
                     + " -> same replayRequestId at v2 -> ACCEPTED -> real ES g1 hit=1");
-            System.out.println("[LIVE-IT] ALL 6 REAL-MIDDLEWARE CHAINS VERIFIED SUCCESSFULLY! env=" + envName + " alias=" + esAlias);
+            // =========================================================================
+            // CHAIN 7 (SEARCH-03-R9): Real ES 9.4.3 one-shot attach fence + crash-before-send
+            //   takeover recovery + late original POST /_aliases rejection (HTTP 404 must_exist=true)
+            //   + post-cutover Stream update routed to new active real ES index g3!
+            // =========================================================================
+            // Close out CHAIN 4's unactivated g2 job cleanly so a fresh g3 rebuild can run end-to-end.
+            jdbc.update(
+                    "UPDATE search_rebuild_job SET phase = 'FAILED', active_lock_key = NULL, updated_at_ms = ? WHERE job_id = ?",
+                    System.currentTimeMillis(), rbJob.jobId());
+            contentStub.setLivePublicArticles(List.of(
+                    LoopbackContentSnapshotStub.snapshotItem(
+                            900109L, 1L, "R9实测切换恢复基线 R9LiveCutoverBase900109", "R9 实测基线摘要",
+                            "验证提交 alias_switch_uncertain 后发 ES 前中断的接管重发与晚到原请求拦截",
+                            10L, "架构", List.of("R9", "Cutover"), 11L, 1L, "2026-11-28T08:00:00Z")));
+            contentStub.putCurrentPublicArticle(LoopbackContentSnapshotStub.snapshotItem(
+                    900109L, 1L, "R9实测切换恢复基线 R9LiveCutoverBase900109", "R9 实测基线摘要",
+                    "验证提交 alias_switch_uncertain 后发 ES 前中断的接管重发与晚到原请求拦截",
+                    10L, "架构", List.of("R9", "Cutover"), 11L, 1L, "2026-11-28T08:00:00Z"));
+
+            SearchRebuildRepository rebuildRepo = ctx.getBean(SearchRebuildRepository.class);
+            TransactionTemplate txTemplate = ctx.getBean("searchConsumerTransactionTemplate", TransactionTemplate.class);
+            ContentSnapshotClient snapClient = ctx.getBean(ContentSnapshotClient.class);
+            ContentEventParser evtParser = ctx.getBean(ContentEventParser.class);
+            SearchCacheInvalidator cacheInvalidator = ctx.getBean(SearchCacheInvalidator.class);
+            SearchConsumerProperties consumerProps = ctx.getBean(SearchConsumerProperties.class);
+            SearchRebuildProperties rebuildProps = ctx.getBean(SearchRebuildProperties.class);
+            Clock appClock = ctx.getBean(Clock.class);
+
+            // Worker 1 crashes right AFTER committing alias_switch_uncertain=1 and BEFORE calling real ES _aliases!
+            SearchIndexAdminClient crashingEsAdmin = new SearchIndexAdminClient() {
+                @Override public void ensurePhysicalIndex(String physicalIndex) { esAdmin.ensurePhysicalIndex(physicalIndex); }
+                @Override public void refreshIndex(String physicalIndex) { esAdmin.refreshIndex(physicalIndex); }
+                @Override public long countDocumentsBySearchable(String physicalIndex, boolean searchable) {
+                    return esAdmin.countDocumentsBySearchable(physicalIndex, searchable);
+                }
+                @Override public Map<String, SearchVisibleDoc> fetchSearchVisibleDocsByIds(String physicalIndex, List<String> docIds) {
+                    return esAdmin.fetchSearchVisibleDocsByIds(physicalIndex, docIds);
+                }
+                @Override public Set<String> getAliasTargets(String aliasName) { return esAdmin.getAliasTargets(aliasName); }
+                @Override public AliasSwitchResult switchAliasAtomically(String aliasName, Set<String> removeFromIndices, String targetPhysicalIndex) {
+                    return esAdmin.switchAliasAtomically(aliasName, removeFromIndices, targetPhysicalIndex);
+                }
+                @Override public AliasSwitchResult switchAliasAtomicallyWithFence(
+                        String aliasName, Set<String> removeFromIndices, String targetPhysicalIndex, String attachFenceAlias) {
+                    RebuildJobRecord persisted = rebuildRepo.findActiveJob(esAlias).orElseThrow();
+                    require(persisted.aliasSwitchUncertain(), "Expected alias_switch_uncertain=true committed before ES send");
+                    throw new IllegalStateException("SIMULATED_CRASH_BEFORE_REAL_ES_SEND");
+                }
+                @Override public AliasSwitchResult removeAliasBindingsAtomically(String aliasName, Set<String> removeFromIndices) {
+                    return esAdmin.removeAliasBindingsAtomically(aliasName, removeFromIndices);
+                }
+            };
+
+            SearchRebuildService r9Worker1 = new SearchRebuildService(
+                    rebuildRepo, consumerRepo, txTemplate, snapClient, evtParser, indexWorker,
+                    crashingEsAdmin, cacheInvalidator, consumerProps, rebuildProps,
+                    esAlias, "live-it-r9-worker-1", MAPPER, appClock);
+
+            RebuildJobRecord r9Job = r9Worker1.startRebuild("live-it-r9-cutover");
+            require(r9Job.candidateGeneration() == 3L && esPhysicalG3.equals(r9Job.candidatePhysicalIndex()),
+                    "Expected g3 candidate index, got " + r9Job.candidatePhysicalIndex());
+            for (int i = 0; i < 20 && r9Job.phase() != RebuildPhase.SWITCHING_ALIAS; i++) {
+                r9Job = r9Worker1.advanceJob(r9Job.jobId()).job();
+            }
+            require(r9Job.phase() == RebuildPhase.SWITCHING_ALIAS, "Expected r9Job at SWITCHING_ALIAS, got " + r9Job.phase());
+
+            String g3Fence = SearchIndexAdminClient.attachFenceAlias(esPhysicalG3);
+            require(esAdmin.getAliasTargets(esAlias).equals(Set.of(esPhysicalG1)),
+                    "Before crash, real ES alias must still point solely to g1");
+            require(esAdmin.getAliasTargets(g3Fence).equals(Set.of(esPhysicalG3)),
+                    "Before crash, real ES one-shot attach fence must be armed on g3");
+
+            // Trigger Worker 1 crash AFTER SQL commit of alias_switch_uncertain=1 and BEFORE real ES switch!
+            boolean crashed = false;
+            try {
+                r9Worker1.advanceJob(r9Job.jobId());
+            } catch (IllegalStateException ex) {
+                crashed = "SIMULATED_CRASH_BEFORE_REAL_ES_SEND".equals(ex.getMessage());
+            }
+            require(crashed, "Expected simulated crash before real ES send");
+            RebuildJobRecord postCrashJob = rebuildRepo.findJob(r9Job.jobId()).orElseThrow();
+            require(postCrashJob.phase() == RebuildPhase.SWITCHING_ALIAS && postCrashJob.aliasSwitchUncertain(),
+                    "Expected SWITCHING_ALIAS + alias_switch_uncertain=true after crash");
+            require(esAdmin.getAliasTargets(esAlias).equals(Set.of(esPhysicalG1)),
+                    "After crash-before-send, real ES alias must remain solely g1");
+            require(esAdmin.getAliasTargets(g3Fence).equals(Set.of(esPhysicalG3)),
+                    "After crash-before-send, real ES attach fence must remain armed on g3");
+            String expectedR9BypassOwner = SearchCacheInvalidator.cutoverBypassOwnerToken(esAlias, 3L, 1L);
+            require(expectedR9BypassOwner.equals(redis.get(cacheInvalidator.cutoverBypassKey())),
+                    "Expected real Redis cutover_bypass=" + expectedR9BypassOwner);
+
+            // Expire Worker 1's lease and let Worker 2 take over via normal polling entry advanceActiveJob()!
+            jdbc.update("UPDATE search_rebuild_job SET lease_until_ms = ? WHERE job_id = ?",
+                    System.currentTimeMillis() - 5_000L, r9Job.jobId());
+            SearchRebuildService r9Worker2 = new SearchRebuildService(
+                    rebuildRepo, consumerRepo, txTemplate, snapClient, evtParser, indexWorker,
+                    esAdmin, cacheInvalidator, consumerProps, rebuildProps,
+                    esAlias, "live-it-r9-worker-2", MAPPER, appClock);
+            SearchRebuildService.StepOutcome r9Recovered = r9Worker2.advanceActiveJob();
+            require(r9Recovered.status() == SearchRebuildService.StepStatus.ALIAS_RECONCILED_AND_ACTIVATED
+                            && r9Recovered.job().phase() == RebuildPhase.COMPLETED
+                            && !r9Recovered.job().aliasSwitchUncertain()
+                            && r9Recovered.job().switchAttempts() == 1,
+                    "Unexpected R9 takeover recovery outcome: " + r9Recovered);
+
+            // Verify real ES 9.4.3 alias == {g3}, one-shot attach fence consumed (404), real Redis bypass cleared!
+            require(esAdmin.getAliasTargets(esAlias).equals(Set.of(esPhysicalG3)),
+                    "Expected real ES alias uniquely pointing to g3 after takeover recovery");
+            HttpResponse<String> g3FenceAfter = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/_alias/" + g3Fence)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(g3FenceAfter.statusCode() == 404,
+                    "Expected consumed g3 attach fence to return 404 on real ES, got " + g3FenceAfter.statusCode());
+            IndexGenerationState r9GenState = consumerRepo.findGenerationState(esAlias).orElseThrow();
+            require(r9GenState.activeGeneration() == 3L
+                            && esPhysicalG3.equals(r9GenState.activePhysicalIndex())
+                            && r9GenState.cutoverState() == IndexGenerationState.CutoverState.NORMAL,
+                    "Expected active_generation=3 NORMAL after R9 recovery: " + r9GenState);
+            require(redis.get(cacheInvalidator.cutoverBypassKey()) == null,
+                    "Expected real Redis cutover_bypass cleared after R9 recovery");
+            require("3:1:CLEARED".equals(redis.get(cacheInvalidator.cutoverBypassWatermarkKey())),
+                    "Expected real Redis watermark 3:1:CLEARED, got " + redis.get(cacheInvalidator.cutoverBypassWatermarkKey()));
+
+            // Late original POST /_aliases arrives at REAL ES 9.4.3 AFTER takeover re-send succeeded -> MUST fail 404!
+            String lateOriginalBody = """
+                    {
+                      "actions": [
+                        {"remove": {"index": "%s", "alias": "%s", "must_exist": true}},
+                        {"add": {"index": "%s", "alias": "%s"}},
+                        {"remove": {"index": "%s", "alias": "%s", "must_exist": true}}
+                      ]
+                    }
+                    """.formatted(esPhysicalG1, esAlias, esPhysicalG3, esAlias, esPhysicalG3, g3Fence);
+            HttpResponse<String> lateEsResp = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/_aliases"))
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(lateOriginalBody, StandardCharsets.UTF_8))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(lateEsResp.statusCode() == 404,
+                    "Expected real ES 9.4.3 to reject late original POST /_aliases with HTTP 404, got "
+                            + lateEsResp.statusCode() + " body=" + lateEsResp.body());
+            require(esAdmin.getAliasTargets(esAlias).equals(Set.of(esPhysicalG3)),
+                    "Real ES alias must stay exclusively on g3 after late original request rejection");
+
+            // Post-cutover live Stream event writes to NEW active real ES index g3 (NOT g1) and hits public search!
+            String evtR9Post = UUID.randomUUID().toString();
+            String postR9Json = """
+                    {
+                      "eventId": "%s",
+                      "eventType": "ArticlePublished",
+                      "schemaVersion": 2,
+                      "aggregateType": "ARTICLE",
+                      "aggregateId": "900110",
+                      "sourceRevision": "1",
+                      "publicationFactId": "pub-900110-v1",
+                      "occurredAt": "2026-11-28T08:15:00Z",
+                      "producer": "knode-content",
+                      "visibility": "PUBLIC",
+                      "payload": {
+                        "articleId": "900110",
+                        "authorId": "1",
+                        "title": "R9切换后新代次写入验证 R9PostCutoverLiveG3Doc900110",
+                        "summary": "切到 g3 后后续实时写入应直接落到 g3 并可公开搜索",
+                        "content": "验证接管恢复完成后新写入落入真实 ES g3 索引",
+                        "thumbnail": null,
+                        "isTop": "0",
+                        "isComment": "1",
+                        "category": {"id": "10", "name": "架构"},
+                        "tags": [{"id": "109", "name": "R9"}],
+                        "createTime": "2026-11-28T08:15:00Z",
+                        "publishedAt": "2026-11-28T08:15:00Z",
+                        "viewCount": "7",
+                        "counterRevision": "1"
+                      }
+                    }
+                    """.formatted(evtR9Post);
+            contentStub.putCurrentPublicArticle(LoopbackContentSnapshotStub.snapshotItem(
+                    900110L, 1L, "R9切换后新代次写入验证 R9PostCutoverLiveG3Doc900110", "切到 g3 后后续实时写入应直接落到 g3 并可公开搜索",
+                    "验证接管恢复完成后新写入落入真实 ES g3 索引",
+                    10L, "架构", List.of("R9"), 7L, 1L, "2026-11-28T08:15:00Z"));
+            redis.xadd(streamKey, Map.of("event", postR9Json));
+            ContentStreamConsumer.PollSummary pollR9Post = streamConsumer.pollOnce();
+            require(pollR9Post.freshCount() == 1 && pollR9Post.ackedCount() == 1 && pollR9Post.dbFailedCount() == 0,
+                    "Unexpected pollR9Post: " + pollR9Post);
+            SearchIndexTaskWorker.WorkerCycleSummary workR9Post = indexWorker.processOnce();
+            require(workR9Post.appliedCount() == 1 && workR9Post.failedCount() == 0,
+                    "Unexpected workR9Post: " + workR9Post);
+            esAdmin.refreshIndex(esPhysicalG3);
+
+            HttpResponse<String> docG3Resp = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG3 + "/_doc/900110")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            HttpResponse<String> docG1Resp = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG1 + "/_doc/900110")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(docG3Resp.statusCode() == 200 && docG1Resp.statusCode() == 404,
+                    "Expected post-cutover doc 900110 in g3 (200) and NOT g1 (404), got g3="
+                            + docG3Resp.statusCode() + " g1=" + docG1Resp.statusCode());
+
+            String qR9 = URLEncoder.encode("R9PostCutoverLiveG3Doc900110", StandardCharsets.UTF_8);
+            HttpResponse<String> searchR9 = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/api/blog/search?keyword=" + qR9)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            JsonNode sR9Json = MAPPER.readTree(searchR9.body());
+            require("1".equals(sR9Json.path("data").path("total").asText())
+                            && "900110".equals(sR9Json.path("data").path("rows").get(0).path("id").asText()),
+                    "Expected post-cutover search hit for 900110 on active g3: " + searchR9.body());
+            System.out.println("[LIVE-IT] CHAIN 7 (R9) PASSED: crash-before-send -> takeover polling resend on real ES 9.4.3"
+                    + " -> alias={g3}, g3__attach_fence=404(consumed), active_gen=3 NORMAL, Redis cutover_bypass cleared (3:1:CLEARED),"
+                    + " late original POST /_aliases rejected HTTP 404 (must_exist=true), post-cutover Stream doc 900110 written to g3 (200/g1=404) & search hit=1");
+            System.out.println("[LIVE-IT] ALL 7 REAL-MIDDLEWARE CHAINS VERIFIED SUCCESSFULLY! env=" + envName + " alias=" + esAlias);
         } finally {
             if (ctx != null) {
                 try {
@@ -979,12 +1202,15 @@ public final class RealMiddlewareVerificationRunner {
                 redisClient.shutdown();
             }
 
-            // Cleanup ONLY isolated ES test physical indices g1 & g2 (deleting indices also removes test aliases/fences)
+            // Cleanup ONLY isolated ES test physical indices g1, g2 & g3 (deleting indices also removes test aliases/fences)
             HttpResponse<String> delEsG1 = http.send(
                     HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG1)).DELETE().build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             HttpResponse<String> delEsG2 = http.send(
                     HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG2)).DELETE().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            HttpResponse<String> delEsG3 = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG3)).DELETE().build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             HttpResponse<String> checkAlias = http.send(
                     HttpRequest.newBuilder(URI.create(esUrl + "/_alias/" + esAlias)).GET().build(),
@@ -995,19 +1221,30 @@ public final class RealMiddlewareVerificationRunner {
             HttpResponse<String> checkIndexG2 = http.send(
                     HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG2)).GET().build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            HttpResponse<String> checkIndexG3 = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG3)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             HttpResponse<String> checkFenceG2 = http.send(
                     HttpRequest.newBuilder(URI.create(esUrl + "/_alias/" + SearchIndexAdminClient.attachFenceAlias(esPhysicalG2))).GET().build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            HttpResponse<String> checkFenceG3 = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/_alias/" + SearchIndexAdminClient.attachFenceAlias(esPhysicalG3))).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             System.out.println("[LIVE-IT-CLEANUP] ES deleteG1=" + delEsG1.statusCode()
                     + " deleteG2=" + delEsG2.statusCode()
+                    + " deleteG3=" + delEsG3.statusCode()
                     + " aliasAfterStatus=" + checkAlias.statusCode()
                     + " indexG1AfterStatus=" + checkIndexG1.statusCode()
                     + " indexG2AfterStatus=" + checkIndexG2.statusCode()
-                    + " fenceG2AfterStatus=" + checkFenceG2.statusCode());
+                    + " indexG3AfterStatus=" + checkIndexG3.statusCode()
+                    + " fenceG2AfterStatus=" + checkFenceG2.statusCode()
+                    + " fenceG3AfterStatus=" + checkFenceG3.statusCode());
             if (checkAlias.statusCode() != 404
                     || checkIndexG1.statusCode() != 404
                     || checkIndexG2.statusCode() != 404
-                    || checkFenceG2.statusCode() != 404) {
+                    || checkIndexG3.statusCode() != 404
+                    || checkFenceG2.statusCode() != 404
+                    || checkFenceG3.statusCode() != 404) {
                 throw new IllegalStateException("ES test resource cleanup incomplete");
             }
         }

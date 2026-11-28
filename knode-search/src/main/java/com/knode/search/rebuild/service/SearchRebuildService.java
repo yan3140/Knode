@@ -550,9 +550,13 @@ public class SearchRebuildService {
             if (currentTargets.isEmpty()) {
                 return repairEmptyAliasToCandidate(job, attachFence);
             }
-            String err = "ALIAS_SWITCH_IN_FLIGHT_UNCERTAIN:waiting_for_es_reconcile:targets=" + currentTargets;
-            LOGGER.warn("event=search_rebuild_alias_still_uncertain jobId={} alias={} targets={}",
-                    job.jobId(), job.aliasName(), currentTargets);
+            if (currentTargets.equals(Set.of(job.sourcePhysicalIndex()))) {
+                return reissueUncertainAliasSwitchWithFence(job, currentTargets, attachFence);
+            }
+            String err = "ALIAS_SWITCH_UNEXPECTED_TARGETS_UNCERTAIN:expectedSource="
+                    + job.sourcePhysicalIndex() + ";targets=" + currentTargets;
+            LOGGER.warn("event=search_rebuild_alias_unexpected_targets_uncertain jobId={} alias={} expectedSource={} targets={}",
+                    job.jobId(), job.aliasName(), job.sourcePhysicalIndex(), currentTargets);
             return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
                     StepStatus.ALIAS_SWITCH_AMBIGUOUS);
         }
@@ -685,6 +689,118 @@ public class SearchRebuildService {
                 StepStatus.ALIAS_SWITCH_AMBIGUOUS);
     }
 
+    private StepOutcome reissueUncertainAliasSwitchWithFence(
+            RebuildJobRecord job, Set<String> currentTargets, String attachFence) {
+        try {
+            verifyLeaseActiveInTx(job, RebuildPhase.SWITCHING_ALIAS);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
+        }
+
+        Set<String> fenceTargets;
+        try {
+            fenceTargets = indexAdminClient.getAliasTargets(attachFence);
+        } catch (Exception fenceReadEx) {
+            String err = "ALIAS_UNCERTAIN_RESEND_FENCE_READ_FAILED:" + fenceReadEx.getMessage();
+            LOGGER.warn("event=search_rebuild_uncertain_resend_fence_read_failed jobId={} alias={} fence={} error={}",
+                    job.jobId(), job.aliasName(), attachFence, fenceReadEx.getMessage());
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
+
+        if (!fenceTargets.contains(job.candidatePhysicalIndex())) {
+            // One-shot attach fence is already consumed or missing: NEVER re-arm it.
+            // Re-check ES alias targets in case the original in-flight switch just completed.
+            try {
+                Set<String> recheckTargets = indexAdminClient.getAliasTargets(job.aliasName());
+                if (recheckTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+                    if (cacheInvalidator.isCacheEnabled()) {
+                        try {
+                            cacheInvalidator.enterCutoverBypass(
+                                    cutoverBypassOwner(job), job.candidateGeneration(), effectiveSwitchAttempt(job));
+                        } catch (Exception bypassEx) {
+                            String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
+                            LOGGER.warn("event=search_rebuild_cutover_bypass_failed jobId={} error={}",
+                                    job.jobId(), err);
+                            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+                        }
+                    }
+                    StepOutcome fenceHold = ensureAttachFenceDisarmedOrHold(job, attachFence);
+                    if (fenceHold != null) {
+                        return fenceHold;
+                    }
+                    LOGGER.info("event=search_rebuild_uncertain_reconciled_after_fence_consumed jobId={} alias={} target={}",
+                            job.jobId(), job.aliasName(), job.candidatePhysicalIndex());
+                    return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
+                }
+                if (recheckTargets.contains(job.candidatePhysicalIndex()) && recheckTargets.size() > 1) {
+                    return repairPartialAliasWithCandidatePresent(job, recheckTargets, attachFence);
+                }
+                String err = "ALIAS_UNCERTAIN_RESEND_FENCE_MISSING:fence=" + attachFence + ";targets=" + recheckTargets;
+                LOGGER.warn("event=search_rebuild_uncertain_resend_fence_missing jobId={} alias={} fence={} targets={}",
+                        job.jobId(), job.aliasName(), attachFence, recheckTargets);
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                        StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+            } catch (Exception recheckEx) {
+                String err = "ALIAS_UNCERTAIN_RESEND_FENCE_RECHECK_FAILED:" + recheckEx.getMessage();
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                        StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+            }
+        }
+
+        if (cacheInvalidator.isCacheEnabled()) {
+            try {
+                cacheInvalidator.enterCutoverBypass(
+                        cutoverBypassOwner(job), job.candidateGeneration(), effectiveSwitchAttempt(job));
+            } catch (Exception bypassEx) {
+                String err = "CUTOVER_CACHE_BYPASS_SET_FAILED:" + bypassEx.getMessage();
+                LOGGER.warn("event=search_rebuild_cutover_bypass_failed jobId={} error={}", job.jobId(), err);
+                return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                        StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+            }
+        }
+
+        LOGGER.warn("event=search_rebuild_reissuing_uncertain_alias_switch jobId={} alias={} source={} candidate={} attempt={}",
+                job.jobId(), job.aliasName(), job.sourcePhysicalIndex(), job.candidatePhysicalIndex(),
+                effectiveSwitchAttempt(job));
+        AliasSwitchResult resendResult = indexAdminClient.switchAliasAtomicallyWithFence(
+                job.aliasName(), currentTargets, job.candidatePhysicalIndex(), attachFence);
+
+        if (resendResult.isAcknowledged()) {
+            afterAtomicAliasSwitchBeforeLocalCommit(job);
+        }
+
+        Set<String> postTargets;
+        try {
+            postTargets = indexAdminClient.getAliasTargets(job.aliasName());
+        } catch (Exception verifyEx) {
+            String err = "ALIAS_UNCERTAIN_RESEND_VERIFY_FAILED:" + resendResult.status().name()
+                    + ":" + verifyEx.getMessage();
+            return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                    StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+        }
+
+        if (postTargets.equals(Set.of(job.candidatePhysicalIndex()))) {
+            StepOutcome fenceHold = ensureAttachFenceDisarmedOrHold(job, attachFence);
+            if (fenceHold != null) {
+                return fenceHold;
+            }
+            LOGGER.info("event=search_rebuild_uncertain_resend_reconciled jobId={} alias={} target={} resendStatus={}",
+                    job.jobId(), job.aliasName(), job.candidatePhysicalIndex(), resendResult.status());
+            return activateCandidateAndAttemptCacheInvalidation(job, StepStatus.ALIAS_RECONCILED_AND_ACTIVATED);
+        }
+
+        // Never revert/unpause/clear cutover_bypass on a rejected uncertain re-send because
+        // the original in-flight switch request may still be pending or in transit.
+        String err = "ALIAS_UNCERTAIN_RESEND_" + resendResult.status().name() + ":" + resendResult.detail()
+                + ";postTargets=" + postTargets;
+        LOGGER.warn("event=search_rebuild_uncertain_resend_incomplete jobId={} alias={} status={} detail={} postTargets={}",
+                job.jobId(), job.aliasName(), resendResult.status(), resendResult.detail(), postTargets);
+        return recordTransientErrorOrFenced(job, RebuildPhase.SWITCHING_ALIAS, false, false, err,
+                StepStatus.ALIAS_SWITCH_AMBIGUOUS);
+    }
+
     private StepOutcome repairPartialAliasWithCandidatePresent(
             RebuildJobRecord job, Set<String> currentTargets, String attachFence) {
         try {
@@ -812,6 +928,11 @@ public class SearchRebuildService {
         }
         if (fenceTargets.isEmpty()) {
             return null;
+        }
+        try {
+            verifyLeaseActiveInTx(job, RebuildPhase.SWITCHING_ALIAS);
+        } catch (StaleRebuildLeaseException fenced) {
+            return leaseFencedOutcome(job, fenced);
         }
         LOGGER.warn("event=search_rebuild_disarming_remaining_attach_fence jobId={} fence={} targets={}",
                 job.jobId(), attachFence, fenceTargets);
