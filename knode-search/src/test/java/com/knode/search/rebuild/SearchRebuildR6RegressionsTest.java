@@ -792,6 +792,7 @@ class SearchRebuildR6RegressionsTest {
         assertThat(sync4005.get("action")).isEqualTo("STALE_BLOCKED_BY_BARRIER");
 
         // 3) Post-cutover cold-article visibility guard (require_cold_visibility_guard = 1):
+        // Brand-new cold PUBLIC v1 snapshot barrier heals cleanly and still enforces visibility:batch.
         jdbcTemplate.update("""
                 UPDATE search_index_generation SET require_cold_visibility_guard = 1 WHERE alias_name = ?
                 """, ALIAS);
@@ -799,23 +800,23 @@ class SearchRebuildR6RegressionsTest {
                 INSERT INTO search_article_projection (
                     index_generation, article_id, has_content, content_revision, visibility,
                     counter_revision, view_count, projection_revision, title, summary, content, updated_at_ms
-                ) VALUES (2, 4006, 1, 2, 'PUBLIC', 0, 1, 1, 'Art4006 ColdPollutedV2', 'S', 'B', ?)
+                ) VALUES (2, 4006, 1, 1, 'PUBLIC', 0, 1, 1, 'Art4006 ColdPollutedV1', 'S', 'B', ?)
                 """, nowMs);
         jdbcTemplate.update("""
                 INSERT INTO search_article_version_barrier (article_id, max_content_revision, last_visibility, updated_at_ms)
-                VALUES (4006, 2, 'PUBLIC', ?)
+                VALUES (4006, 1, 'PUBLIC', ?)
                 """, nowMs);
-        visibilityTable.put("4006", new VisibilityDecision("4006", "2", "PUBLIC", "READABLE"));
+        visibilityTable.put("4006", new VisibilityDecision("4006", "1", "PUBLIC", "READABLE"));
         int callsBefore = visibilityCalls.get();
 
         streamRedis.addStreamMessage(STREAM_KEY, Map.of("event", publicArticleEventJson(
-                "evt-4006-v2", "ArticlePublished", 4006L, 2L, "Art4006 ColdHealedV2", "S2", "B2", 3L, 1L)));
+                "evt-4006-v1", "ArticlePublished", 4006L, 1L, "Art4006 ColdHealedV1", "S1", "B1", 3L, 1L)));
         streamConsumer.pollOnce();
         indexWorker.processOnce();
 
         assertThat(visibilityCalls.get()).isGreaterThan(callsBefore);
-        assertThat(consumerRepository.findInboxStatus("evt-4006-v2")).contains("APPLIED");
-        assertThat(esStub.getRefreshedDocument(G1, "4006").sourceJson()).contains("Art4006 ColdHealedV2");
+        assertThat(consumerRepository.findInboxStatus("evt-4006-v1")).contains("APPLIED");
+        assertThat(esStub.getRefreshedDocument(G1, "4006").sourceJson()).contains("Art4006 ColdHealedV1");
     }
 
     private RebuildJobRecord advanceUntilPhase(SearchRebuildService svc, String jobId, RebuildPhase target) {

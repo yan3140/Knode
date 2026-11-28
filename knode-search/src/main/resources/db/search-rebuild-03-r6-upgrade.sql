@@ -1,23 +1,27 @@
--- Knode Search (05) Idempotent Data Repair & Upgrade DML: SEARCH-03-R5 / SEARCH-04-R3 / SEARCH-03-R6 -> SEARCH-03-R7
+-- Knode Search (05) Idempotent Data Repair & Upgrade DML:
+-- Applicable Baselines: SEARCH-03-R5 / SEARCH-04-R3 / SEARCH-03-R6 / SEARCH-03-R7 -> SEARCH-03-R8
 -- Target engine: dedicated independent MySQL 8 / InnoDB database, charset utf8mb4, UTC session/JDBC timezone.
--- Compatible with sql_require_primary_key = ON and ONLY_FULL_GROUP_BY.
--- Manual deployment DML only: safe to re-run idempotently.
+-- Compatible with sql_require_primary_key = ON, ONLY_FULL_GROUP_BY, and REPEATABLE READ.
+-- Manual deployment DML only: safe to execute repeatedly (idempotent across N >= 1 runs).
 --
--- Purpose:
---   1. Repairs search_article_version_barrier rows ONLY when positively proven to have been written
---      by a pre-R6 unactivated candidate rebuild transaction:
---        (a) Incremental path: matching APPLIED ARTICLE event in search_rebuild_event_log with
---            matching event_type for barrier visibility and applied_at_ms = barrier.updated_at_ms >= job.created_at_ms;
---        (b) Snapshot path: barrier.last_visibility = 'PUBLIC', job.snapshot_items_imported > 0,
---            barrier.updated_at_ms >= job.created_at_ms, unactivated candidate projection at same
---            (content_revision, 'PUBLIC'), and u.updated_at_ms = barrier.updated_at_ms (or later
---            updated exclusively by an APPLIED ARTICLE_COUNTER rebuild log at u.updated_at_ms).
---   2. Strictly preserves ALL activated-generation barriers, ALL barriers backed by APPLIED online
---      ARTICLE events in search_event_inbox, and ALL standalone barriers whose provenance cannot
---      be positively attributed to an unactivated candidate rebuild transaction.
---   3. Advances lagging barriers and backfills/restores missing barriers from the union of
---      activated-generation projections AND APPLIED online ARTICLE inbox facts (safely restoring
---      inbox-backed delete/withdrawn barriers that earlier R6 upgrade SQL may have mis-deleted).
+-- Purpose & Structural Write-Source Rules (SEARCH-03-R8):
+--   Same-millisecond timestamps alone NEVER prove that a standalone barrier was written by an
+--   unactivated candidate (two independent transactions can share the exact same millisecond).
+--   1. Step 1 (Downgrade): Repairs a candidate-polluted barrier ONLY when the current active_generation
+--      ITSELF holds a usable content projection (has_content = 1 AND content_revision > 0) strictly
+--      below the barrier (an ACID structural impossibility for any non-candidate writer, because every
+--      online/admin/recovery path updates active projection and barrier in the same transaction), AND
+--      no activated generation or APPLIED online ARTICLE inbox reaches the barrier, AND an unactivated
+--      candidate provides corroborating incremental ARTICLE log or PUBLIC snapshot provenance.
+--   2. Step 2 (Delete): Deletes ONLY zero-protection brand-new (max_content_revision = 1,
+--      last_visibility = 'PUBLIC') rows backed by an unactivated candidate's snapshot_items_imported > 0
+--      PUBLIC v1 row when no activated projection or APPLIED online ARTICLE inbox exists.
+--      NEVER deletes or downgrades any standalone DELETED, WITHDRAWN, or PUBLIC v2+ barrier when
+--      active_generation lacks a usable projection (absent row or counter-only has_content = 0 stub),
+--      even if an unactivated candidate carries an identical-millisecond ArticleDeleted log.
+--   3. Steps 3 & 4 (Advance / Backfill / Restore): Advances lagging barriers and backfills or restores
+--      missing barriers from the union of activated-generation projections AND APPLIED online ARTICLE
+--      inbox facts (safely restoring inbox-backed delete/withdrawn barriers mis-deleted by buggy R6 SQL).
 
 -- Step 1: Roll back positively proven candidate-polluted barriers for articles that have a valid
 -- activated-generation projection or APPLIED online ARTICLE inbox floor.
@@ -242,30 +246,29 @@ WHERE EXISTS (
           )
       )
 )
-AND (
-    EXISTS (
-        SELECT 1
-        FROM search_article_projection a_any
-        WHERE a_any.article_id = search_article_version_barrier.article_id
-          AND a_any.has_content = 1
-          AND a_any.content_revision > 0
-          AND (
-              a_any.index_generation = 1
-              OR a_any.index_generation IN (SELECT ig.active_generation FROM search_index_generation ig)
-              OR a_any.index_generation IN (SELECT ig.previous_generation FROM search_index_generation ig WHERE ig.previous_generation IS NOT NULL)
-              OR a_any.index_generation IN (SELECT j.source_generation FROM search_rebuild_job j)
-              OR a_any.index_generation IN (SELECT j.candidate_generation FROM search_rebuild_job j WHERE j.phase IN ('CACHE_INVALIDATING', 'COMPLETED'))
+AND EXISTS (
+    SELECT 1
+    FROM search_article_projection a_cur
+    WHERE a_cur.article_id = search_article_version_barrier.article_id
+      AND a_cur.has_content = 1
+      AND a_cur.content_revision > 0
+      AND (
+          a_cur.index_generation IN (SELECT ig.active_generation FROM search_index_generation ig)
+          OR (
+              NOT EXISTS (SELECT 1 FROM search_index_generation)
+              AND a_cur.index_generation = 1
           )
-    )
-    OR EXISTS (
-        SELECT 1
-        FROM search_event_inbox i_any
-        WHERE i_any.aggregate_id = CAST(search_article_version_barrier.article_id AS CHAR(64))
-          AND UPPER(i_any.aggregate_type) = 'ARTICLE'
-          AND i_any.status = 'APPLIED'
-          AND i_any.source_revision > 0
-          AND i_any.event_type IN ('ArticlePublished', 'ArticleContentChanged', 'ArticleVisibilityChanged', 'ArticleDeleted')
-    )
+      )
+      AND (
+          a_cur.content_revision < search_article_version_barrier.max_content_revision
+          OR (
+              a_cur.content_revision = search_article_version_barrier.max_content_revision
+              AND (
+                  CASE a_cur.visibility WHEN 'DELETED' THEN 3 WHEN 'WITHDRAWN' THEN 2 WHEN 'PUBLIC' THEN 1 ELSE 0 END
+                  < CASE search_article_version_barrier.last_visibility WHEN 'DELETED' THEN 3 WHEN 'WITHDRAWN' THEN 2 WHEN 'PUBLIC' THEN 1 ELSE 0 END
+              )
+          )
+      )
 )
 AND NOT EXISTS (
     SELECT 1
@@ -327,19 +330,25 @@ AND NOT EXISTS (
       )
 );
 
--- Step 2: Delete purely candidate-polluted barriers ONLY when positively proven to originate from an
--- unactivated candidate rebuild transaction AND lacking any activated-generation projection or
--- APPLIED online ARTICLE inbox fact.
+-- Step 2: Delete ONLY zero-protection brand-new (max_content_revision = 1, last_visibility = 'PUBLIC')
+-- barriers corroborated by an unactivated candidate snapshot_items_imported > 0 PUBLIC v1 row when no
+-- activated-generation projection or APPLIED online ARTICLE inbox fact exists.
+-- Standalone DELETED, WITHDRAWN, and PUBLIC v2+ barriers are NEVER deleted (even under identical
+-- millisecond timestamps on candidate rebuild logs).
 DELETE FROM search_article_version_barrier
-WHERE EXISTS (
+WHERE search_article_version_barrier.max_content_revision = 1
+  AND search_article_version_barrier.last_visibility = 'PUBLIC'
+  AND EXISTS (
     SELECT 1
     FROM search_article_projection u
     INNER JOIN search_rebuild_job j
         ON j.candidate_generation = u.index_generation
     WHERE u.article_id = search_article_version_barrier.article_id
       AND u.has_content = 1
-      AND u.content_revision > 0
+      AND u.content_revision = 1
+      AND u.visibility = 'PUBLIC'
       AND j.phase NOT IN ('CACHE_INVALIDATING', 'COMPLETED')
+      AND j.snapshot_items_imported > 0
       AND NOT (
           u.index_generation = 1
           OR u.index_generation IN (SELECT ig.active_generation FROM search_index_generation ig)
@@ -349,50 +358,18 @@ WHERE EXISTS (
       )
       AND search_article_version_barrier.updated_at_ms >= j.created_at_ms
       AND (
-          (
-              (
-                  u.content_revision > search_article_version_barrier.max_content_revision
-                  OR (
-                      u.content_revision = search_article_version_barrier.max_content_revision
-                      AND u.visibility = search_article_version_barrier.last_visibility
-                  )
-              )
+          u.updated_at_ms = search_article_version_barrier.updated_at_ms
+          OR (
+              u.updated_at_ms > search_article_version_barrier.updated_at_ms
+              AND u.counter_revision > 0
               AND EXISTS (
                   SELECT 1
-                  FROM search_rebuild_event_log e
-                  WHERE e.candidate_generation = u.index_generation
-                    AND UPPER(e.aggregate_type) = 'ARTICLE'
-                    AND e.aggregate_id = CAST(search_article_version_barrier.article_id AS CHAR(64))
-                    AND e.source_revision = search_article_version_barrier.max_content_revision
-                    AND e.status = 'APPLIED'
-                    AND e.applied_at_ms = search_article_version_barrier.updated_at_ms
-                    AND (
-                        (search_article_version_barrier.last_visibility = 'DELETED' AND e.event_type = 'ArticleDeleted')
-                        OR (search_article_version_barrier.last_visibility = 'WITHDRAWN' AND e.event_type = 'ArticleVisibilityChanged')
-                        OR (search_article_version_barrier.last_visibility = 'PUBLIC' AND e.event_type IN ('ArticlePublished', 'ArticleContentChanged', 'ArticleVisibilityChanged'))
-                    )
-              )
-          )
-          OR (
-              search_article_version_barrier.last_visibility = 'PUBLIC'
-              AND j.snapshot_items_imported > 0
-              AND u.content_revision = search_article_version_barrier.max_content_revision
-              AND u.visibility = 'PUBLIC'
-              AND (
-                  u.updated_at_ms = search_article_version_barrier.updated_at_ms
-                  OR (
-                      u.updated_at_ms > search_article_version_barrier.updated_at_ms
-                      AND u.counter_revision > 0
-                      AND EXISTS (
-                          SELECT 1
-                          FROM search_rebuild_event_log ec
-                          WHERE ec.candidate_generation = u.index_generation
-                            AND UPPER(ec.aggregate_type) = 'ARTICLE_COUNTER'
-                            AND ec.aggregate_id = CAST(search_article_version_barrier.article_id AS CHAR(64))
-                            AND ec.status = 'APPLIED'
-                            AND ec.applied_at_ms = u.updated_at_ms
-                      )
-                  )
+                  FROM search_rebuild_event_log ec
+                  WHERE ec.candidate_generation = u.index_generation
+                    AND UPPER(ec.aggregate_type) = 'ARTICLE_COUNTER'
+                    AND ec.aggregate_id = CAST(search_article_version_barrier.article_id AS CHAR(64))
+                    AND ec.status = 'APPLIED'
+                    AND ec.applied_at_ms = u.updated_at_ms
               )
           )
       )

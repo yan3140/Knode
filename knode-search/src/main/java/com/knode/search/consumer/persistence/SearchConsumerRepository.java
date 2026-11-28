@@ -313,10 +313,25 @@ public class SearchConsumerRepository {
     /**
      * Resolves the effective cross-generation barrier for an active-generation read/write path.
      * Strictly preserves all activated-generation barriers, all barriers backed by APPLIED online
-     * ARTICLE inbox facts, and any standalone barrier whose provenance cannot be positively attributed
-     * to a pre-R6 unactivated candidate rebuild transaction. Only positively proven pre-R6 unactivated
-     * candidate pollution is rolled back to the highest valid floor across activated generations and
-     * APPLIED online ARTICLE inbox facts (or (0, NONE) if none exists).
+     * ARTICLE inbox facts, and any standalone barrier whose write source cannot be structurally
+     * distinguished from an independent active/legacy transaction (same-millisecond timestamps alone
+     * never prove candidate ownership).
+     *
+     * <p>A barrier strictly above {@code bestValid} may only be rolled back in two structurally sound cases:
+     * <ol>
+     *   <li><b>Active-generation ACID contradiction</b>: the current {@code activeGeneration} itself holds
+     *       a usable content projection ({@code has_content = 1 AND content_revision > 0}) strictly below
+     *       {@code rawBarrier}. Because every non-candidate writer atomically updates both
+     *       {@code search_article_projection(activeGeneration, articleId)} and
+     *       {@code search_article_version_barrier(articleId)} in the same SQL transaction, this state
+     *       structurally proves pre-R6 unactivated candidate pollution when corroborated by an unactivated
+     *       candidate's matching rebuild event/snapshot evidence.</li>
+     *   <li><b>Zero-protection brand-new PUBLIC v1 snapshot</b>: {@code bestValid == null} and
+     *       {@code rawBarrier == (1, PUBLIC)} (which protects zero older revisions and zero hidden states)
+     *       corroborated by an unactivated candidate's {@code snapshot_items_imported > 0} PUBLIC v1 row.</li>
+     * </ol>
+     * Whenever {@code activeGeneration} has no usable projection (absent row or counter-only stub),
+     * any {@code DELETED}, {@code WITHDRAWN}, or {@code PUBLIC v2+} barrier is unconditionally retained.
      */
     public ArticleVersionBarrier resolveEffectiveVersionBarrier(
             long activeGeneration,
@@ -343,6 +358,20 @@ public class SearchConsumerRepository {
             return rawBarrier;
         }
 
+        // Write-source structural gate: same-millisecond timestamps alone cannot distinguish an
+        // independent legacy/active transaction from an unactivated candidate write.
+        VersionSnapshot activeProj = findHighestProjectionVersion(Set.of(activeGeneration), articleId);
+        boolean hasActiveStructuralContradiction = activeProj != null
+                && compareBarrierVersion(
+                        activeProj.contentRevision(), activeProj.visibility(),
+                        rawBarrier.maxContentRevision(), rawBarrier.lastVisibility()) < 0;
+        boolean isZeroProtectionBrandNewPublicV1 = bestValid == null
+                && rawBarrier.maxContentRevision() == 1L
+                && rawBarrier.lastVisibility() == ArticleVisibility.PUBLIC;
+        if (!hasActiveStructuralContradiction && !isZeroProtectionBrandNewPublicV1) {
+            return rawBarrier;
+        }
+
         List<CandidateProjectionSnapshot> unactivatedProjections =
                 findCandidateProjectionVersions(new ArrayList<>(unactivatedJobs.keySet()), articleId);
         boolean provenCandidatePollution = false;
@@ -351,11 +380,13 @@ public class SearchConsumerRepository {
             if (job == null || rawBarrier.updatedAtMs() < job.createdAtMs()) {
                 continue;
             }
-            // Proven Path 1: Pre-R6 incremental rebuild ARTICLE event log written in the exact same transaction.
+            // Proven Path 1 (requires active-generation ACID structural contradiction):
+            // Pre-R6 incremental rebuild ARTICLE event log written in the candidate transaction.
             boolean projectionMatchesOrAhead = candidate.contentRevision() > rawBarrier.maxContentRevision()
                     || (candidate.contentRevision() == rawBarrier.maxContentRevision()
                     && candidate.visibility() == rawBarrier.lastVisibility());
-            if (projectionMatchesOrAhead
+            if (hasActiveStructuralContradiction
+                    && projectionMatchesOrAhead
                     && existsProvenIncrementalRebuildArticleEvent(
                             candidate.indexGeneration(),
                             articleId,
@@ -365,8 +396,8 @@ public class SearchConsumerRepository {
                 provenCandidatePollution = true;
                 break;
             }
-            // Proven Path 2: Pre-R6 snapshot import PUBLIC row written in the exact same transaction
-            // (optionally followed by an APPLIED ARTICLE_COUNTER event updating candidate.updated_at_ms).
+            // Proven Path 2: Pre-R6 snapshot import PUBLIC row (either under active-generation ACID
+            // structural contradiction, or strictly zero-protection brand-new PUBLIC v1).
             if (rawBarrier.lastVisibility() == ArticleVisibility.PUBLIC
                     && job.snapshotItemsImported() > 0L
                     && candidate.contentRevision() == rawBarrier.maxContentRevision()

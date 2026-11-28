@@ -584,25 +584,34 @@ public class SearchConsumerOpsService {
                     "Authoritative content snapshot was not prefetched; retry request", true);
         }
 
-        if (barrierNeedsRepair) {
-            effectiveBarrier = consumerRepository.resolveEffectiveVersionBarrier(
-                    activeGen, articleId, barrier, true, nowMs);
-        }
         long effectiveFloor = Math.max(current.contentRevision(), effectiveBarrier.maxContentRevision());
+        long requiredAuthoritativeRevision = Math.max(effectiveFloor, inbox.sourceRevision());
+        ArticleVisibility inboxVis = SearchConsumerRepository.deriveInboxArticleVisibility(
+                inbox.eventType(), inbox.visibility());
 
         if (authoritative.isReadablePublic()) {
             SnapshotArticleItem item = authoritative.snapshot();
             long rev = item.sourceRevision();
-            boolean blockedByHiddenBarrier = rev == effectiveFloor
-                    && (effectiveBarrier.lastVisibility() == ArticleVisibility.DELETED
-                    || effectiveBarrier.lastVisibility() == ArticleVisibility.WITHDRAWN
-                    || current.visibility() == ArticleVisibility.DELETED
-                    || current.visibility() == ArticleVisibility.WITHDRAWN);
-            if (rev < effectiveFloor || blockedByHiddenBarrier) {
-                return buildSingleRetryWorkResult(
-                        validReplayId, inbox.eventId(), normalizedArticleId, callerService, validOperator,
-                        new SearchOpsRepository.SingleRetryOutcome("NOOP", 0L, "AUTHORITATIVE_SNAPSHOT_STALE"),
-                        "NOOP_STALE_SNAPSHOT", Long.toString(rev), "PUBLIC");
+            boolean lagsBehindHiddenState =
+                    (rev == effectiveBarrier.maxContentRevision()
+                            && SearchConsumerRepository.visibilityRank(effectiveBarrier.lastVisibility())
+                            > SearchConsumerRepository.visibilityRank(ArticleVisibility.PUBLIC))
+                    || (rev == current.contentRevision()
+                            && SearchConsumerRepository.visibilityRank(current.visibility())
+                            > SearchConsumerRepository.visibilityRank(ArticleVisibility.PUBLIC))
+                    || (rev == inbox.sourceRevision()
+                            && SearchConsumerRepository.visibilityRank(inboxVis)
+                            > SearchConsumerRepository.visibilityRank(ArticleVisibility.PUBLIC));
+            if (rev < requiredAuthoritativeRevision || lagsBehindHiddenState) {
+                throw new InternalOpsException(503, "DEPENDENCY_UNAVAILABLE",
+                        "Authoritative PUBLIC snapshot revision " + rev
+                                + " lags behind required revision " + requiredAuthoritativeRevision
+                                + " for article " + articleId + "; retry request",
+                        true);
+            }
+            if (barrierNeedsRepair) {
+                effectiveBarrier = consumerRepository.resolveEffectiveVersionBarrier(
+                        activeGen, articleId, barrier, true, nowMs);
             }
 
             long mergedCounterRev;
@@ -673,7 +682,11 @@ public class SearchConsumerOpsService {
         }
 
         if (authoritative.isMissing()) {
-            long tombstoneRev = Math.max(Math.max(effectiveFloor, inbox.sourceRevision()), 1L);
+            if (barrierNeedsRepair) {
+                effectiveBarrier = consumerRepository.resolveEffectiveVersionBarrier(
+                        activeGen, articleId, barrier, true, nowMs);
+            }
+            long tombstoneRev = Math.max(requiredAuthoritativeRevision, 1L);
             long nextProjRev = current.projectionRevision() + 1L;
             ArticleProjectionRecord updated = new ArticleProjectionRecord(
                     articleId,
@@ -716,17 +729,30 @@ public class SearchConsumerOpsService {
                     "TOMBSTONE_ENQUEUED", Long.toString(tombstoneRev), "MISSING");
         }
 
-        // WITHDRAWN, DELETED, or DRAFT (all non-public with authoritative sourceRevision)
+        // WITHDRAWN, DELETED, or DRAFT (all non-public with known numeric authoritative sourceRevision)
         long rev = authoritative.sourceRevision();
-        if (rev < effectiveFloor) {
-            return buildSingleRetryWorkResult(
-                    validReplayId, inbox.eventId(), normalizedArticleId, callerService, validOperator,
-                    new SearchOpsRepository.SingleRetryOutcome("NOOP", 0L, "AUTHORITATIVE_SNAPSHOT_STALE"),
-                    "NOOP_STALE_SNAPSHOT", Long.toString(rev), authoritative.visibility());
-        }
         ArticleVisibility hiddenVis = "DELETED".equals(authoritative.visibility())
                 ? ArticleVisibility.DELETED
                 : ArticleVisibility.WITHDRAWN;
+        int hiddenRank = SearchConsumerRepository.visibilityRank(hiddenVis);
+        boolean hiddenLagsBehindHigherVisibility =
+                (rev == effectiveBarrier.maxContentRevision()
+                        && hiddenRank < SearchConsumerRepository.visibilityRank(effectiveBarrier.lastVisibility()))
+                || (rev == current.contentRevision()
+                        && hiddenRank < SearchConsumerRepository.visibilityRank(current.visibility()))
+                || (rev == inbox.sourceRevision()
+                        && hiddenRank < SearchConsumerRepository.visibilityRank(inboxVis));
+        if (rev <= 0L || rev < requiredAuthoritativeRevision || hiddenLagsBehindHigherVisibility) {
+            throw new InternalOpsException(503, "DEPENDENCY_UNAVAILABLE",
+                    "Authoritative hidden snapshot (" + authoritative.visibility() + " v" + rev
+                            + ") lags behind required revision " + requiredAuthoritativeRevision
+                            + " for article " + articleId + "; retry request",
+                    true);
+        }
+        if (barrierNeedsRepair) {
+            effectiveBarrier = consumerRepository.resolveEffectiveVersionBarrier(
+                    activeGen, articleId, barrier, true, nowMs);
+        }
         long nextProjRev = current.projectionRevision() + 1L;
         ArticleProjectionRecord updated = new ArticleProjectionRecord(
                 articleId,

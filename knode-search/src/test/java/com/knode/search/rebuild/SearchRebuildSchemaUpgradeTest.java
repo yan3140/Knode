@@ -930,6 +930,133 @@ public class SearchRebuildSchemaUpgradeTest {
         }
     }
 
+    @Test
+    void r8UpgradeSqlPreservesStandaloneDeleteBarrierWithSameMillisecondCandidateLogIdempotently() {
+        String dbName = "search_upgrade_r8_" + UUID.randomUUID().toString().replace("-", "");
+        HikariConfig hc = new HikariConfig();
+        hc.setJdbcUrl("jdbc:h2:mem:" + dbName
+                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1");
+        hc.setDriverClassName("org.h2.Driver");
+        hc.setUsername("sa");
+        hc.setPassword("");
+
+        try (HikariDataSource ds = new HikariDataSource(hc)) {
+            new ResourceDatabasePopulator(new ClassPathResource("db/search-consumer-schema.sql")).execute(ds);
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+
+            long t0 = 1700000000000L;
+            long tJob = t0 + 10_000L;
+            long tSameMs = tJob + 2_000L;
+
+            jdbc.update("""
+                    INSERT INTO search_index_generation (
+                        alias_name, active_generation, active_physical_index, require_cold_visibility_guard,
+                        cutover_state, active_cache_invalidation_status, active_cache_invalidation_attempts, updated_at_ms
+                    ) VALUES ('knode_articles_search', 1, 'knode_articles_search_g1', 0, 'NORMAL', 'DONE', 0, ?)
+                    """, t0);
+            jdbc.update("""
+                    INSERT INTO search_rebuild_job (
+                        job_id, alias_name, active_lock_key, client_request_id,
+                        snapshot_done, snapshot_pages_imported, snapshot_items_imported,
+                        last_commit_sequence, incremental_commits_applied, incremental_events_applied,
+                        source_generation, source_physical_index, candidate_generation, candidate_physical_index,
+                        phase, lease_owner, lease_until_ms, lease_generation,
+                        alias_switch_uncertain, switch_attempts, created_at_ms, updated_at_ms
+                    ) VALUES (
+                        'rb-r8-failed-g2', 'knode_articles_search', NULL, 'req-r8-g2',
+                        1, 1, 6, 4, 1, 4, 1, 'knode_articles_search_g1', 2, 'knode_articles_search_g2',
+                        'FAILED', 'i1', ?, 1, 0, 0, ?, ?
+                    )
+                    """, tSameMs + 1_000L, tJob, tSameMs + 1_000L);
+
+            // Active g1 projections:
+            // - 501: NO active projection (standalone DELETED v7, same-ms candidate ArticleDeleted v7 -> MUST PRESERVE!)
+            // - 502: counter-only has_content=0 stub (standalone DELETED v7, same-ms candidate ArticleDeleted v7 -> MUST PRESERVE!)
+            // - 503: NO active projection, has APPLIED ArticleDeleted v7 inbox (mis-deleted by old R6 SQL -> MUST RESTORE!)
+            // - 504: active g1 PUBLIC v1 (ACID structural contradiction + candidate DELETED v2 at tSameMs -> MUST HEAL to PUBLIC v1!)
+            // - 505: NO active projection, zero-protection brand-new PUBLIC v1 snapshot -> MUST DELETE!
+            // - 506: NO active projection, standalone PUBLIC v2 with same-ms candidate PUBLIC v2 -> MUST PRESERVE!
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility,
+                        counter_revision, view_count, projection_revision, title, summary, content, updated_at_ms
+                    ) VALUES
+                        (1, 502, 0, 0, 'NONE', 3, 30, 1, NULL, NULL, NULL, ?),
+                        (1, 504, 1, 1, 'PUBLIC', 0, 5, 1, 'A504 V1', 'S', 'B', ?)
+                    """, t0, t0);
+
+            jdbc.update("""
+                    INSERT INTO search_event_inbox (
+                        event_id, stream_record_id, event_type, schema_version, aggregate_type, aggregate_id,
+                        source_revision, visibility, status, received_at_ms, processed_at_ms
+                    ) VALUES ('evt-503-del-v7', '1-0', 'ArticleDeleted', 2, 'ARTICLE', '503', 7, 'DELETED', 'APPLIED', ?, ?)
+                    """, t0, t0);
+
+            // Unactivated candidate g2 projections & rebuild logs with exact same timestamp tSameMs
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility,
+                        counter_revision, view_count, projection_revision, title, summary, content, updated_at_ms
+                    ) VALUES
+                        (2, 501, 1, 7, 'DELETED', 0, 0, 1, NULL, NULL, NULL, ?),
+                        (2, 502, 1, 7, 'DELETED', 0, 0, 1, NULL, NULL, NULL, ?),
+                        (2, 504, 1, 2, 'DELETED', 0, 0, 1, NULL, NULL, NULL, ?),
+                        (2, 505, 1, 1, 'PUBLIC', 0, 1, 1, 'A505 NewV1', 'S', 'B', ?),
+                        (2, 506, 1, 2, 'PUBLIC', 0, 2, 1, 'A506 V2', 'S', 'B', ?)
+                    """, tSameMs, tSameMs, tSameMs, tSameMs, tSameMs);
+            jdbc.update("""
+                    INSERT INTO search_rebuild_event_log (
+                        candidate_generation, event_id, commit_sequence, event_type,
+                        aggregate_type, aggregate_id, source_revision, status, applied_at_ms
+                    ) VALUES
+                        (2, 'rb-r8-501-d7', 1, 'ArticleDeleted', 'ARTICLE', '501', 7, 'APPLIED', ?),
+                        (2, 'rb-r8-502-d7', 2, 'ArticleDeleted', 'ARTICLE', '502', 7, 'APPLIED', ?),
+                        (2, 'rb-r8-504-d2', 3, 'ArticleDeleted', 'ARTICLE', '504', 2, 'APPLIED', ?)
+                    """, tSameMs, tSameMs, tSameMs);
+
+            // Seed barriers (503 intentionally missing to verify post-buggy-R6 restore)
+            jdbc.update("""
+                    INSERT INTO search_article_version_barrier (
+                        article_id, max_content_revision, last_visibility, updated_at_ms
+                    ) VALUES
+                        (501, 7, 'DELETED', ?),
+                        (502, 7, 'DELETED', ?),
+                        (504, 2, 'DELETED', ?),
+                        (505, 1, 'PUBLIC', ?),
+                        (506, 2, 'PUBLIC', ?)
+                    """, tSameMs, tSameMs, tSameMs, tSameMs, tSameMs);
+
+            ResourceDatabasePopulator populator = new ResourceDatabasePopulator(
+                    new ClassPathResource("db/search-rebuild-03-r6-upgrade.sql"));
+            // Execute verbatim TWICE to confirm strict idempotency.
+            populator.execute(ds);
+            populator.execute(ds);
+
+            SearchConsumerRepository repo = new SearchConsumerRepository(jdbc, new ObjectMapper());
+            // Standalone DELETED v7 (absent row & counter-only stub) MUST survive despite same-ms candidate log!
+            assertThat(repo.findVersionBarrier(501L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(7L, ArticleVisibility.DELETED);
+            assertThat(repo.findVersionBarrier(502L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(7L, ArticleVisibility.DELETED);
+            // Post-buggy-R6 mis-deleted inbox-backed DELETED v7 MUST be restored!
+            assertThat(repo.findVersionBarrier(503L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(7L, ArticleVisibility.DELETED);
+            // Active-gen ACID structural contradiction + candidate incremental pollution MUST be healed!
+            assertThat(repo.findVersionBarrier(504L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(1L, ArticleVisibility.PUBLIC);
+            // Zero-protection brand-new PUBLIC v1 snapshot barrier MUST be deleted!
+            assertThat(repo.findVersionBarrier(505L)).isEmpty();
+            // Standalone PUBLIC v2 without active projection MUST be preserved!
+            assertThat(repo.findVersionBarrier(506L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(2L, ArticleVisibility.PUBLIC);
+        }
+    }
+
     /**
      * Executes db/search-ops-04-r2-upgrade.sql on H2 (MODE=MySQL).
      * H2 2.3.x does not parse MySQL's comma-chained "DROP PRIMARY KEY, ADD PRIMARY KEY (...)"

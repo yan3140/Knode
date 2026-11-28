@@ -782,7 +782,175 @@ public final class RealMiddlewareVerificationRunner {
             System.out.println("[LIVE-IT] CHAIN 5 (R7) PASSED: legacy STALE_IGNORED list+recover(900104 PUBLIC v2 hit=1, "
                     + "900105 DELETED v2 tombstone searchable=false body=0 hit=0) + normal late STALE_IGNORED=NOOP "
                     + "+ standalone WITHDRAWN v7 protected against candidate g2 PUBLIC v9/ARTICLE_COUNTER v7 (late v6 STALE_IGNORED, ES 404)");
-            System.out.println("[LIVE-IT] ALL 5 REAL-MIDDLEWARE CHAINS VERIFIED SUCCESSFULLY! env=" + envName + " alias=" + esAlias);
+            // =========================================================================
+            // CHAIN 6 (SEARCH-03-R8):
+            //   (a) Standalone DELETED v7 (900107) with unactivated candidate g2 holding DELETED v7 AND
+            //       APPLIED ArticleDeleted v7 log at the EXACT SAME MILLISECOND -> late PUBLIC v6 stays
+            //       STALE_IGNORED, barrier stays DELETED v7, 0 tasks, real ES 404.
+            //   (b) Lagging Content PUBLIC v1 for 900108 (v2 STALE_IGNORED) -> retryable 503, 0 audit,
+            //       inbox stays STALE_IGNORED -> Content catches up to v2 -> SAME replayRequestId recovers
+            //       900108 into real ES g1 and public search hits v2!
+            // =========================================================================
+            long r8SameMs = Math.max(System.currentTimeMillis(), rbJob.createdAtMs() + 500L);
+            jdbc.update("""
+                    INSERT INTO search_article_version_barrier (
+                        article_id, max_content_revision, last_visibility, updated_at_ms
+                    ) VALUES (900107, 7, 'DELETED', ?)
+                    """, r8SameMs);
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility, counter_revision,
+                        view_count, projection_revision, updated_at_ms
+                    ) VALUES (2, 900107, 1, 7, 'DELETED', 0, 0, 1, ?)
+                    """, r8SameMs);
+            jdbc.update("""
+                    INSERT INTO search_rebuild_event_log (
+                        candidate_generation, event_id, commit_sequence, event_type, aggregate_type, aggregate_id,
+                        source_revision, status, applied_at_ms
+                    ) VALUES (2, ?, 107, 'ArticleDeleted', 'ARTICLE', '900107', 7, 'APPLIED', ?)
+                    """, UUID.randomUUID().toString(), r8SameMs);
+
+            String evtLate900107 = UUID.randomUUID().toString();
+            String late900107Json = """
+                    {
+                      "eventId": "%s",
+                      "eventType": "ArticleContentChanged",
+                      "schemaVersion": 2,
+                      "aggregateType": "ARTICLE",
+                      "aggregateId": "900107",
+                      "sourceRevision": "6",
+                      "publicationFactId": "pub-900107-v6",
+                      "occurredAt": "2026-11-28T07:00:00Z",
+                      "producer": "knode-content",
+                      "visibility": "PUBLIC",
+                      "payload": {
+                        "articleId": "900107",
+                        "authorId": "1",
+                        "title": "SameMsZombieAttempt900107",
+                        "summary": "must stay blocked",
+                        "content": "must stay blocked",
+                        "thumbnail": null,
+                        "isTop": "0",
+                        "isComment": "1",
+                        "category": {"id": "10", "name": "架构"},
+                        "tags": [],
+                        "createTime": "2026-11-28T07:00:00Z",
+                        "publishedAt": "2026-11-28T07:00:00Z",
+                        "viewCount": "1",
+                        "counterRevision": "1"
+                      }
+                    }
+                    """.formatted(evtLate900107);
+            redis.xadd(streamKey, Map.of("event", late900107Json));
+            ContentStreamConsumer.PollSummary pollR8Protect = streamConsumer.pollOnce();
+            require(pollR8Protect.freshCount() == 1 && pollR8Protect.ackedCount() == 1 && pollR8Protect.dbFailedCount() == 0,
+                    "Unexpected pollR8Protect: " + pollR8Protect);
+            require("STALE_IGNORED".equals(consumerRepo.findInboxStatus(evtLate900107).orElse("")),
+                    "Late PUBLIC v6 MUST be STALE_IGNORED despite same-ms candidate ArticleDeleted v7 log");
+            require(consumerRepo.findVersionBarrier(900107L).orElseThrow().maxContentRevision() == 7L
+                            && "DELETED".equals(consumerRepo.findVersionBarrier(900107L).orElseThrow().lastVisibility().name()),
+                    "Standalone DELETED v7 barrier 900107 MUST stay intact");
+            require(consumerRepo.findIndexTask(1L, 900107L).isEmpty(),
+                    "Protected standalone DELETED 900107 MUST NOT enqueue ES task");
+            HttpResponse<String> esDoc900107 = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG1 + "/_doc/900107")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(esDoc900107.statusCode() == 404,
+                    "Protected standalone DELETED 900107 MUST NOT appear in ES g1, status=" + esDoc900107.statusCode());
+
+            // (b) Lagging Content v1 -> retryable 503 (0 audit, inbox STALE_IGNORED) -> same key succeeds at v2
+            String doc900108V1 = MAPPER.writeValueAsString(SearchIndexDocument.upsert(
+                    900108L, 1L, "同键重试旧版文章 R8BeforeLag900108V1", "旧摘要", "旧正文",
+                    10L, "架构", List.of("R8"), null, 3L, Instant.parse("2026-11-28T07:05:00Z").toEpochMilli()));
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility, counter_revision,
+                        view_count, projection_revision, title, summary, content, category_id, category_name,
+                        tag_names_json, thumbnail, is_top, create_time_ms, updated_at_ms
+                    ) VALUES (1, 900108, 1, 1, 'PUBLIC', 1, 3, 1, '同键重试旧版文章 R8BeforeLag900108V1', '旧摘要', '旧正文', 10, '架构', '["R8"]', NULL, '0', ?, ?)
+                    """, Instant.parse("2026-11-28T07:05:00Z").toEpochMilli(), r8SameMs - 10_000L);
+            jdbc.update("""
+                    INSERT INTO search_article_version_barrier (
+                        article_id, max_content_revision, last_visibility, updated_at_ms
+                    ) VALUES (900108, 1, 'PUBLIC', ?)
+                    """, r8SameMs - 10_000L);
+            jdbc.update("""
+                    INSERT INTO search_index_task (
+                        index_generation, target_index, article_id, target_projection_revision, operation,
+                        payload_json, status, attempts, max_attempts, due_at_ms, lease_until_ms,
+                        claim_generation, last_error, es_applied_revision,
+                        cache_invalidation_status, cache_invalidation_attempts, updated_at_ms
+                    ) VALUES (1, ?, 900108, 1, 'UPSERT', ?, 'PENDING', 0, 5, ?, NULL, 0, NULL, 0, 'NONE', 0, ?)
+                    """, esPhysicalG1, doc900108V1, r8SameMs - 10_000L, r8SameMs - 10_000L);
+            SearchIndexTaskWorker.WorkerCycleSummary workR8Seed = indexWorker.processOnce();
+            require(workR8Seed.appliedCount() == 1 && workR8Seed.failedCount() == 0,
+                    "Unexpected workR8Seed: " + workR8Seed);
+            esAdmin.refreshIndex(esPhysicalG1);
+
+            String evtR8Lag = UUID.randomUUID().toString();
+            jdbc.update("""
+                    INSERT INTO search_event_inbox (
+                        event_id, event_type, schema_version, aggregate_type, aggregate_id, source_revision,
+                        stream_record_id, status, received_at_ms, processed_at_ms
+                    ) VALUES (?, 'ArticleContentChanged', 2, 'ARTICLE', '900108', 2, '900108-2', 'STALE_IGNORED', ?, ?)
+                    """, evtR8Lag, r8SameMs - 5_000L, r8SameMs - 5_000L);
+
+            // First call: Content lags at PUBLIC v1 -> must return retryable 503 with 0 audit & unchanged state
+            contentStub.putCurrentPublicArticle(LoopbackContentSnapshotStub.snapshotItem(
+                    900108L, 1L, "同键重试旧版文章 R8BeforeLag900108V1", "旧摘要", "旧正文",
+                    10L, "架构", List.of("R8"), 3L, 1L, "2026-11-28T07:05:00Z"));
+            String r8RetryBody = "{\"replayRequestId\":\"live-it-r8-lag-1\",\"operator\":\"live-it\"}";
+            HttpResponse<String> r8LagResp = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1/ops/consumers/" + evtR8Lag + "/retry"))
+                            .header("Authorization", "Bearer " + opsToken)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(r8RetryBody))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(r8LagResp.statusCode() == 503
+                            && "DEPENDENCY_UNAVAILABLE".equals(MAPPER.readTree(r8LagResp.body()).path("error").path("code").asText())
+                            && MAPPER.readTree(r8LagResp.body()).path("error").path("retryable").asBoolean(false),
+                    "Expected retryable 503 on lagging v1 snapshot: " + r8LagResp.statusCode() + " body=" + r8LagResp.body());
+            require("STALE_IGNORED".equals(consumerRepo.findInboxStatus(evtR8Lag).orElse("")),
+                    "Inbox MUST stay STALE_IGNORED after lagging snapshot 503");
+            Long r8AuditAfterLag = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM search_ops_replay_audit WHERE replay_request_id = 'live-it-r8-lag-1'", Long.class);
+            require(r8AuditAfterLag != null && r8AuditAfterLag == 0L,
+                    "Expected 0 audit rows after lagging snapshot 503, got " + r8AuditAfterLag);
+
+            // Second call: Content catches up to PUBLIC v2 -> retry with EXACT SAME replayRequestId succeeds!
+            contentStub.putCurrentPublicArticle(LoopbackContentSnapshotStub.snapshotItem(
+                    900108L, 2L, "同键重试追平恢复验证 R8SameKeyRecovered900108V2", "R8 追平恢复摘要",
+                    "Content 追到 v2 后原 replayRequestId 唯一有效恢复并写入真实 ES",
+                    10L, "架构", List.of("R8", "SameKey"), 18L, 2L, "2026-11-28T07:10:00Z"));
+            HttpResponse<String> r8RecResp = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1/ops/consumers/" + evtR8Lag + "/retry"))
+                            .header("Authorization", "Bearer " + opsToken)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(r8RetryBody))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(r8RecResp.statusCode() == 200
+                            && "ACCEPTED".equals(MAPPER.readTree(r8RecResp.body()).path("status").asText())
+                            && "2".equals(MAPPER.readTree(r8RecResp.body()).path("authoritativeRevision").asText()),
+                    "Expected 200 ACCEPTED on same-key retry at v2: " + r8RecResp.body());
+            SearchIndexTaskWorker.WorkerCycleSummary workR8Rec = indexWorker.processOnce();
+            require(workR8Rec.appliedCount() == 1 && workR8Rec.failedCount() == 0,
+                    "Unexpected workR8Rec: " + workR8Rec);
+            esAdmin.refreshIndex(esPhysicalG1);
+
+            String qR8 = URLEncoder.encode("R8SameKeyRecovered900108V2", StandardCharsets.UTF_8);
+            HttpResponse<String> searchR8 = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/api/blog/search?keyword=" + qR8)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            JsonNode sR8Json = MAPPER.readTree(searchR8.body());
+            require("1".equals(sR8Json.path("data").path("total").asText())
+                            && "900108".equals(sR8Json.path("data").path("rows").get(0).path("id").asText()),
+                    "Expected recovered 900108 v2 hit in real ES: " + searchR8.body());
+            System.out.println("[LIVE-IT] CHAIN 6 (R8) PASSED: same-ms standalone DELETED v7 (900107) preserved (late v6 STALE_IGNORED, ES 404)"
+                    + " + lagging v1 (900108) -> 503 retryable (0 audit, inbox STALE_IGNORED)"
+                    + " -> same replayRequestId at v2 -> ACCEPTED -> real ES g1 hit=1");
+            System.out.println("[LIVE-IT] ALL 6 REAL-MIDDLEWARE CHAINS VERIFIED SUCCESSFULLY! env=" + envName + " alias=" + esAlias);
         } finally {
             if (ctx != null) {
                 try {
