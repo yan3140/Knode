@@ -1,5 +1,6 @@
 package com.knode.search.ops;
 
+import com.knode.search.client.CanonicalIdParser;
 import com.knode.search.consumer.persistence.CacheInvalidationStatus;
 import com.knode.search.consumer.persistence.IndexGenerationState;
 import com.knode.search.consumer.persistence.SearchConsumerRepository;
@@ -115,11 +116,54 @@ public class SearchOpsRepository {
         if ("PROTOCOL_FAILED".equals(statusFilter)) {
             return queryProtocolFailuresOnly(pageSize, offset);
         }
+        if ("STALE_IGNORED".equals(statusFilter)) {
+            return queryStaleIgnoredInboxOnly(pageSize, offset);
+        }
         if ("PENDING".equals(statusFilter) || "LEASED".equals(statusFilter) || "DONE".equals(statusFilter)) {
             return queryIndexTasksOnly(activeGeneration, statusFilter, pageSize, offset);
         }
         // Combined view for ALL, FAILED, or DEAD (includes both search_index_task and search_event_failure)
         return queryCombinedTasksAndFailures(activeGeneration, statusFilter, pageSize, offset);
+    }
+
+    private EventPageResult queryStaleIgnoredInboxOnly(int limit, int offset) {
+        long total = queryCount("SELECT COUNT(*) FROM search_event_inbox WHERE status = 'STALE_IGNORED'");
+        List<ConsumerEventRow> rows = jdbcTemplate.query(
+                """
+                SELECT event_id, stream_record_id, event_type, aggregate_type, aggregate_id,
+                       source_revision, visibility, status, processed_at_ms
+                FROM search_event_inbox
+                WHERE status = 'STALE_IGNORED'
+                ORDER BY processed_at_ms DESC, event_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (rs, rowNum) -> {
+                    String normalizedArticleId = CanonicalIdParser.normalizePositiveDecimalString(rs.getString("aggregate_id"));
+                    Long articleId = normalizedArticleId == null ? null : Long.parseLong(normalizedArticleId);
+                    return new ConsumerEventRow(
+                            "STALE_IGNORED_INBOX",
+                            rs.getString("event_id"),
+                            null,
+                            null,
+                            articleId,
+                            rs.getLong("source_revision"),
+                            rs.getString("event_type"),
+                            "STALE_IGNORED",
+                            rs.getString("status"),
+                            0,
+                            0,
+                            null,
+                            null,
+                            null,
+                            null,
+                            rs.getString("stream_record_id"),
+                            rs.getLong("processed_at_ms")
+                    );
+                },
+                limit,
+                offset
+        );
+        return new EventPageResult(rows, total);
     }
 
     private EventPageResult queryProtocolFailuresOnly(int limit, int offset) {
@@ -461,20 +505,40 @@ public class SearchOpsRepository {
     public Optional<InboxLookupRecord> findInboxByEventId(String eventId) {
         List<InboxLookupRecord> rows = jdbcTemplate.query(
                 """
-                SELECT event_id, aggregate_type, aggregate_id, source_revision, status
+                SELECT event_id, event_type, aggregate_type, aggregate_id, source_revision, visibility, status
                 FROM search_event_inbox
                 WHERE event_id = ?
                 """,
-                (rs, rowNum) -> new InboxLookupRecord(
-                        rs.getString("event_id"),
-                        rs.getString("aggregate_type"),
-                        rs.getString("aggregate_id"),
-                        rs.getLong("source_revision"),
-                        rs.getString("status")
-                ),
+                SearchOpsRepository::mapInboxLookupRow,
                 eventId
         );
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    public Optional<InboxLookupRecord> lockInboxByEventIdForUpdate(String eventId) {
+        List<InboxLookupRecord> rows = jdbcTemplate.query(
+                """
+                SELECT event_id, event_type, aggregate_type, aggregate_id, source_revision, visibility, status
+                FROM search_event_inbox
+                WHERE event_id = ?
+                FOR UPDATE
+                """,
+                SearchOpsRepository::mapInboxLookupRow,
+                eventId
+        );
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    private static InboxLookupRecord mapInboxLookupRow(ResultSet rs, int rowNum) throws SQLException {
+        return new InboxLookupRecord(
+                rs.getString("event_id"),
+                rs.getString("event_type"),
+                rs.getString("aggregate_type"),
+                rs.getString("aggregate_id"),
+                rs.getLong("source_revision"),
+                rs.getString("visibility"),
+                rs.getString("status")
+        );
     }
 
     public BatchRetryOutcome requeueBatchInCurrentTx(
@@ -707,7 +771,7 @@ public class SearchOpsRepository {
         return new SingleRetryOutcome("NOOP", 0L, "ALREADY_QUEUED");
     }
 
-    private Optional<SearchIndexTaskRecord> lockIndexTaskForUpdate(long indexGeneration, long articleId) {
+    public Optional<SearchIndexTaskRecord> lockIndexTaskForUpdate(long indexGeneration, long articleId) {
         List<SearchIndexTaskRecord> rows = jdbcTemplate.query(
                 """
                 SELECT index_generation, article_id, target_index, target_projection_revision,
@@ -871,9 +935,11 @@ public class SearchOpsRepository {
 
     public record InboxLookupRecord(
             String eventId,
+            String eventType,
             String aggregateType,
             String aggregateId,
             long sourceRevision,
+            String visibility,
             String status
     ) {
     }

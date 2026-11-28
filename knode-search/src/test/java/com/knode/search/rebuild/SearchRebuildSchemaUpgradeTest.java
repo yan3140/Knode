@@ -632,7 +632,7 @@ public class SearchRebuildSchemaUpgradeTest {
                         alias_switch_uncertain, switch_attempts, created_at_ms, updated_at_ms
                     ) VALUES
                         ('rb-g2-failed', 'knode_articles_search', NULL, 'req-g2',
-                         1, 1, 2, 0, 0, 0, 1, 'knode_articles_search_g1', 2, 'knode_articles_search_g2',
+                         1, 1, 2, 1, 1, 1, 1, 'knode_articles_search_g1', 2, 'knode_articles_search_g2',
                          'FAILED', 'i1', ?, 1, 0, 0, ?, ?),
                         ('rb-g3-done', 'knode_articles_search', NULL, 'req-g3',
                          1, 1, 2, 0, 0, 0, 1, 'knode_articles_search_g1', 3, 'knode_articles_search_g3',
@@ -657,8 +657,9 @@ public class SearchRebuildSchemaUpgradeTest {
                     """, t0, t0, t0, t0);
 
             // Unactivated candidate projections (abandoned g2 & in-progress g4):
-            // 101: g4 PUBLIC v2 (polluted!); 102: g2 DELETED v2 (polluted from g2 < active 3!);
-            // 104: g4 PUBLIC v1 (brand new, purely candidate-polluted -> must be deleted!).
+            // 101: g4 PUBLIC v2 (proven snapshot pollution);
+            // 102: g2 DELETED v2 (proven incremental pollution via search_rebuild_event_log ArticleDeleted);
+            // 104: g4 PUBLIC v1 (brand new, proven snapshot pollution -> must be deleted!).
             jdbc.update("""
                     INSERT INTO search_article_projection (
                         index_generation, article_id, has_content, content_revision, visibility,
@@ -668,6 +669,12 @@ public class SearchRebuildSchemaUpgradeTest {
                         (2, 102, 1, 2, 'DELETED', 0, 0, 1, NULL, NULL, NULL, ?),
                         (4, 104, 1, 1, 'PUBLIC', 0, 1, 1, 'A104 New', 'S', 'B', ?)
                     """, t0 + 100, t0 + 100, t0 + 100);
+            jdbc.update("""
+                    INSERT INTO search_rebuild_event_log (
+                        candidate_generation, event_id, commit_sequence, event_type,
+                        aggregate_type, aggregate_id, source_revision, status, applied_at_ms
+                    ) VALUES (2, 'evt-rb-g2-102-d2', 1, 'ArticleDeleted', 'ARTICLE', '102', 2, 'APPLIED', ?)
+                    """, t0 + 100);
 
             // Seed polluted + valid barriers (105 is standalone DELETED v8 with no projection in any gen).
             jdbc.update("""
@@ -709,6 +716,217 @@ public class SearchRebuildSchemaUpgradeTest {
             assertThat(consumerRepo.findVersionBarrier(106L).orElseThrow())
                     .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
                     .containsExactly(3L, ArticleVisibility.PUBLIC);
+        }
+    }
+
+    @Test
+    void r7UpgradeSqlPreservesValidInboxAndStandaloneBarriersWhileHealingProvenCandidatePollutionIdempotently() {
+        String dbName = "search_upgrade_r7_pre_" + UUID.randomUUID().toString().replace("-", "");
+        HikariConfig hc = new HikariConfig();
+        hc.setJdbcUrl("jdbc:h2:mem:" + dbName
+                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1");
+        hc.setDriverClassName("org.h2.Driver");
+        hc.setUsername("sa");
+        hc.setPassword("");
+
+        try (HikariDataSource ds = new HikariDataSource(hc)) {
+            new ResourceDatabasePopulator(new ClassPathResource("db/search-consumer-schema.sql")).execute(ds);
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+
+            long t0 = 1700000000000L;
+            long tJob = t0 + 10_000L;
+            long tPollute = tJob + 1_000L;
+            long tCounter = tPollute + 500L;
+
+            jdbc.update("""
+                    INSERT INTO search_index_generation (
+                        alias_name, active_generation, active_physical_index, require_cold_visibility_guard,
+                        cutover_state, active_cache_invalidation_status, active_cache_invalidation_attempts, updated_at_ms
+                    ) VALUES ('knode_articles_search', 1, 'knode_articles_search_g1', 0, 'NORMAL', 'DONE', 0, ?)
+                    """, t0);
+            jdbc.update("""
+                    INSERT INTO search_rebuild_job (
+                        job_id, alias_name, active_lock_key, client_request_id,
+                        snapshot_done, snapshot_pages_imported, snapshot_items_imported,
+                        last_commit_sequence, incremental_commits_applied, incremental_events_applied,
+                        source_generation, source_physical_index, candidate_generation, candidate_physical_index,
+                        phase, lease_owner, lease_until_ms, lease_generation,
+                        alias_switch_uncertain, switch_attempts, created_at_ms, updated_at_ms
+                    ) VALUES (
+                        'rb-r7-failed-g2', 'knode_articles_search', NULL, 'req-r7-g2',
+                        1, 1, 6, 3, 1, 3, 1, 'knode_articles_search_g1', 2, 'knode_articles_search_g2',
+                        'FAILED', 'i1', ?, 1, 0, 0, ?, ?
+                    )
+                    """, tCounter, tJob, tCounter);
+
+            // Activated g1 projections: 204, 205, 206 at PUBLIC v1; 208 at PUBLIC v3 (missing barrier); 209 at PUBLIC v1.
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility,
+                        counter_revision, view_count, projection_revision, title, summary, content, updated_at_ms
+                    ) VALUES
+                        (1, 204, 1, 1, 'PUBLIC', 0, 1, 1, 'A204 V1', 'S', 'B', ?),
+                        (1, 205, 1, 1, 'PUBLIC', 0, 1, 1, 'A205 V1', 'S', 'B', ?),
+                        (1, 206, 1, 1, 'PUBLIC', 0, 1, 1, 'A206 V1', 'S', 'B', ?),
+                        (1, 208, 1, 3, 'PUBLIC', 0, 3, 1, 'A208 V3', 'S', 'B', ?),
+                        (1, 209, 1, 1, 'PUBLIC', 0, 1, 1, 'A209 V1', 'S', 'B', ?)
+                    """, t0, t0, t0, t0, t0);
+
+            // 201: standalone DELETED v7 + earlier APPLIED ArticleDeleted v7 in inbox + candidate g2 DELETED v7 tombstone.
+            jdbc.update("""
+                    INSERT INTO search_event_inbox (
+                        event_id, stream_record_id, event_type, schema_version, aggregate_type, aggregate_id,
+                        source_revision, visibility, status, received_at_ms, processed_at_ms
+                    ) VALUES ('evt-201-del-v7', '1-0', 'ArticleDeleted', 2, 'ARTICLE', '201', 7, 'DELETED', 'APPLIED', ?, ?)
+                    """, t0, t0);
+
+            // Unactivated candidate g2 projections:
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility,
+                        counter_revision, view_count, projection_revision, title, summary, content, updated_at_ms
+                    ) VALUES
+                        (2, 201, 1, 7, 'DELETED', 0, 0, 1, NULL, NULL, NULL, ?),
+                        (2, 202, 1, 9, 'PUBLIC', 7, 700, 2, 'A202 V9', 'S', 'B', ?),
+                        (2, 203, 1, 7, 'DELETED', 0, 0, 1, NULL, NULL, NULL, ?),
+                        (2, 204, 1, 2, 'PUBLIC', 0, 5, 1, 'A204 V2', 'S', 'B', ?),
+                        (2, 205, 1, 2, 'PUBLIC', 4, 40, 2, 'A205 V2', 'S', 'B', ?),
+                        (2, 206, 1, 2, 'DELETED', 0, 0, 1, NULL, NULL, NULL, ?),
+                        (2, 207, 1, 1, 'PUBLIC', 0, 1, 1, 'A207 New', 'S', 'B', ?),
+                        (2, 209, 1, 3, 'PUBLIC', 0, 9, 2, 'A209 V3', 'S', 'B', ?)
+                    """, tPollute, tCounter, tPollute, tPollute, tCounter, tPollute, tPollute, tCounter);
+
+            // Candidate rebuild logs:
+            // - 201: ArticleDeleted v7 at tPollute (must STILL be protected by inbox APPLIED ArticleDeleted v7!)
+            // - 202: ONLY ARTICLE_COUNTER v7 at tPollute (must NOT clear standalone WITHDRAWN v7!)
+            // - 203: NO log at t0 (and barrier t0 < tJob -> must preserve standalone DELETED v7!)
+            // - 205: ARTICLE_COUNTER at tCounter explaining u.updated_at_ms > barrier.updated_at_ms (proven snapshot!)
+            // - 206: ArticleDeleted v2 at tPollute (proven incremental pollution!)
+            jdbc.update("""
+                    INSERT INTO search_rebuild_event_log (
+                        candidate_generation, event_id, commit_sequence, event_type,
+                        aggregate_type, aggregate_id, source_revision, status, applied_at_ms
+                    ) VALUES
+                        (2, 'rb-evt-201-d7', 1, 'ArticleDeleted', 'ARTICLE', '201', 7, 'APPLIED', ?),
+                        (2, 'rb-evt-202-c7', 2, 'ArticleCounterChanged', 'ARTICLE_COUNTER', '202', 7, 'APPLIED', ?),
+                        (2, 'rb-evt-205-c4', 3, 'ArticleCounterChanged', 'ARTICLE_COUNTER', '205', 4, 'APPLIED', ?),
+                        (2, 'rb-evt-206-d2', 4, 'ArticleDeleted', 'ARTICLE', '206', 2, 'APPLIED', ?)
+                    """, tPollute, tPollute, tCounter, tPollute);
+
+            // Seed barriers:
+            jdbc.update("""
+                    INSERT INTO search_article_version_barrier (
+                        article_id, max_content_revision, last_visibility, updated_at_ms
+                    ) VALUES
+                        (201, 7, 'DELETED', ?),
+                        (202, 7, 'WITHDRAWN', ?),
+                        (203, 7, 'DELETED', ?),
+                        (204, 2, 'PUBLIC', ?),
+                        (205, 2, 'PUBLIC', ?),
+                        (206, 2, 'DELETED', ?),
+                        (207, 1, 'PUBLIC', ?),
+                        (209, 2, 'PUBLIC', ?)
+                    """, tPollute, tPollute, t0, tPollute, tPollute, tPollute, tPollute, tPollute);
+
+            ResourceDatabasePopulator populator = new ResourceDatabasePopulator(
+                    new ClassPathResource("db/search-rebuild-03-r6-upgrade.sql"));
+            populator.execute(ds);
+            // Execute twice idempotently.
+            populator.execute(ds);
+
+            SearchConsumerRepository repo = new SearchConsumerRepository(jdbc, new ObjectMapper());
+            // Protected historical barriers:
+            assertThat(repo.findVersionBarrier(201L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(7L, ArticleVisibility.DELETED);
+            assertThat(repo.findVersionBarrier(202L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(7L, ArticleVisibility.WITHDRAWN);
+            assertThat(repo.findVersionBarrier(203L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(7L, ArticleVisibility.DELETED);
+            // Unprovable case (209: snapshot v2 overwritten by v3 with no v2 log) retains protection!
+            assertThat(repo.findVersionBarrier(209L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(2L, ArticleVisibility.PUBLIC);
+
+            // Proven candidate pollution healed / removed:
+            assertThat(repo.findVersionBarrier(204L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(1L, ArticleVisibility.PUBLIC);
+            assertThat(repo.findVersionBarrier(205L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(1L, ArticleVisibility.PUBLIC);
+            assertThat(repo.findVersionBarrier(206L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(1L, ArticleVisibility.PUBLIC);
+            assertThat(repo.findVersionBarrier(207L)).isEmpty();
+
+            // Missing activated barrier backfilled:
+            assertThat(repo.findVersionBarrier(208L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(3L, ArticleVisibility.PUBLIC);
+        }
+    }
+
+    @Test
+    void r7UpgradeSqlRestoresInboxBackedDeleteAndWithdrawnBarriersAfterBuggyR6UpgradeIdempotently() {
+        String dbName = "search_upgrade_r7_post_r6_" + UUID.randomUUID().toString().replace("-", "");
+        HikariConfig hc = new HikariConfig();
+        hc.setJdbcUrl("jdbc:h2:mem:" + dbName
+                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1");
+        hc.setDriverClassName("org.h2.Driver");
+        hc.setUsername("sa");
+        hc.setPassword("");
+
+        try (HikariDataSource ds = new HikariDataSource(hc)) {
+            new ResourceDatabasePopulator(new ClassPathResource("db/search-consumer-schema.sql")).execute(ds);
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+
+            long t0 = 1700000000000L;
+            jdbc.update("""
+                    INSERT INTO search_index_generation (
+                        alias_name, active_generation, active_physical_index, require_cold_visibility_guard,
+                        cutover_state, active_cache_invalidation_status, active_cache_invalidation_attempts, updated_at_ms
+                    ) VALUES ('knode_articles_search', 1, 'knode_articles_search_g1', 0, 'NORMAL', 'DONE', 0, ?)
+                    """, t0);
+
+            // Simulate post-buggy-R6 state:
+            // - 301 had APPLIED ArticleDeleted v7 in inbox, no activated projection, and old R6 SQL deleted its barrier!
+            // - 302 had APPLIED ArticleVisibilityChanged WITHDRAWN v4 in inbox, activated g1 only had PUBLIC v1,
+            //   and old R6 SQL rolled its barrier down to PUBLIC v1!
+            jdbc.update("""
+                    INSERT INTO search_event_inbox (
+                        event_id, stream_record_id, event_type, schema_version, aggregate_type, aggregate_id,
+                        source_revision, visibility, status, received_at_ms, processed_at_ms
+                    ) VALUES
+                        ('evt-301-del-v7', '1-0', 'ArticleDeleted', 2, 'ARTICLE', '301', 7, 'DELETED', 'APPLIED', ?, ?),
+                        ('evt-302-wd-v4', '2-0', 'ArticleVisibilityChanged', 2, 'ARTICLE', '302', 4, 'WITHDRAWN', 'APPLIED', ?, ?)
+                    """, t0, t0, t0 + 100, t0 + 100);
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility,
+                        counter_revision, view_count, projection_revision, title, summary, content, updated_at_ms
+                    ) VALUES (1, 302, 1, 1, 'PUBLIC', 0, 1, 1, 'A302 V1', 'S', 'B', ?)
+                    """, t0);
+            jdbc.update("""
+                    INSERT INTO search_article_version_barrier (
+                        article_id, max_content_revision, last_visibility, updated_at_ms
+                    ) VALUES (302, 1, 'PUBLIC', ?)
+                    """, t0);
+
+            ResourceDatabasePopulator populator = new ResourceDatabasePopulator(
+                    new ClassPathResource("db/search-rebuild-03-r6-upgrade.sql"));
+            populator.execute(ds);
+            populator.execute(ds);
+
+            SearchConsumerRepository repo = new SearchConsumerRepository(jdbc, new ObjectMapper());
+            assertThat(repo.findVersionBarrier(301L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(7L, ArticleVisibility.DELETED);
+            assertThat(repo.findVersionBarrier(302L).orElseThrow())
+                    .extracting(ArticleVersionBarrier::maxContentRevision, ArticleVersionBarrier::lastVisibility)
+                    .containsExactly(4L, ArticleVisibility.WITHDRAWN);
         }
     }
 

@@ -708,6 +708,14 @@ class SearchRebuildR6RegressionsTest {
                     (2, 4004, 1, 1, 'PUBLIC', 0, 1, 1, 'Art4004 BrandNewV1', 'S', 'B', ?),
                     (2, 4007, 1, 2, 'DELETED', 0, 0, 1, NULL, NULL, NULL, ?)
                 """, nowMs, nowMs, nowMs, nowMs);
+        jdbcTemplate.update("""
+                INSERT INTO search_rebuild_event_log (
+                    candidate_generation, event_id, commit_sequence, event_type,
+                    aggregate_type, aggregate_id, source_revision, status, applied_at_ms
+                ) VALUES
+                    (2, 'evt-rb-g2-4002-d2', 1, 'ArticleDeleted', 'ARTICLE', '4002', 2, 'APPLIED', ?),
+                    (2, 'evt-rb-g2-4007-d2', 2, 'ArticleDeleted', 'ARTICLE', '4007', 2, 'APPLIED', ?)
+                """, nowMs, nowMs);
 
         jdbcTemplate.update("""
                 UPDATE search_article_version_barrier

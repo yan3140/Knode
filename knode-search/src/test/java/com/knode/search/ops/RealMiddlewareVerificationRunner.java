@@ -59,7 +59,7 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Standalone live-middleware verification runner for SEARCH-04.
+ * Standalone live-middleware verification runner for SEARCH-04 / SEARCH-03-R6 / SEARCH-03-R7.
  * Connects to real Redis and real Elasticsearch via environment variables using
  * strictly isolated KNODE_ENVIRONMENT, Redis key prefix, Stream key, ES test alias
  * and physical index, synthetic data, isolated H2 database, and loopback stubs.
@@ -526,7 +526,263 @@ public final class RealMiddlewareVerificationRunner {
             System.out.println("[LIVE-IT] CHAIN 4 (R6) PASSED: candidate g2 snapshot(900101 v3)+incDelete(900103 v5) first"
                     + " -> active g1 barriers unpolluted -> Stream APPLIED+XACK -> real ES g1 updated"
                     + " -> public search hit(900101 v3)=1 & hit(deleted 900103 v5)=0");
-            System.out.println("[LIVE-IT] ALL 4 REAL-MIDDLEWARE CHAINS VERIFIED SUCCESSFULLY! env=" + envName + " alias=" + esAlias);
+
+            // =========================================================================
+            // CHAIN 5 (SEARCH-03-R7):
+            //   (a) Legacy mis-ACKed STALE_IGNORED recovery (PUBLIC v2 + TOMBSTONE v2) -> real ES -> search
+            //   (b) Normal late STALE_IGNORED -> NOOP
+            //   (c) Standalone WITHDRAWN v7 protected against unactivated candidate g2 (PUBLIC v9 + ARTICLE_COUNTER v7)
+            // =========================================================================
+            long r7Now = System.currentTimeMillis();
+            // Seed 900104 (v1) and 900105 (v1) onto active g1 & real ES first
+            String doc900104V1 = MAPPER.writeValueAsString(SearchIndexDocument.upsert(
+                    900104L, 1L, "历史旧版文章 R7StaleBefore900104", "旧摘要", "旧正文内容",
+                    10L, "架构", List.of("R7"), null, 5L, Instant.parse("2026-11-28T01:00:00Z").toEpochMilli()));
+            String doc900105V1 = MAPPER.writeValueAsString(SearchIndexDocument.upsert(
+                    900105L, 1L, "待下线历史文章 R7BeforeTombstone900105", "删除前可见摘要", "删除前可见正文",
+                    10L, "架构", List.of("R7"), null, 6L, Instant.parse("2026-11-28T01:05:00Z").toEpochMilli()));
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility, counter_revision,
+                        view_count, projection_revision, title, summary, content, category_id, category_name,
+                        tag_names_json, thumbnail, is_top, create_time_ms, updated_at_ms
+                    ) VALUES
+                        (1, 900104, 1, 1, 'PUBLIC', 1, 5, 1, '历史旧版文章 R7StaleBefore900104', '旧摘要', '旧正文内容', 10, '架构', '["R7"]', NULL, '0', ?, ?),
+                        (1, 900105, 1, 1, 'PUBLIC', 1, 6, 1, '待下线历史文章 R7BeforeTombstone900105', '删除前可见摘要', '删除前可见正文', 10, '架构', '["R7"]', NULL, '0', ?, ?)
+                    """,
+                    Instant.parse("2026-11-28T01:00:00Z").toEpochMilli(), r7Now - 20_000L,
+                    Instant.parse("2026-11-28T01:05:00Z").toEpochMilli(), r7Now - 20_000L);
+            jdbc.update("""
+                    INSERT INTO search_index_task (
+                        index_generation, target_index, article_id, target_projection_revision, operation,
+                        payload_json, status, attempts, max_attempts, due_at_ms, lease_until_ms,
+                        claim_generation, last_error, es_applied_revision,
+                        cache_invalidation_status, cache_invalidation_attempts, updated_at_ms
+                    ) VALUES
+                        (1, ?, 900104, 1, 'UPSERT', ?, 'PENDING', 0, 5, ?, NULL, 0, NULL, 0, 'NONE', 0, ?),
+                        (1, ?, 900105, 1, 'UPSERT', ?, 'PENDING', 0, 5, ?, NULL, 0, NULL, 0, 'NONE', 0, ?)
+                    """,
+                    esPhysicalG1, doc900104V1, r7Now - 20_000L, r7Now - 20_000L,
+                    esPhysicalG1, doc900105V1, r7Now - 20_000L, r7Now - 20_000L);
+            SearchIndexTaskWorker.WorkerCycleSummary workR7Seed = indexWorker.processOnce();
+            require(workR7Seed.appliedCount() == 2 && workR7Seed.failedCount() == 0,
+                    "Unexpected workR7Seed: " + workR7Seed);
+            esAdmin.refreshIndex(esPhysicalG1);
+
+            contentStub.putCurrentPublicArticle(LoopbackContentSnapshotStub.snapshotItem(
+                    900104L, 1L, "历史旧版文章 R7StaleBefore900104", "旧摘要", "旧正文内容",
+                    10L, "架构", List.of("R7"), 5L, 1L, "2026-11-28T01:00:00Z"));
+            contentStub.putCurrentPublicArticle(LoopbackContentSnapshotStub.snapshotItem(
+                    900105L, 1L, "待下线历史文章 R7BeforeTombstone900105", "删除前可见摘要", "删除前可见正文",
+                    10L, "架构", List.of("R7"), 6L, 1L, "2026-11-28T01:05:00Z"));
+
+            // Confirm 900105 is initially searchable in real ES before tombstone recovery
+            String q900105Before = URLEncoder.encode("R7BeforeTombstone900105", StandardCharsets.UTF_8);
+            HttpResponse<String> search900105Before = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/api/blog/search?keyword=" + q900105Before)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require("1".equals(MAPPER.readTree(search900105Before.body()).path("data").path("total").asText()),
+                    "Expected 900105 visible before R7 tombstone recovery: " + search900105Before.body());
+
+            // Seed legacy mis-ACKed STALE_IGNORED v2 rows:
+            //   900104 -> proven pre-R6 candidate g2 snapshot pollution (PUBLIC v2, matching timestamp >= rbJob.createdAtMs)
+            //   900105 -> conservatively retained barrier (DELETED v2, no g2 row) while active g1 is still at v1
+            long r7PolluteTs = Math.max(r7Now, rbJob.createdAtMs() + 100L);
+            String evtR7StalePub = UUID.randomUUID().toString();
+            String evtR7StaleDel = UUID.randomUUID().toString();
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility, counter_revision,
+                        view_count, projection_revision, title, summary, content, category_id, category_name,
+                        tag_names_json, thumbnail, is_top, create_time_ms, updated_at_ms
+                    ) VALUES (2, 900104, 1, 2, 'PUBLIC', 2, 42, 1, 'Candidate g2 900104 v2', 's', 'c', 10, '架构', '["R7"]', NULL, '0', ?, ?)
+                    """, r7PolluteTs, r7PolluteTs);
+            jdbc.update("""
+                    INSERT INTO search_article_version_barrier (
+                        article_id, max_content_revision, last_visibility, updated_at_ms
+                    ) VALUES
+                        (900104, 2, 'PUBLIC', ?),
+                        (900105, 2, 'DELETED', ?)
+                    """, r7PolluteTs, r7Now - 10_000L);
+            jdbc.update("""
+                    INSERT INTO search_event_inbox (
+                        event_id, event_type, schema_version, aggregate_type, aggregate_id, source_revision,
+                        stream_record_id, status, received_at_ms, processed_at_ms
+                    ) VALUES
+                        (?, 'ArticleContentChanged', 2, 'ARTICLE', '900104', 2, '900104-2', 'STALE_IGNORED', ?, ?),
+                        (?, 'ArticleDeleted', 2, 'ARTICLE', '900105', 2, '900105-2', 'STALE_IGNORED', ?, ?)
+                    """,
+                    evtR7StalePub, r7Now - 9_000L, r7Now - 9_000L,
+                    evtR7StaleDel, r7Now - 9_000L, r7Now - 9_000L);
+
+            contentStub.putCurrentPublicArticle(LoopbackContentSnapshotStub.snapshotItem(
+                    900104L, 2L, "历史误ACK定向恢复验证 R7RecoverPublicV2", "R7 权威快照恢复摘要",
+                    "通过 SEARCH-OPS 定向恢复补建活动代 g1 文档并写入真实 ES",
+                    10L, "架构", List.of("R7", "Recovery"), 42L, 2L, "2026-11-28T02:00:00Z"));
+            contentStub.putCurrentHiddenArticle(900105L, "DELETED", 2L);
+
+            // Discover via GET /internal/v1/ops/consumers/events?status=STALE_IGNORED
+            HttpResponse<String> staleListResp = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1/ops/consumers/events?status=STALE_IGNORED&limit=20"))
+                            .header("Authorization", "Bearer " + opsToken).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(staleListResp.statusCode() == 200, "ops STALE_IGNORED list failed: " + staleListResp.statusCode());
+            String staleListBody = staleListResp.body();
+            require(staleListBody.contains(evtR7StalePub) && staleListBody.contains(evtR7StaleDel),
+                    "Expected both legacy STALE_IGNORED events in ops list: " + staleListBody);
+
+            // Recover 900104 (PUBLIC v2) and 900105 (DELETED v2 -> tombstone)
+            HttpResponse<String> recPubResp = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1/ops/consumers/" + evtR7StalePub + "/retry"))
+                            .header("Authorization", "Bearer " + opsToken)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString("{\"replayRequestId\":\"live-it-r7-pub-1\",\"operator\":\"live-it\"}"))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(recPubResp.statusCode() == 200, "R7 public recovery failed: " + recPubResp.body());
+            JsonNode recPubJson = MAPPER.readTree(recPubResp.body());
+            require("ACCEPTED".equals(recPubJson.path("status").asText())
+                            && "UPSERT_ENQUEUED".equals(recPubJson.path("recoveryAction").asText())
+                            && "2".equals(recPubJson.path("authoritativeRevision").asText()),
+                    "Unexpected R7 public recovery body: " + recPubResp.body());
+
+            HttpResponse<String> recDelResp = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1/ops/consumers/" + evtR7StaleDel + "/retry"))
+                            .header("Authorization", "Bearer " + opsToken)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString("{\"replayRequestId\":\"live-it-r7-del-1\",\"operator\":\"live-it\"}"))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(recDelResp.statusCode() == 200, "R7 tombstone recovery failed: " + recDelResp.body());
+            JsonNode recDelJson = MAPPER.readTree(recDelResp.body());
+            require("ACCEPTED".equals(recDelJson.path("status").asText())
+                            && "TOMBSTONE_ENQUEUED".equals(recDelJson.path("recoveryAction").asText())
+                            && "DELETED".equals(recDelJson.path("authoritativeVisibility").asText()),
+                    "Unexpected R7 tombstone recovery body: " + recDelResp.body());
+
+            SearchIndexTaskWorker.WorkerCycleSummary workR7Rec = indexWorker.processOnce();
+            require(workR7Rec.appliedCount() == 2 && workR7Rec.failedCount() == 0,
+                    "Unexpected workR7Rec: " + workR7Rec);
+            esAdmin.refreshIndex(esPhysicalG1);
+
+            String qR7Pub = URLEncoder.encode("R7RecoverPublicV2", StandardCharsets.UTF_8);
+            HttpResponse<String> searchR7Pub = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/api/blog/search?keyword=" + qR7Pub)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            JsonNode sR7PubJson = MAPPER.readTree(searchR7Pub.body());
+            require("1".equals(sR7PubJson.path("data").path("total").asText())
+                            && "900104".equals(sR7PubJson.path("data").path("rows").get(0).path("id").asText()),
+                    "Expected recovered 900104 v2 hit in real ES: " + searchR7Pub.body());
+
+            HttpResponse<String> search900105After = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/api/blog/search?keyword=" + q900105Before)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require("0".equals(MAPPER.readTree(search900105After.body()).path("data").path("total").asText()),
+                    "Expected 0 hits for tombstoned 900105 after R7 recovery: " + search900105After.body());
+
+            HttpResponse<String> esDoc900105 = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG1 + "/_doc/900105")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(esDoc900105.statusCode() == 200, "Expected tombstone doc 900105 in ES: " + esDoc900105.statusCode());
+            JsonNode src900105 = MAPPER.readTree(esDoc900105.body()).path("_source");
+            require(!src900105.path("searchable").asBoolean(true)
+                            && (src900105.path("title").isMissingNode() || src900105.path("title").isNull())
+                            && (src900105.path("summary").isMissingNode() || src900105.path("summary").isNull())
+                            && (src900105.path("content").isMissingNode() || src900105.path("content").isNull()),
+                    "Expected tombstone-only ES doc with 0 body fields for 900105: " + esDoc900105.body());
+
+            // (b) Normal late STALE_IGNORED (v1 <= active g1 v2) -> NOOP
+            String evtR7LateStale = UUID.randomUUID().toString();
+            jdbc.update("""
+                    INSERT INTO search_event_inbox (
+                        event_id, event_type, schema_version, aggregate_type, aggregate_id, source_revision,
+                        stream_record_id, status, received_at_ms, processed_at_ms
+                    ) VALUES (?, 'ArticleContentChanged', 2, 'ARTICLE', '900104', 1, '900104-late-1', 'STALE_IGNORED', ?, ?)
+                    """, evtR7LateStale, r7Now, r7Now);
+            HttpResponse<String> lateNoopResp = http.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1/ops/consumers/" + evtR7LateStale + "/retry"))
+                            .header("Authorization", "Bearer " + opsToken)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString("{\"replayRequestId\":\"live-it-r7-late-1\",\"operator\":\"live-it\"}"))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(lateNoopResp.statusCode() == 200
+                            && "NOOP".equals(MAPPER.readTree(lateNoopResp.body()).path("status").asText())
+                            && "EVENT_STALE_IGNORED".equals(MAPPER.readTree(lateNoopResp.body()).path("reason").asText()),
+                    "Expected NOOP(STALE_NOT_ELIGIBLE) for normal late STALE_IGNORED: " + lateNoopResp.body());
+
+            // (c) Standalone WITHDRAWN v7 on 900106 protected against unactivated candidate g2 (PUBLIC v9 + ARTICLE_COUNTER v7)
+            jdbc.update("""
+                    INSERT INTO search_article_version_barrier (
+                        article_id, max_content_revision, last_visibility, updated_at_ms
+                    ) VALUES (900106, 7, 'WITHDRAWN', ?)
+                    """, r7Now - 30_000L);
+            jdbc.update("""
+                    INSERT INTO search_article_projection (
+                        index_generation, article_id, has_content, content_revision, visibility, counter_revision,
+                        view_count, projection_revision, title, summary, content, category_id, category_name,
+                        tag_names_json, thumbnail, is_top, create_time_ms, updated_at_ms
+                    ) VALUES (2, 900106, 1, 9, 'PUBLIC', 7, 7, 1, 'Candidate g2 v9', 's', 'c', 10, '架构', '[]', NULL, '0', ?, ?)
+                    """, r7Now - 10_000L, r7Now - 10_000L);
+            jdbc.update("""
+                    INSERT INTO search_rebuild_event_log (
+                        candidate_generation, event_id, commit_sequence, event_type, aggregate_type, aggregate_id, source_revision,
+                        status, applied_at_ms
+                    ) VALUES (2, ?, 99, 'ArticleViewCountChanged', 'ARTICLE_COUNTER', '900106', 7, 'APPLIED', ?)
+                    """, UUID.randomUUID().toString(), r7Now - 5_000L);
+
+            String evtLate900106 = UUID.randomUUID().toString();
+            String late900106Json = """
+                    {
+                      "eventId": "%s",
+                      "eventType": "ArticlePublished",
+                      "schemaVersion": 2,
+                      "aggregateType": "ARTICLE",
+                      "aggregateId": "900106",
+                      "sourceRevision": "6",
+                      "publicationFactId": "pub-900106-v6",
+                      "occurredAt": "2026-11-28T03:00:00Z",
+                      "producer": "knode-content",
+                      "visibility": "PUBLIC",
+                      "payload": {
+                        "articleId": "900106",
+                        "authorId": "1",
+                        "title": "Late Resurrect Attempt 900106",
+                        "summary": "must stay blocked",
+                        "content": "must stay blocked",
+                        "thumbnail": null,
+                        "isTop": "0",
+                        "isComment": "1",
+                        "category": {"id": "10", "name": "架构"},
+                        "tags": [],
+                        "createTime": "2026-11-28T03:00:00Z",
+                        "publishedAt": "2026-11-28T03:00:00Z",
+                        "viewCount": "1",
+                        "counterRevision": "1"
+                      }
+                    }
+                    """.formatted(evtLate900106);
+            redis.xadd(streamKey, Map.of("event", late900106Json));
+            ContentStreamConsumer.PollSummary pollR7Protect = streamConsumer.pollOnce();
+            require(pollR7Protect.freshCount() == 1 && pollR7Protect.ackedCount() == 1 && pollR7Protect.dbFailedCount() == 0,
+                    "Unexpected pollR7Protect: " + pollR7Protect);
+            require("STALE_IGNORED".equals(consumerRepo.findInboxStatus(evtLate900106).orElse("")),
+                    "Late PUBLIC v6 MUST be STALE_IGNORED by protected standalone WITHDRAWN v7 barrier");
+            require(consumerRepo.findVersionBarrier(900106L).orElseThrow().maxContentRevision() == 7L
+                            && "WITHDRAWN".equals(consumerRepo.findVersionBarrier(900106L).orElseThrow().lastVisibility().name()),
+                    "Standalone WITHDRAWN v7 barrier MUST stay intact");
+            require(consumerRepo.findIndexTask(1L, 900106L).isEmpty(),
+                    "Protected standalone WITHDRAWN v7 MUST NOT enqueue ES task on active g1");
+            HttpResponse<String> esDoc900106 = http.send(
+                    HttpRequest.newBuilder(URI.create(esUrl + "/" + esPhysicalG1 + "/_doc/900106")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            require(esDoc900106.statusCode() == 404,
+                    "Protected standalone WITHDRAWN 900106 MUST NOT appear in ES g1, status=" + esDoc900106.statusCode());
+
+            System.out.println("[LIVE-IT] CHAIN 5 (R7) PASSED: legacy STALE_IGNORED list+recover(900104 PUBLIC v2 hit=1, "
+                    + "900105 DELETED v2 tombstone searchable=false body=0 hit=0) + normal late STALE_IGNORED=NOOP "
+                    + "+ standalone WITHDRAWN v7 protected against candidate g2 PUBLIC v9/ARTICLE_COUNTER v7 (late v6 STALE_IGNORED, ES 404)");
+            System.out.println("[LIVE-IT] ALL 5 REAL-MIDDLEWARE CHAINS VERIFIED SUCCESSFULLY! env=" + envName + " alias=" + esAlias);
         } finally {
             if (ctx != null) {
                 try {

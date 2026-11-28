@@ -15,8 +15,11 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -309,10 +312,11 @@ public class SearchConsumerRepository {
 
     /**
      * Resolves the effective cross-generation barrier for an active-generation read/write path.
-     * If a legacy pre-R6 unactivated candidate generation polluted search_article_version_barrier
-     * beyond all activated generations, restores the effective barrier strictly to the highest
-     * activated-generation projection (or (0, NONE) if none exists), while preserving all valid
-     * activated and standalone delete barriers.
+     * Strictly preserves all activated-generation barriers, all barriers backed by APPLIED online
+     * ARTICLE inbox facts, and any standalone barrier whose provenance cannot be positively attributed
+     * to a pre-R6 unactivated candidate rebuild transaction. Only positively proven pre-R6 unactivated
+     * candidate pollution is rolled back to the highest valid floor across activated generations and
+     * APPLIED online ARTICLE inbox facts (or (0, NONE) if none exists).
      */
     public ArticleVersionBarrier resolveEffectiveVersionBarrier(
             long activeGeneration,
@@ -324,41 +328,65 @@ public class SearchConsumerRepository {
             return rawBarrier;
         }
         Set<Long> activatedGens = findActivatedGenerations(activeGeneration);
-        List<Long> unactivatedGens = findUnactivatedCandidateGenerations(activatedGens);
-        if (unactivatedGens.isEmpty()) {
+        Map<Long, UnactivatedCandidateJob> unactivatedJobs = findUnactivatedCandidateJobs(activatedGens);
+        if (unactivatedJobs.isEmpty()) {
             return rawBarrier;
         }
 
-        ProjectionVersionSnapshot bestActivated = findHighestProjectionVersion(activatedGens, articleId);
-        if (bestActivated != null
+        VersionSnapshot bestActivated = findHighestProjectionVersion(activatedGens, articleId);
+        VersionSnapshot bestInbox = findHighestAppliedOnlineArticleInboxVersion(articleId);
+        VersionSnapshot bestValid = maxVersion(bestActivated, bestInbox);
+        if (bestValid != null
                 && compareBarrierVersion(
-                        bestActivated.contentRevision(), bestActivated.visibility(),
+                        bestValid.contentRevision(), bestValid.visibility(),
                         rawBarrier.maxContentRevision(), rawBarrier.lastVisibility()) >= 0) {
             return rawBarrier;
         }
 
-        List<ProjectionVersionSnapshot> unactivatedProjections = findProjectionVersions(unactivatedGens, articleId);
-        boolean explainedByUnactivatedCandidate = false;
-        for (ProjectionVersionSnapshot candidate : unactivatedProjections) {
-            if (candidate.contentRevision() == rawBarrier.maxContentRevision()
-                    && candidate.visibility() == rawBarrier.lastVisibility()) {
-                explainedByUnactivatedCandidate = true;
+        List<CandidateProjectionSnapshot> unactivatedProjections =
+                findCandidateProjectionVersions(new ArrayList<>(unactivatedJobs.keySet()), articleId);
+        boolean provenCandidatePollution = false;
+        for (CandidateProjectionSnapshot candidate : unactivatedProjections) {
+            UnactivatedCandidateJob job = unactivatedJobs.get(candidate.indexGeneration());
+            if (job == null || rawBarrier.updatedAtMs() < job.createdAtMs()) {
+                continue;
+            }
+            // Proven Path 1: Pre-R6 incremental rebuild ARTICLE event log written in the exact same transaction.
+            boolean projectionMatchesOrAhead = candidate.contentRevision() > rawBarrier.maxContentRevision()
+                    || (candidate.contentRevision() == rawBarrier.maxContentRevision()
+                    && candidate.visibility() == rawBarrier.lastVisibility());
+            if (projectionMatchesOrAhead
+                    && existsProvenIncrementalRebuildArticleEvent(
+                            candidate.indexGeneration(),
+                            articleId,
+                            rawBarrier.maxContentRevision(),
+                            rawBarrier.lastVisibility(),
+                            rawBarrier.updatedAtMs())) {
+                provenCandidatePollution = true;
                 break;
             }
-            if (candidate.contentRevision() > rawBarrier.maxContentRevision()
-                    && (rawBarrier.lastVisibility() == ArticleVisibility.PUBLIC
-                    || existsAppliedRebuildEventForRevision(
-                            candidate.indexGeneration(), articleId, rawBarrier.maxContentRevision()))) {
-                explainedByUnactivatedCandidate = true;
-                break;
+            // Proven Path 2: Pre-R6 snapshot import PUBLIC row written in the exact same transaction
+            // (optionally followed by an APPLIED ARTICLE_COUNTER event updating candidate.updated_at_ms).
+            if (rawBarrier.lastVisibility() == ArticleVisibility.PUBLIC
+                    && job.snapshotItemsImported() > 0L
+                    && candidate.contentRevision() == rawBarrier.maxContentRevision()
+                    && candidate.visibility() == ArticleVisibility.PUBLIC) {
+                if (candidate.updatedAtMs() == rawBarrier.updatedAtMs()
+                        || (candidate.updatedAtMs() > rawBarrier.updatedAtMs()
+                        && candidate.counterRevision() > 0L
+                        && existsAppliedRebuildCounterEventAt(
+                                candidate.indexGeneration(), articleId, candidate.updatedAtMs()))) {
+                    provenCandidatePollution = true;
+                    break;
+                }
             }
         }
-        if (!explainedByUnactivatedCandidate) {
+        if (!provenCandidatePollution) {
             return rawBarrier;
         }
 
-        long healedRev = bestActivated == null ? 0L : bestActivated.contentRevision();
-        ArticleVisibility healedVis = bestActivated == null ? ArticleVisibility.NONE : bestActivated.visibility();
+        long healedRev = bestValid == null ? 0L : bestValid.contentRevision();
+        ArticleVisibility healedVis = bestValid == null ? ArticleVisibility.NONE : bestValid.visibility();
         if (repairInCurrentTx) {
             jdbcTemplate.update(
                     """
@@ -375,6 +403,35 @@ public class SearchConsumerRepository {
             );
         }
         return new ArticleVersionBarrier(articleId, healedRev, healedVis, nowMs);
+    }
+
+    public static ArticleVisibility deriveInboxArticleVisibility(String eventType, String rawVisibility) {
+        if ("ArticleDeleted".equals(eventType)) {
+            return ArticleVisibility.DELETED;
+        }
+        if ("ArticlePublished".equals(eventType)) {
+            return ArticleVisibility.PUBLIC;
+        }
+        String norm = rawVisibility == null ? "" : rawVisibility.trim().toUpperCase(Locale.ROOT);
+        if ("ArticleContentChanged".equals(eventType)) {
+            if ("DELETED".equals(norm)) {
+                return ArticleVisibility.DELETED;
+            }
+            if ("WITHDRAWN".equals(norm) || "DRAFT".equals(norm)) {
+                return ArticleVisibility.WITHDRAWN;
+            }
+            return ArticleVisibility.PUBLIC;
+        }
+        if ("ArticleVisibilityChanged".equals(eventType)) {
+            if ("DELETED".equals(norm)) {
+                return ArticleVisibility.DELETED;
+            }
+            if ("PUBLIC".equals(norm)) {
+                return ArticleVisibility.PUBLIC;
+            }
+            return ArticleVisibility.WITHDRAWN;
+        }
+        return ArticleVisibility.NONE;
     }
 
     private Set<Long> findActivatedGenerations(long activeGeneration) {
@@ -398,39 +455,92 @@ public class SearchConsumerRepository {
         return gens;
     }
 
-    private List<Long> findUnactivatedCandidateGenerations(Set<Long> activatedGens) {
-        List<Long> raw = jdbcTemplate.query(
+    private Map<Long, UnactivatedCandidateJob> findUnactivatedCandidateJobs(Set<Long> activatedGens) {
+        List<UnactivatedCandidateJob> raw = jdbcTemplate.query(
                 """
-                SELECT DISTINCT candidate_generation
+                SELECT candidate_generation, created_at_ms, snapshot_items_imported
                 FROM search_rebuild_job
                 WHERE phase NOT IN ('CACHE_INVALIDATING', 'COMPLETED')
                 """,
-                (rs, rowNum) -> rs.getLong("candidate_generation")
+                (rs, rowNum) -> new UnactivatedCandidateJob(
+                        rs.getLong("candidate_generation"),
+                        rs.getLong("created_at_ms"),
+                        rs.getLong("snapshot_items_imported")
+                )
         );
-        List<Long> unactivated = new ArrayList<>();
-        for (Long gen : raw) {
-            if (gen != null && !activatedGens.contains(gen)) {
-                unactivated.add(gen);
+        Map<Long, UnactivatedCandidateJob> byGen = new LinkedHashMap<>();
+        for (UnactivatedCandidateJob job : raw) {
+            if (activatedGens.contains(job.candidateGeneration())) {
+                continue;
             }
+            byGen.merge(
+                    job.candidateGeneration(),
+                    job,
+                    (a, b) -> new UnactivatedCandidateJob(
+                            a.candidateGeneration(),
+                            Math.min(a.createdAtMs(), b.createdAtMs()),
+                            Math.max(a.snapshotItemsImported(), b.snapshotItemsImported())
+                    )
+            );
         }
-        return unactivated;
+        return byGen;
     }
 
-    private ProjectionVersionSnapshot findHighestProjectionVersion(Set<Long> generations, long articleId) {
-        List<ProjectionVersionSnapshot> rows = findProjectionVersions(new ArrayList<>(generations), articleId);
-        ProjectionVersionSnapshot best = null;
-        for (ProjectionVersionSnapshot row : rows) {
-            if (best == null
-                    || compareBarrierVersion(
-                            row.contentRevision(), row.visibility(),
-                            best.contentRevision(), best.visibility()) > 0) {
-                best = row;
-            }
+    private VersionSnapshot findHighestProjectionVersion(Set<Long> generations, long articleId) {
+        if (generations == null || generations.isEmpty()) {
+            return null;
+        }
+        List<Long> genList = new ArrayList<>(generations);
+        String placeholders = genList.stream().map(g -> "?").collect(Collectors.joining(", "));
+        Object[] args = new Object[genList.size() + 1];
+        for (int i = 0; i < genList.size(); i++) {
+            args[i] = genList.get(i);
+        }
+        args[genList.size()] = articleId;
+        String sql = "SELECT content_revision, visibility "
+                + "FROM search_article_projection "
+                + "WHERE index_generation IN (" + placeholders + ") "
+                + "AND article_id = ? AND has_content = 1 AND content_revision > 0";
+        List<VersionSnapshot> rows = jdbcTemplate.query(
+                sql,
+                (rs, rowNum) -> new VersionSnapshot(
+                        rs.getLong("content_revision"),
+                        ArticleVisibility.valueOf(rs.getString("visibility"))
+                ),
+                args
+        );
+        VersionSnapshot best = null;
+        for (VersionSnapshot row : rows) {
+            best = maxVersion(best, row);
         }
         return best;
     }
 
-    private List<ProjectionVersionSnapshot> findProjectionVersions(List<Long> generations, long articleId) {
+    private VersionSnapshot findHighestAppliedOnlineArticleInboxVersion(long articleId) {
+        List<VersionSnapshot> rows = jdbcTemplate.query(
+                """
+                SELECT event_type, source_revision, visibility
+                FROM search_event_inbox
+                WHERE aggregate_id = ?
+                  AND UPPER(aggregate_type) = 'ARTICLE'
+                  AND status = 'APPLIED'
+                  AND source_revision > 0
+                  AND event_type IN ('ArticlePublished', 'ArticleContentChanged', 'ArticleVisibilityChanged', 'ArticleDeleted')
+                """,
+                (rs, rowNum) -> new VersionSnapshot(
+                        rs.getLong("source_revision"),
+                        deriveInboxArticleVisibility(rs.getString("event_type"), rs.getString("visibility"))
+                ),
+                Long.toString(articleId)
+        );
+        VersionSnapshot best = null;
+        for (VersionSnapshot row : rows) {
+            best = maxVersion(best, row);
+        }
+        return best;
+    }
+
+    private List<CandidateProjectionSnapshot> findCandidateProjectionVersions(List<Long> generations, long articleId) {
         if (generations == null || generations.isEmpty()) {
             return List.of();
         }
@@ -440,39 +550,89 @@ public class SearchConsumerRepository {
             args[i] = generations.get(i);
         }
         args[generations.size()] = articleId;
-        String sql = "SELECT index_generation, content_revision, visibility "
+        String sql = "SELECT index_generation, content_revision, visibility, counter_revision, updated_at_ms "
                 + "FROM search_article_projection "
                 + "WHERE index_generation IN (" + placeholders + ") "
                 + "AND article_id = ? AND has_content = 1 AND content_revision > 0";
         return jdbcTemplate.query(
                 sql,
-                (rs, rowNum) -> new ProjectionVersionSnapshot(
+                (rs, rowNum) -> new CandidateProjectionSnapshot(
                         rs.getLong("index_generation"),
                         rs.getLong("content_revision"),
-                        ArticleVisibility.valueOf(rs.getString("visibility"))
+                        ArticleVisibility.valueOf(rs.getString("visibility")),
+                        rs.getLong("counter_revision"),
+                        rs.getLong("updated_at_ms")
                 ),
                 args
         );
     }
 
-    private boolean existsAppliedRebuildEventForRevision(
-            long candidateGeneration, long articleId, long sourceRevision) {
+    private boolean existsProvenIncrementalRebuildArticleEvent(
+            long candidateGeneration,
+            long articleId,
+            long sourceRevision,
+            ArticleVisibility barrierVisibility,
+            long barrierUpdatedAtMs) {
+        String eventTypeClause = switch (barrierVisibility) {
+            case DELETED -> "event_type = 'ArticleDeleted'";
+            case WITHDRAWN -> "event_type = 'ArticleVisibilityChanged'";
+            case PUBLIC -> "event_type IN ('ArticlePublished', 'ArticleContentChanged', 'ArticleVisibilityChanged')";
+            case NONE -> null;
+        };
+        if (eventTypeClause == null) {
+            return false;
+        }
+        String sql = "SELECT 1 FROM search_rebuild_event_log "
+                + "WHERE candidate_generation = ? "
+                + "AND UPPER(aggregate_type) = 'ARTICLE' "
+                + "AND aggregate_id = ? "
+                + "AND source_revision = ? "
+                + "AND status = 'APPLIED' "
+                + "AND applied_at_ms = ? "
+                + "AND " + eventTypeClause + " "
+                + "LIMIT 1";
+        List<Integer> rows = jdbcTemplate.query(
+                sql,
+                (rs, rowNum) -> rs.getInt(1),
+                candidateGeneration,
+                Long.toString(articleId),
+                sourceRevision,
+                barrierUpdatedAtMs
+        );
+        return !rows.isEmpty();
+    }
+
+    private boolean existsAppliedRebuildCounterEventAt(
+            long candidateGeneration, long articleId, long appliedAtMs) {
         List<Integer> rows = jdbcTemplate.query(
                 """
                 SELECT 1
                 FROM search_rebuild_event_log
                 WHERE candidate_generation = ?
+                  AND UPPER(aggregate_type) = 'ARTICLE_COUNTER'
                   AND aggregate_id = ?
-                  AND source_revision = ?
                   AND status = 'APPLIED'
+                  AND applied_at_ms = ?
                 LIMIT 1
                 """,
                 (rs, rowNum) -> rs.getInt(1),
                 candidateGeneration,
                 Long.toString(articleId),
-                sourceRevision
+                appliedAtMs
         );
         return !rows.isEmpty();
+    }
+
+    private static VersionSnapshot maxVersion(VersionSnapshot a, VersionSnapshot b) {
+        if (a == null) {
+            return b;
+        }
+        if (b == null) {
+            return a;
+        }
+        return compareBarrierVersion(a.contentRevision(), a.visibility(), b.contentRevision(), b.visibility()) >= 0
+                ? a
+                : b;
     }
 
     private static int compareBarrierVersion(
@@ -484,8 +644,18 @@ public class SearchConsumerRepository {
         return Integer.compare(visibilityRank(leftVis), visibilityRank(rightVis));
     }
 
-    private record ProjectionVersionSnapshot(
-            long indexGeneration, long contentRevision, ArticleVisibility visibility) {
+    private record VersionSnapshot(long contentRevision, ArticleVisibility visibility) {
+    }
+
+    private record UnactivatedCandidateJob(long candidateGeneration, long createdAtMs, long snapshotItemsImported) {
+    }
+
+    private record CandidateProjectionSnapshot(
+            long indexGeneration,
+            long contentRevision,
+            ArticleVisibility visibility,
+            long counterRevision,
+            long updatedAtMs) {
     }
 
     // === Active Stream Inbox & Failure Log ===
